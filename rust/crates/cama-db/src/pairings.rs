@@ -114,7 +114,7 @@ impl PairingsRepository {
         if id1 < id2 { (id1, id2) } else { (id2, id1) }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         #[cfg(test)]
         self.connection_count.fetch_add(1, AtomicOrdering::Relaxed);
         open_runtime_connection(&self.path)

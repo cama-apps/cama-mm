@@ -20,7 +20,7 @@ mod support;
 use support::sha256_hex;
 
 const FIXTURE_MANIFEST: &str = include_str!("fixtures/steam/manifest.json");
-const HERO_SUCCESS: &[u8] = include_bytes!("fixtures/steam/hero_success.txt");
+const HERO_SUCCESS: &[u8] = include_bytes!("fixtures/steam/hero_success.png");
 const SERVICE_UNAVAILABLE: &[u8] = include_bytes!("fixtures/steam/service_unavailable.json");
 
 #[derive(Clone, Copy)]
@@ -127,7 +127,7 @@ fn read_request_line(stream: &mut TcpStream) -> Option<String> {
 
 fn fixture_body(name: &str) -> &'static [u8] {
     match name {
-        "hero_success.txt" => HERO_SUCCESS,
+        "hero_success.png" => HERO_SUCCESS,
         "service_unavailable.json" => SERVICE_UNAVAILABLE,
         other => panic!("Steam fixture manifest references unknown body {other:?}"),
     }
@@ -173,7 +173,7 @@ fn steam_fixture_manifest_is_hashed_and_redacted() {
     }
     assert_eq!(
         referenced,
-        BTreeSet::from(["hero_success.txt", "service_unavailable.json"])
+        BTreeSet::from(["hero_success.png", "service_unavailable.json"])
     );
 }
 

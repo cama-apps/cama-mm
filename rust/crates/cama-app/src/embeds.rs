@@ -6,6 +6,7 @@ use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::draft_analysis::draft_winner;
 use cama_domain::embed_safety::{EmbedModel, FIELD_VALUE_LIMIT, truncate_field};
 use cama_domain::formatting::{JOPACOIN_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI, escape_discord_text};
+use cama_domain::hero_catalog::hero_name;
 use cama_domain::rating::CamaRatingSystem;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -317,8 +318,8 @@ pub struct MatchParticipant {
     pub display_name: Option<String>,
     pub guild_id: Option<i64>,
     pub hero_id: Option<i64>,
-    /// Runtime-resolved bundled/Dotabase name. Older callers may omit this and
-    /// retain the small compatibility fallback below.
+    /// Runtime-resolved bundled/Dotabase name. Older callers may omit this;
+    /// the bundled hero catalog names the hero instead.
     pub hero_name: Option<String>,
     pub kills: Option<i64>,
     pub deaths: Option<i64>,
@@ -329,14 +330,6 @@ pub struct MatchParticipant {
     pub net_worth: Option<i64>,
     pub lane_role: Option<i64>,
     pub lane_efficiency: Option<i64>,
-}
-
-fn hero_name(hero_id: i64) -> &'static str {
-    match hero_id {
-        1 => "Anti-Mage",
-        2 => "Axe",
-        _ => "Unknown",
-    }
 }
 
 fn lane_outcomes(
@@ -423,11 +416,12 @@ fn format_team_field(
         .iter()
         .enumerate()
         .map(|(index, participant)| {
-            let fallback_hero = participant.hero_id.unwrap_or(0);
-            let hero = participant
-                .hero_name
-                .as_deref()
-                .unwrap_or_else(|| hero_name(fallback_hero));
+            let hero = participant.hero_name.clone().unwrap_or_else(|| {
+                participant
+                    .hero_id
+                    .filter(|hero_id| *hero_id != 0)
+                    .map_or_else(|| "Unknown".to_owned(), hero_name)
+            });
             let stat = |value: Option<i64>| {
                 value.map_or_else(|| "—".to_owned(), |value| value.to_string())
             };
@@ -623,9 +617,7 @@ pub fn create_enriched_match_embed(
     {
         embed.footer = Some(format!(
             "MVP: {} ({} damage)",
-            mvp.hero_name
-                .as_deref()
-                .unwrap_or_else(|| hero_name(hero_id)),
+            mvp.hero_name.clone().unwrap_or_else(|| hero_name(hero_id)),
             format_number(mvp.hero_damage)
         ));
     }
@@ -690,7 +682,7 @@ pub fn create_match_summary_embed_with_context(
                         "{tombstone}**{}** ({}/{}/{})",
                         participant
                             .hero_name
-                            .as_deref()
+                            .clone()
                             .unwrap_or_else(|| hero_name(hero_id)),
                         participant.kills.unwrap_or(0),
                         participant.deaths.unwrap_or(0),
@@ -1004,6 +996,27 @@ mod tests {
         assert!(description.contains("opendota.com/matches/7500000000"));
         assert!(description.contains("dotabuff.com/matches/7500000000"));
         assert!(validate_embed(&embed).is_empty());
+    }
+
+    #[test]
+    fn test_unnamed_participants_fall_back_to_the_bundled_hero_catalog() {
+        let mut pudge = participant(14);
+        pudge.discord_id = Some(1);
+        pudge.hero_damage = Some(20_000);
+        let unknown = participant(0);
+        let enriched =
+            create_enriched_match_embed(&enriched_request(9, 1), &[pudge.clone()], &[], None);
+        let radiant = field(&enriched, "RADIANT").value.clone();
+        assert!(radiant.contains("Pudge"), "{radiant}");
+        assert_eq!(
+            enriched.footer.as_deref(),
+            Some("MVP: Pudge (20.0k damage)")
+        );
+        let summary = create_match_summary_embed(9, 1, &[pudge], &[unknown], None);
+        assert!(field(&summary, "Radiant").value.contains("**Pudge**"));
+        let detailed =
+            create_enriched_match_embed(&enriched_request(9, 1), &[], &[participant(0)], None);
+        assert!(field(&detailed, "DIRE").value.contains("Unknown"));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
 use cama_db::registration_repository::{RegistrationRepository, RegistrationRepositoryError};
 use cama_domain::timezone::is_valid_timezone;
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -34,13 +35,16 @@ impl TimezoneService {
     }
 
     /// Persist a player's general timezone (used by curfew windows and other
-    /// time-based features).
+    /// time-based features). Returns the names of strict curfew windows that
+    /// keep running on the previous timezone until their next local morning,
+    /// because switching now would loosen them.
     pub fn set_timezone(
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
         timezone: &str,
-    ) -> Result<(), TimezoneServiceError> {
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>, TimezoneServiceError> {
         if !self.repository.player_exists(discord_id, guild_id)? {
             return Err(TimezoneServiceError::PlayerNotRegistered);
         }
@@ -48,8 +52,8 @@ impl TimezoneService {
             return Err(TimezoneServiceError::InvalidTimezone(timezone.to_owned()));
         }
         self.repository
-            .set_timezone(discord_id, guild_id, timezone)?;
-        Ok(())
+            .set_timezone(discord_id, guild_id, timezone, now)?
+            .ok_or(TimezoneServiceError::PlayerNotRegistered)
     }
 
     /// The player's general timezone setting for display, or `None` if unset.

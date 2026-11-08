@@ -74,16 +74,6 @@ impl SteamAuthConfig {
         self
     }
 
-    pub fn with_machine_token_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.machine_token_path = Some(path.into());
-        self
-    }
-
-    pub fn with_shared_secret(mut self, secret: impl Into<String>) -> Self {
-        self.shared_secret = Some(secret.into());
-        self
-    }
-
     /// Supply a one-time email/device code for a bootstrap login.
     pub fn with_guard_code(mut self, code: impl Into<String>) -> Self {
         self.guard_code = Some(code.into());
@@ -857,10 +847,10 @@ mod tests {
 
     #[test]
     fn auth_config_debug_redacts_secrets() {
-        let config = SteamAuthConfig::new("bot", "/tmp/cama-steam-session.json")
+        let mut config = SteamAuthConfig::new("bot", "/tmp/cama-steam-session.json")
             .with_password("password")
-            .with_shared_secret("shared-secret")
             .with_guard_code("12345");
+        config.shared_secret = Some("shared-secret".to_owned());
         let debug = format!("{config:?}");
         assert!(!debug.contains(": Some(\"password\")"));
         assert!(!debug.contains(": Some(\"shared-secret\")"));

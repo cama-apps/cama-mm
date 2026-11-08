@@ -75,6 +75,15 @@ pub trait ManaDiscordPort: Send + Sync {
     /// Return the guild member cache used by Python for Ash roles and names.
     fn mana_guild_members(&self, guild_id: i64) -> Result<Vec<ManaGuildMember>, String>;
 
+    /// Like [`Self::mana_guild_members`], but `None` unless the cache holds
+    /// every member of the guild. A partially chunked large guild is missing
+    /// its offline members, so callers that lock in a day's Ash-role weighting
+    /// must wait for the complete list.
+    fn mana_complete_guild_members(
+        &self,
+        guild_id: i64,
+    ) -> Result<Option<Vec<ManaGuildMember>>, String>;
+
     /// Resolve a selected target through the guild cache or Discord HTTP.
     async fn mana_guild_member(
         &self,

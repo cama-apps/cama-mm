@@ -4,11 +4,11 @@
 //! one timeline, so an animated reveal always ends on exactly the still card.
 //! Discord avatar PNGs are decoded fail-soft.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::OnceLock;
 
 use crate::drawing::{GambaPoint, GambaStats};
-use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+use flate2::read::ZlibDecoder;
 use fontdue::{Font, FontSettings};
 use thiserror::Error;
 
@@ -508,47 +508,7 @@ fn paeth(left: u8, up: u8, upper_left: u8) -> u8 {
 }
 
 fn encode_png(canvas: &Canvas) -> Vec<u8> {
-    let mut filtered = Vec::with_capacity((canvas.width * 4 + 1) * canvas.height);
-    for row in canvas.pixels.chunks_exact(canvas.width * 4) {
-        filtered.push(0);
-        filtered.extend_from_slice(row);
-    }
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
-    encoder
-        .write_all(&filtered)
-        .expect("writing an in-memory Wrapped PNG cannot fail");
-    let zlib = encoder
-        .finish()
-        .expect("finishing an in-memory Wrapped PNG cannot fail");
-    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-    let mut header = Vec::new();
-    header.extend_from_slice(&(canvas.width as u32).to_be_bytes());
-    header.extend_from_slice(&(canvas.height as u32).to_be_bytes());
-    header.extend_from_slice(&[8, 6, 0, 0, 0]);
-    append_chunk(&mut png, b"IHDR", &header);
-    append_chunk(&mut png, b"IDAT", &zlib);
-    append_chunk(&mut png, b"IEND", &[]);
-    png
-}
-
-fn append_chunk(png: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
-    png.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    png.extend_from_slice(kind);
-    png.extend_from_slice(payload);
-    let mut data = kind.to_vec();
-    data.extend_from_slice(payload);
-    png.extend_from_slice(&crc32(&data).to_be_bytes());
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffff_u32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320_u32 & (0_u32.wrapping_sub(crc & 1)));
-        }
-    }
-    !crc
+    crate::png_encoder::encode_rgba_png(canvas.width, canvas.height, &canvas.pixels)
 }
 
 #[cfg(test)]

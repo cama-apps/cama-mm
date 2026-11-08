@@ -36,6 +36,9 @@ pub mod dig_event_runtime {
     pub use crate::dig_event_runtime_splash_repository::*;
 }
 
+/// The mounted repositories name the runtime connection type at the crate root.
+type RuntimeConnection = Connection;
+
 fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
     let connection = Connection::open_with_flags(
         path,

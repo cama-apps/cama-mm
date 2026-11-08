@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{
-    Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
+    OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
 };
 use thiserror::Error;
 
@@ -166,7 +166,7 @@ impl LowPriorityRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

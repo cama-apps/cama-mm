@@ -381,7 +381,7 @@ impl MatchCorrectionRepository {
         }
     }
 
-    pub fn connection(&self) -> Result<Connection, MatchCorrectionError> {
+    pub fn connection(&self) -> Result<crate::RuntimeConnection, MatchCorrectionError> {
         open_runtime_connection(&self.path).map_err(Into::into)
     }
 

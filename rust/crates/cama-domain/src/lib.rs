@@ -19,6 +19,7 @@ pub mod formatting;
 pub mod game_date;
 pub mod guild;
 pub mod guild_config;
+pub mod hero_catalog;
 pub mod mana;
 pub mod openskill;
 pub mod permissions;

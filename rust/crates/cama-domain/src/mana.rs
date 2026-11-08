@@ -310,42 +310,6 @@ impl ManaEffects {
     }
 }
 
-/// Current assignment data already validated for the active mana day.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManaAssignment {
-    pub color: Option<String>,
-    pub land: Option<String>,
-    pub consumed: bool,
-}
-
-impl ManaAssignment {
-    /// Construct an active-day assignment snapshot.
-    #[must_use]
-    pub fn new(color: Option<&str>, land: Option<&str>, consumed: bool) -> Self {
-        Self {
-            color: color.map(str::to_owned),
-            land: land.map(str::to_owned),
-            consumed,
-        }
-    }
-}
-
-/// Resolve effects from an optional active-day assignment.
-///
-/// A missing or consumed assignment has no active effects.  The date check is
-/// deliberately a persistence/service responsibility so this policy remains
-/// clock-independent.
-#[must_use]
-pub fn effects_from_assignment(assignment: Option<&ManaAssignment>) -> ManaEffects {
-    let Some(assignment) = assignment else {
-        return ManaEffects::default();
-    };
-    if assignment.consumed {
-        return ManaEffects::default();
-    }
-    ManaEffects::for_color(assignment.color.as_deref(), assignment.land.as_deref())
-}
-
 /// Return the emoji-only badge for an effect snapshot.
 #[must_use]
 pub fn format_mana_badge(effects: Option<&ManaEffects>) -> &'static str {
@@ -441,32 +405,6 @@ pub fn apply_sabotage_modifiers(effects: &ManaEffects, base_cost: i64) -> Sabota
     }
 }
 
-/// Player-specific boss combat modifiers.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BossCombatModifiers {
-    pub damage_mult: f64,
-    pub dynamite_damage_mult: f64,
-    pub hp_mult: f64,
-    pub loot_mult: f64,
-    pub reveal_hp: bool,
-    pub no_crit_against: bool,
-    pub color: Option<String>,
-}
-
-/// Extract the boss-combat fields from an effect snapshot.
-#[must_use]
-pub fn boss_combat_modifiers(effects: &ManaEffects) -> BossCombatModifiers {
-    BossCombatModifiers {
-        damage_mult: effects.boss_damage_mult,
-        dynamite_damage_mult: effects.boss_dynamite_damage_mult,
-        hp_mult: effects.boss_hp_mult,
-        loot_mult: effects.boss_loot_mult,
-        reveal_hp: effects.boss_reveal_hp,
-        no_crit_against: effects.boss_no_crit_against,
-        color: effects.color.clone(),
-    }
-}
-
 /// One weather-layer interaction result.  Defaults are identity modifiers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeatherComboModifiers {
@@ -531,34 +469,18 @@ pub fn weather_combo_modifiers(
     result
 }
 
-/// Resolve weather modifiers using a supplied effect snapshot when available.
-///
-/// `load_effects` is called only when `effects` is `None`, allowing command
-/// handlers to reuse one service snapshot without a second lookup.
-#[must_use]
-pub fn weather_combo_modifiers_with_effects(
-    weather: Option<&str>,
-    effects: Option<&ManaEffects>,
-    load_effects: impl FnOnce() -> ManaEffects,
-) -> WeatherComboModifiers {
-    match effects {
-        Some(effects) => weather_combo_modifiers(effects, weather),
-        None => weather_combo_modifiers(&load_effects(), weather),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ManaAssignment, ManaEffects, ManaEffectsSource, apply_loan_modifiers,
-        apply_sabotage_modifiers, boss_combat_modifiers, effects_from_assignment,
+        ManaEffects, ManaEffectsSource, apply_loan_modifiers, apply_sabotage_modifiers,
         format_mana_badge, resolve_mana_badge, weather_combo_modifiers,
-        weather_combo_modifiers_with_effects,
     };
 
     fn active_effects(color: Option<&str>, land: Option<&str>, consumed: bool) -> ManaEffects {
-        let assignment = color.map(|color| ManaAssignment::new(Some(color), land, consumed));
-        effects_from_assignment(assignment.as_ref())
+        match color {
+            Some(color) if !consumed => ManaEffects::for_color(Some(color), land),
+            _ => ManaEffects::default(),
+        }
     }
 
     fn utc(text: &str) -> i64 {
@@ -877,34 +799,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_boss_combat_modifiers_white() {
-        let effects = active_effects(Some("White"), Some("Plains"), false);
-        let result = boss_combat_modifiers(&effects);
-
-        assert_eq!(result.damage_mult, 1.20);
-        assert_eq!(result.hp_mult, 1.0);
-        assert_eq!(result.loot_mult, 1.0);
-    }
-
-    #[test]
-    fn test_get_boss_combat_modifiers_black_tankier_droppier() {
-        let effects = active_effects(Some("Black"), Some("Swamp"), false);
-        let result = boss_combat_modifiers(&effects);
-
-        assert_eq!(result.damage_mult, 1.0);
-        assert_eq!(result.hp_mult, 1.30);
-        assert_eq!(result.loot_mult, 1.25);
-    }
-
-    #[test]
-    fn test_get_boss_combat_modifiers_blue_reveals_hp() {
-        let effects = active_effects(Some("Blue"), Some("Island"), false);
-        let result = boss_combat_modifiers(&effects);
-
-        assert!(result.reveal_hp);
-    }
-
-    #[test]
     fn test_get_weather_combo_modifiers_storm_blue_cooldown() {
         let effects = active_effects(Some("Blue"), Some("Island"), false);
         let result = weather_combo_modifiers(&effects, Some("storm"));
@@ -920,17 +814,6 @@ mod tests {
 
         assert!(result.applied);
         assert_eq!(result.yield_mult, 1.10);
-    }
-
-    #[test]
-    fn test_get_weather_combo_modifiers_reuses_supplied_snapshot() {
-        let effects = active_effects(Some("White"), Some("Plains"), false);
-        let expected = weather_combo_modifiers(&effects, Some("sunny"));
-        let result = weather_combo_modifiers_with_effects(Some("sunny"), Some(&effects), || {
-            panic!("snapshot path reloaded effects")
-        });
-
-        assert_eq!(result, expected);
     }
 
     #[test]

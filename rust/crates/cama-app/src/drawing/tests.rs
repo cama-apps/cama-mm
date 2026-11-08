@@ -58,7 +58,11 @@ fn decode_png(cursor: &Cursor<Vec<u8>>) -> DecodedPng {
         offset += 4;
         let mut checksum = kind.to_vec();
         checksum.extend_from_slice(payload);
-        assert_eq!(crc32(&checksum), expected_crc, "valid chunk CRC");
+        assert_eq!(
+            crate::png_encoder::crc32(&checksum),
+            expected_crc,
+            "valid chunk CRC"
+        );
         match &kind {
             b"IHDR" => {
                 width = read_u32(payload, 0) as usize;
@@ -71,36 +75,11 @@ fn decode_png(cursor: &Cursor<Vec<u8>>) -> DecodedPng {
             _ => panic!("unexpected PNG chunk"),
         }
     }
-    assert_eq!(&compressed[..2], &[0x78, 0x01], "zlib stored stream");
-    let expected_adler = read_u32(&compressed, compressed.len() - 4);
+    // The zlib decoder verifies the stream's Adler-32 trailer.
     let mut filtered = Vec::new();
-    let mut cursor = 2;
-    loop {
-        let flags = compressed[cursor];
-        cursor += 1;
-        assert_eq!(flags & 0b110, 0, "stored DEFLATE block");
-        let final_block = flags & 1 == 1;
-        let length = usize::from(u16::from_le_bytes(
-            compressed[cursor..cursor + 2].try_into().expect("length"),
-        ));
-        cursor += 2;
-        let inverse = u16::from_le_bytes(
-            compressed[cursor..cursor + 2]
-                .try_into()
-                .expect("inverse length"),
-        );
-        cursor += 2;
-        assert_eq!(
-            u16::try_from(length).expect("block length") ^ inverse,
-            u16::MAX
-        );
-        filtered.extend_from_slice(&compressed[cursor..cursor + length]);
-        cursor += length;
-        if final_block {
-            break;
-        }
-    }
-    assert_eq!(adler32(&filtered), expected_adler, "valid zlib Adler-32");
+    flate2::read::ZlibDecoder::new(compressed.as_slice())
+        .read_to_end(&mut filtered)
+        .expect("valid zlib stream");
     let row_bytes = width * 4;
     assert_eq!(filtered.len(), (row_bytes + 1) * height);
     let mut pixels = Vec::with_capacity(row_bytes * height);

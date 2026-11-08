@@ -306,21 +306,6 @@ impl<S: TriviaDataSource> TriviaDataRegistry<S> {
         cached(&self.facets, || self.source.facets().map(normalize_facets))
     }
 
-    pub fn get_ability_icon_url_by_name(
-        &self,
-        localized_name: &str,
-    ) -> Result<Option<&str>, TriviaDataError> {
-        let target = localized_name.trim().to_lowercase();
-        if target.is_empty() {
-            return Ok(None);
-        }
-        Ok(self
-            .load_abilities()?
-            .iter()
-            .find(|ability| ability.localized_name.to_lowercase() == target)
-            .and_then(|ability| ability.icon_url.as_deref()))
-    }
-
     pub fn get_hero_by_id(&self, hero_id: i64) -> Result<Option<&HeroData>, TriviaDataError> {
         Ok(self.load_heroes()?.iter().find(|hero| hero.id == hero_id))
     }

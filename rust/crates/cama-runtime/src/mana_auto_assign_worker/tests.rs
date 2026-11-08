@@ -49,6 +49,8 @@ fn member(user_id: i64, role_names: &[&str]) -> crate::mana_provider::ManaGuildM
 struct FakeManaDiscord {
     members: Mutex<BTreeMap<i64, Vec<crate::mana_provider::ManaGuildMember>>>,
     fail_member_lookups: BTreeSet<i64>,
+    /// Guilds whose cached member list is still missing members.
+    partial_guilds: Mutex<BTreeSet<i64>>,
 }
 
 impl FakeManaDiscord {
@@ -56,6 +58,16 @@ impl FakeManaDiscord {
         Self {
             members: Mutex::new(members),
             fail_member_lookups: BTreeSet::new(),
+            partial_guilds: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    fn set_partial(&self, guild_id: i64, partial: bool) {
+        let mut guilds = self.partial_guilds.lock().expect("partial guild lock");
+        if partial {
+            guilds.insert(guild_id);
+        } else {
+            guilds.remove(&guild_id);
         }
     }
 
@@ -87,6 +99,19 @@ impl crate::mana_provider::ManaDiscordPort for FakeManaDiscord {
             .get(&guild_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    fn mana_complete_guild_members(
+        &self,
+        guild_id: i64,
+    ) -> Result<Option<Vec<crate::mana_provider::ManaGuildMember>>, String> {
+        let members = self.mana_guild_members(guild_id)?;
+        let partial = self
+            .partial_guilds
+            .lock()
+            .expect("partial guild lock")
+            .contains(&guild_id);
+        Ok((!partial).then_some(members))
     }
 
     async fn mana_guild_member(
@@ -379,6 +404,43 @@ async fn cold_member_cache_defers_claims_until_members_are_visible() {
 }
 
 #[tokio::test]
+async fn partially_chunked_member_cache_defers_claims_until_complete() {
+    let fixture = Fixture::migrated();
+    fixture.register(USER, 100);
+    fixture.register(USER + 1, 100);
+    // Only the online member has arrived; the offline Ash role holder is
+    // still missing from the cache.
+    let discord = Arc::new(FakeManaDiscord::with_members(BTreeMap::from([(
+        GUILD,
+        vec![member(USER + 1, &[])],
+    )])));
+    discord.set_partial(GUILD, true);
+    let worker = worker_for(&fixture.path, vec![GUILD], Arc::clone(&discord));
+
+    let partial = worker
+        .assign_once()
+        .await
+        .expect("partial pass succeeds without claiming");
+    assert!(
+        partial.is_empty(),
+        "a partial member cache must not produce a board"
+    );
+    assert!(fixture.player_land(USER, GUILD).is_none());
+    assert!(fixture.player_land(USER + 1, GUILD).is_none());
+    assert_eq!(worker.cold_cache_deferral_streak(GUILD), 1);
+
+    discord.set_members(
+        GUILD,
+        vec![member(USER, &["Ash Fan Club"]), member(USER + 1, &[])],
+    );
+    discord.set_partial(GUILD, false);
+    let complete = worker.assign_once().await.expect("complete pass assigns");
+    assert_eq!(complete.len(), 1);
+    assert_eq!(complete[0].assignments.len(), 2);
+    assert_eq!(worker.cold_cache_deferral_streak(GUILD), 0);
+}
+
+#[tokio::test]
 async fn failing_guild_is_reported_only_after_every_guild_is_processed() {
     let fixture = Fixture::migrated();
     fixture.register_in(FOREIGN_GUILD, USER, 100);
@@ -386,6 +448,7 @@ async fn failing_guild_is_reported_only_after_every_guild_is_processed() {
     let discord = Arc::new(FakeManaDiscord {
         members: Mutex::new(BTreeMap::from([(GUILD, vec![member(USER + 1, &[])])])),
         fail_member_lookups: BTreeSet::from([FOREIGN_GUILD]),
+        partial_guilds: Mutex::new(BTreeSet::new()),
     });
     let worker = worker_for(&fixture.path, vec![FOREIGN_GUILD, GUILD], discord);
 
@@ -419,6 +482,7 @@ async fn every_guild_failing_still_surfaces_an_error() {
     let discord = Arc::new(FakeManaDiscord {
         members: Mutex::new(BTreeMap::new()),
         fail_member_lookups: BTreeSet::from([GUILD]),
+        partial_guilds: Mutex::new(BTreeSet::new()),
     });
     let worker = worker_for(&fixture.path, vec![GUILD], discord);
 

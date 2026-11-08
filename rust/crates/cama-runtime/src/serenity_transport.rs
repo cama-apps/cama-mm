@@ -11,13 +11,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cama_app::dig_bonus_events::GuildMember as DigBonusGuildMember;
-use cama_app::predictions::resolve_and_neutralize_discord_mentions;
 use serenity::Client;
 use serenity::all::{
     ActionRowComponent, AutoArchiveDuration, ButtonKind, ButtonStyle, Channel, ChannelId,
-    ChannelType, Command, CommandDataOption, CommandDataOptionValue, CommandInteraction,
-    CommandOptionType, ComponentInteraction, ComponentInteractionDataKind, Context,
-    CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateAutocompleteResponse,
+    ChannelType, Command, CommandDataOption, CommandDataOptionValue, CommandDataResolved,
+    CommandInteraction, CommandOptionType, ComponentInteraction, ComponentInteractionDataKind,
+    Context, CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateAutocompleteResponse,
     CreateButton, CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedAuthor,
     CreateEmbedFooter, CreateInputText, CreateInteractionResponse,
     CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage,
@@ -1226,7 +1225,7 @@ impl EventHandler for SerenityHandler {
             .guild_ids
             .write()
             .expect("gateway guild-id lock poisoned") = guild_ids.clone();
-        self.run_ready_recovery(context.http.clone(), guild_ids.into_iter().collect())
+        self.run_ready_recovery(context.http.clone(), guild_ids.into_iter().collect(), true)
             .await;
 
         // Never erase the deployed command tree if a development build connects
@@ -1259,7 +1258,7 @@ impl EventHandler for SerenityHandler {
             .iter()
             .copied()
             .collect();
-        self.run_ready_recovery(context.http, guild_ids).await;
+        self.run_ready_recovery(context.http, guild_ids, true).await;
         let _ = self.events.send(LifecycleEvent::Resumed);
         info!("Discord gateway session resumed");
     }
@@ -1289,7 +1288,8 @@ impl EventHandler for SerenityHandler {
             .expect("gateway guild-id lock poisoned")
             .insert(guild_id);
         if inserted {
-            self.run_ready_recovery(context.http, vec![guild_id]).await;
+            self.run_ready_recovery(context.http, vec![guild_id], false)
+                .await;
         }
     }
 
@@ -1428,19 +1428,26 @@ impl SerenityHandler {
         }
     }
 
-    async fn run_ready_recovery(&self, http: Arc<Http>, guild_ids: Vec<u64>) {
+    /// `session_snapshot` is true when `guild_ids` is every guild in the
+    /// session (READY/RESUMED) and false for a guild joining it.
+    async fn run_ready_recovery(
+        &self,
+        http: Arc<Http>,
+        guild_ids: Vec<u64>,
+        session_snapshot: bool,
+    ) {
         if self.observers.is_empty() {
             return;
         }
         let member_source: Arc<dyn GuildMemberPageSource> =
             Arc::new(SerenityGuildMemberPageSource { http });
-        let reports = self
-            .observers
-            .ready_recovery(ReadyRecoveryContext::new(
-                Arc::<[u64]>::from(guild_ids),
-                member_source,
-            ))
-            .await;
+        let guild_ids = Arc::<[u64]>::from(guild_ids);
+        let context = if session_snapshot {
+            ReadyRecoveryContext::new(guild_ids, member_source)
+        } else {
+            ReadyRecoveryContext::joined(guild_ids, member_source)
+        };
+        let reports = self.observers.ready_recovery(context).await;
         for report in reports {
             for failure in &report.failures {
                 error!(
@@ -1974,12 +1981,7 @@ fn interaction_option(
         CommandDataOptionValue::User(value) => InteractionValue::User {
             id: value.get(),
             is_bot: command.data.resolved.users.get(value).map(|user| user.bot),
-            display_name: command
-                .data
-                .resolved
-                .users
-                .get(value)
-                .map(|user| user.name.clone()),
+            display_name: resolved_user_display_name(&command.data.resolved, *value),
         },
         CommandDataOptionValue::Channel(value) => InteractionValue::Channel(value.get()),
         CommandDataOptionValue::Role(value) => InteractionValue::Role(value.get()),
@@ -2001,6 +2003,18 @@ fn interaction_option(
         name: option.name.clone(),
         value,
     }
+}
+
+/// Readable name of a user selected in a command option: the server nickname
+/// Discord resolved for the guild, then the global display name, then the
+/// account name.
+fn resolved_user_display_name(resolved: &CommandDataResolved, user_id: UserId) -> Option<String> {
+    let user = resolved.users.get(&user_id)?;
+    let nick = resolved
+        .members
+        .get(&user_id)
+        .and_then(|member| member.nick.as_deref());
+    readable_member_name(nick, user)
 }
 
 fn component_values(kind: &ComponentInteractionDataKind) -> Vec<String> {
@@ -3579,6 +3593,35 @@ impl PredictionDiscordPort for SerenityDiscordTransport {
             .map(drop)
             .map_err(|error| error.to_string())
     }
+
+    async fn prediction_market_text(&self, guild_id: i64, text: &str) -> String {
+        PredictionCommandDiscordPort::prediction_display_text(self, guild_id, text)
+            .await
+            .unwrap_or_else(|_| crate::prediction_workers::unresolved_prediction_text(text))
+    }
+
+    async fn prediction_player_names(
+        &self,
+        guild_id: i64,
+        player_ids: &[i64],
+    ) -> crate::discord_transport::GuildPlayerNameDirectory {
+        crate::discord_transport::resolve_guild_player_names(
+            self,
+            u64::try_from(guild_id).ok(),
+            player_ids,
+        )
+        .await
+    }
+
+    async fn prediction_thread_status(&self, thread_id: i64) -> DiscordDestinationStatus {
+        match u64::try_from(thread_id)
+            .ok()
+            .filter(|thread_id| *thread_id != 0)
+        {
+            Some(thread_id) => DiscordTransport::destination_status(self, thread_id).await,
+            None => DiscordDestinationStatus::Unknown,
+        }
+    }
 }
 
 fn configured_gamba_location_matches(
@@ -3674,36 +3717,30 @@ impl PredictionCommandDiscordPort for SerenityDiscordTransport {
 
     async fn prediction_display_text(&self, guild_id: i64, text: &str) -> Result<String, String> {
         let context = self.context()?;
+        let signed_guild_id = guild_id;
         let guild_id = GuildId::new(
             u64::try_from(guild_id)
-                .map_err(|_| "Discord prediction guild ID is outside the supported range")?,
+                .ok()
+                .filter(|guild_id| *guild_id != 0)
+                .ok_or("Discord prediction guild ID is outside the supported range")?,
         );
-        Ok(resolve_and_neutralize_discord_mentions(
+        Ok(crate::prediction_workers::resolve_prediction_text(
+            self,
+            signed_guild_id,
             text,
-            |user_id| {
-                let signed_user_id = user_id;
-                let user_id = UserId::new(u64::try_from(signed_user_id).ok()?);
-                context
-                    .cache
-                    .guild(guild_id)
-                    .and_then(|guild| guild.members.get(&user_id).map(member_render_name))
-                    .or_else(|| {
-                        context
-                            .cache
-                            .user(user_id)
-                            .map(|user| user.display_name().to_owned())
-                    })
-                    .or_else(|| Some(signed_user_id.to_string()))
-            },
             |role_id| {
-                let role_id = serenity::all::RoleId::new(u64::try_from(role_id).ok()?);
+                let role_id = u64::try_from(role_id)
+                    .ok()
+                    .filter(|role_id| *role_id != 0)
+                    .map(serenity::all::RoleId::new)?;
                 context
                     .cache
                     .guild(guild_id)
                     .and_then(|guild| guild.roles.get(&role_id).map(|role| role.name.clone()))
                     .or_else(|| Some("unknown-role".to_owned()))
             },
-        ))
+        )
+        .await)
     }
 
     async fn create_prediction_market_surface(
@@ -4010,6 +4047,29 @@ impl ManaDiscordPort for SerenityDiscordTransport {
             .values()
             .map(|member| serenity_mana_member(&guild, member))
             .collect()
+    }
+
+    fn mana_complete_guild_members(
+        &self,
+        guild_id: i64,
+    ) -> Result<Option<Vec<ManaGuildMember>>, String> {
+        let context = self.context()?;
+        let guild_id = GuildId::new(
+            u64::try_from(guild_id)
+                .map_err(|_| "Discord mana guild ID is outside the supported range")?,
+        );
+        let Some(guild) = context.cache.guild(guild_id) else {
+            return Ok(None);
+        };
+        if complete_guild_member_ids(&guild).is_none() {
+            return Ok(None);
+        }
+        guild
+            .members
+            .values()
+            .map(|member| serenity_mana_member(&guild, member))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
     }
 
     async fn mana_guild_member(

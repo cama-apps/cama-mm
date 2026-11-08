@@ -125,6 +125,13 @@ impl ManaDiscordPort for FakeDiscord {
         Ok(self.members.clone())
     }
 
+    fn mana_complete_guild_members(
+        &self,
+        _guild_id: i64,
+    ) -> Result<Option<Vec<ManaGuildMember>>, String> {
+        Ok(Some(self.members.clone()))
+    }
+
     async fn mana_guild_member(
         &self,
         _guild_id: i64,

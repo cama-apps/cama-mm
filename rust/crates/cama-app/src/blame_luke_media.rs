@@ -91,22 +91,6 @@ pub fn render_blame_luke(selected_index: usize) -> Result<BlameLukeGif, BlameLuk
     render_blame_luke_from_reasons(&BLAME_LUKE_REASONS, selected_index)
 }
 
-/// Equivalent of Python's injectable `reasons=` drawing seam.
-pub fn render_blame_luke_reason(
-    selected_reason: &str,
-    reasons: &[&str],
-) -> Result<BlameLukeGif, BlameLukeRenderError> {
-    let selected_index = reasons
-        .iter()
-        .position(|reason| *reason == selected_reason)
-        .ok_or(if reasons.is_empty() {
-            BlameLukeRenderError::EmptyReasons
-        } else {
-            BlameLukeRenderError::SelectedReasonMissing
-        })?;
-    render_blame_luke_from_reasons(reasons, selected_index)
-}
-
 fn render_blame_luke_from_reasons(
     reasons: &[&str],
     selected_index: usize,
@@ -553,12 +537,5 @@ mod tests {
         assert_eq!(order[0], 5);
         assert_eq!(order[16], 4);
         assert_eq!(order.iter().copied().collect::<BTreeSet<_>>().len(), 17);
-    }
-
-    #[test]
-    fn injectable_reason_list_rejects_a_reason_outside_the_candidates() {
-        let error = render_blame_luke_reason("It was obviously Dave.", &["Luke did it."])
-            .expect_err("unknown selected reason must fail");
-        assert!(matches!(error, BlameLukeRenderError::SelectedReasonMissing));
     }
 }

@@ -25,6 +25,10 @@ fn shared_steam_image_root_preserves_local_default_for_empty_configuration() {
     );
 }
 
+/// The smallest byte string the cache accepts as a complete PNG: the
+/// signature followed by an `IEND` chunk.
+const PNG_FIXTURE: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\0IEND\xaeB`\x82";
+
 fn one_shot_image_server(body: &'static [u8]) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind image server");
     let address = listener.local_addr().expect("image server address");
@@ -137,26 +141,63 @@ fn test_returns_existing_path() {
     let url = "https://cdn.example/apps/dota_react/heroes/test_hero.png";
     let path = cache.path_for_url(url);
     fs::create_dir_all(path.parent().expect("cache parent")).expect("create cache parent");
-    fs::write(&path, b"\x89PNG fake image data").expect("seed cached image");
+    fs::write(&path, PNG_FIXTURE).expect("seed cached image");
     let image = cache.get_or_download(url).expect("read cached image");
     assert_eq!(image.filename, "test_hero.png");
-    assert_eq!(image.bytes, b"\x89PNG fake image data");
+    assert_eq!(image.bytes, PNG_FIXTURE);
 }
 
 #[test]
 fn test_downloads_on_miss() {
     let root = tempdir().expect("cache directory");
     let cache = TriviaImageCache::new(root.path()).expect("cache");
-    let (server, handle) = one_shot_image_server(b"\x89PNG fake");
+    let (server, handle) = one_shot_image_server(PNG_FIXTURE);
     let url = format!("{server}/apps/dota_react/heroes/new_hero.png");
     let image = cache.get_or_download(&url).expect("download image");
     handle.join().expect("image server");
     assert_eq!(image.filename, "new_hero.png");
-    assert_eq!(image.bytes, b"\x89PNG fake");
+    assert_eq!(image.bytes, PNG_FIXTURE);
     assert_eq!(
         fs::read(cache.path_for_url(&url)).expect("persisted cached image"),
-        b"\x89PNG fake"
+        PNG_FIXTURE
     );
+}
+
+#[test]
+fn test_truncated_cached_file_is_downloaded_again() {
+    let root = tempdir().expect("cache directory");
+    let cache = TriviaImageCache::new(root.path()).expect("cache");
+    let (server, handle) = one_shot_image_server(PNG_FIXTURE);
+    let url = format!("{server}/apps/dota_react/heroes/cut_short.png");
+    let path = cache.path_for_url(&url);
+    fs::create_dir_all(path.parent().expect("cache parent")).expect("create cache parent");
+    fs::write(&path, &PNG_FIXTURE[..12]).expect("seed a write that stopped part way");
+
+    let image = cache.get_or_download(&url).expect("re-download the image");
+    handle.join().expect("image server");
+
+    assert_eq!(image.bytes, PNG_FIXTURE);
+    assert_eq!(fs::read(&path).expect("replaced cached image"), PNG_FIXTURE);
+    let leftovers = fs::read_dir(path.parent().expect("cache parent"))
+        .expect("list cache directory")
+        .count();
+    assert_eq!(leftovers, 1, "no temporary download file is left behind");
+}
+
+#[test]
+fn test_non_image_download_is_not_cached() {
+    let root = tempdir().expect("cache directory");
+    let cache = TriviaImageCache::new(root.path()).expect("cache");
+    let (server, handle) = one_shot_image_server(b"<html>temporarily unavailable</html>");
+    let url = format!("{server}/apps/dota_react/heroes/error_page.png");
+
+    let error = cache
+        .get_or_download(&url)
+        .expect_err("a non-image body must not be served");
+    handle.join().expect("image server");
+
+    assert!(matches!(error, TriviaImageCacheError::InvalidImage { .. }));
+    assert!(!cache.path_for_url(&url).exists());
 }
 
 #[test]
@@ -178,10 +219,10 @@ fn test_returns_file_from_cache() {
     let url = "https://cdn.example/apps/dota_react/heroes/cached.png";
     let path = cache.path_for_url(url);
     fs::create_dir_all(path.parent().expect("cache parent")).expect("create cache parent");
-    fs::write(&path, b"\x89PNG data").expect("seed cached image");
+    fs::write(&path, PNG_FIXTURE).expect("seed cached image");
     let image = cache.get_or_download(url).expect("cached attachment");
     assert_eq!(image.filename, "cached.png");
-    assert_eq!(image.bytes, b"\x89PNG data");
+    assert_eq!(image.bytes, PNG_FIXTURE);
 }
 
 #[test]

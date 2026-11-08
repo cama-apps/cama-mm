@@ -10,6 +10,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use cama_db::predictions_repository::CONTRACT_VALUE;
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
+use cama_domain::hero_catalog::hero_name;
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU};
 use cama_domain::rating::CALIBRATION_RD_THRESHOLD;
 use thiserror::Error;
@@ -18,6 +20,10 @@ pub type DiscordId = i64;
 pub type GuildId = i64;
 
 pub const PLAYER_TRIVIA_SNAPSHOT_CACHE_TTL_SECONDS: f64 = 45.0;
+
+/// Readable display names keyed by Discord ID, resolved by the caller before
+/// generation. Only players named here can appear in a question.
+pub type PlayerLabels = BTreeMap<DiscordId, String>;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlayerTriviaPlayer {
@@ -673,11 +679,31 @@ where
         Ok(cache.snapshots.keys().copied().collect())
     }
 
+    /// The players a question set for this guild may mention, so the caller
+    /// can resolve their display names before [`Self::generate_questions`].
+    pub fn eligible_player_ids(
+        &self,
+        guild_id: GuildId,
+        current_member_ids: Option<&BTreeSet<DiscordId>>,
+    ) -> Result<Vec<DiscordId>, PlayerTriviaServiceError> {
+        let snapshot = self.raw_snapshot(guild_id)?;
+        Ok(eligible_players(&snapshot, current_member_ids)
+            .map(|player| player.discord_id)
+            .collect())
+    }
+
+    /// Build up to `count` questions. Players are named with `names`; a
+    /// player without a readable entry there is left out of the set.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the command's generation inputs one-to-one"
+    )]
     pub fn generate_questions(
         &self,
         user_id: DiscordId,
         guild_id: GuildId,
         current_member_ids: Option<&BTreeSet<DiscordId>>,
+        names: &PlayerLabels,
         count: usize,
         include_spicy: bool,
         recent_days: i64,
@@ -686,13 +712,16 @@ where
             return Ok(Vec::new());
         }
         let snapshot = self.snapshot_for_generation(guild_id)?;
+        let labels = eligible_players(&snapshot, current_member_ids)
+            .filter_map(|player| {
+                let name = readable_player_name(names.get(&player.discord_id)?)?;
+                Some((player.discord_id, name.to_owned()))
+            })
+            .collect::<PlayerLabels>();
         let players = snapshot
             .players
             .iter()
-            .filter(|player| {
-                player.discord_id > 0
-                    && current_member_ids.is_none_or(|allowed| allowed.contains(&player.discord_id))
-            })
+            .filter(|player| labels.contains_key(&player.discord_id))
             .map(|player| (player.discord_id, player))
             .collect::<BTreeMap<_, _>>();
         if players.len() < 4 {
@@ -712,19 +741,25 @@ where
             .lock()
             .map_err(|_| PlayerTriviaServiceError::RandomPoisoned)?;
         let mut candidates = Vec::new();
-        build_match_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_rating_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_hero_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_pairing_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_economy_and_tip_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_betting_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_wheel_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_double_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_prediction_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_dig_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_mafia_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_trivia_history_questions(&mut candidates, &snapshot, &players, &mut *random);
-        build_disbursement_questions(&mut candidates, &snapshot, &players, &mut *random);
+        build_match_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_rating_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_hero_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_pairing_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_economy_and_tip_questions(
+            &mut candidates,
+            &snapshot,
+            &players,
+            &labels,
+            &mut *random,
+        );
+        build_betting_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_wheel_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_double_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_prediction_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_dig_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_mafia_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_trivia_history_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
+        build_disbursement_questions(&mut candidates, &snapshot, &players, &labels, &mut *random);
 
         if random.shuffle_enabled() {
             shuffle(&mut candidates, &mut *random);
@@ -765,14 +800,30 @@ where
     }
 }
 
+fn eligible_players<'a>(
+    snapshot: &'a PlayerTriviaSnapshot,
+    current_member_ids: Option<&'a BTreeSet<DiscordId>>,
+) -> impl Iterator<Item = &'a PlayerTriviaPlayer> {
+    snapshot.players.iter().filter(move |player| {
+        player.discord_id > 0
+            && current_member_ids.is_none_or(|allowed| allowed.contains(&player.discord_id))
+    })
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs() as i64)
 }
 
-fn player_label(player_id: DiscordId) -> String {
-    format!("<@{player_id}>")
+/// The readable name a question shows for `player_id`. Generation only admits
+/// players with a resolved name, so the fallback is a safety net.
+fn player_label(labels: &PlayerLabels, player_id: DiscordId) -> String {
+    labels
+        .get(&player_id)
+        .and_then(|name| readable_player_name(name))
+        .unwrap_or(UNKNOWN_PLAYER)
+        .to_owned()
 }
 
 fn humanize_code(value: &str) -> String {
@@ -788,21 +839,6 @@ fn humanize_code(value: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn hero_name(hero_id: i64) -> String {
-    static HERO_NAMES: std::sync::OnceLock<BTreeMap<i64, String>> = std::sync::OnceLock::new();
-    HERO_NAMES
-        .get_or_init(|| {
-            serde_json::from_str::<BTreeMap<String, String>>(include_str!("../data/heroes.json"))
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|(id, name)| id.parse().ok().map(|id| (id, name)))
-                .collect()
-        })
-        .get(&hero_id)
-        .cloned()
-        .unwrap_or_else(|| format!("Hero {hero_id}"))
 }
 
 const fn lane_name(lane: i64) -> Option<&'static str> {
@@ -874,6 +910,7 @@ fn four_options(
 fn add_player_leader(
     candidates: &mut Vec<Candidate>,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     key: &str,
     category: &str,
     text: &str,
@@ -908,15 +945,15 @@ fn add_player_leader(
     {
         return;
     }
-    let correct = player_label(winner_id);
+    let correct = player_label(labels, winner_id);
     let distractors = usable
         .iter()
         .skip(1)
-        .map(|(player_id, _)| player_label(*player_id));
+        .map(|(player_id, _)| player_label(labels, *player_id));
     let Some((options, correct_index)) = four_options(correct, distractors, random) else {
         return;
     };
-    let label = player_label(winner_id);
+    let label = player_label(labels, winner_id);
     let question = PlayerTriviaQuestion::new(
         key,
         category,
@@ -969,6 +1006,7 @@ fn build_match_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let games = players
@@ -993,6 +1031,7 @@ fn build_match_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "matches:most_games",
         "matches",
         "Who has played the most recorded inhouse matches?",
@@ -1024,6 +1063,7 @@ fn build_match_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "matches:longest_current_win_streak",
         "matches",
         "Who is riding the longest current recorded-match win streak?",
@@ -1038,6 +1078,7 @@ fn build_match_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "matches:most_wins",
         "matches",
         "Who has the most recorded match wins?",
@@ -1052,6 +1093,7 @@ fn build_match_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "matches:highest_win_rate",
         "matches",
         "Among players with at least 10 games, who has the highest match win rate?",
@@ -1071,6 +1113,7 @@ fn build_match_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "matches:lowest_win_rate",
         "matches",
         "Among players with at least 10 games, who has the lowest match win rate?",
@@ -1090,6 +1133,7 @@ fn build_match_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "matches:most_losses",
         "matches",
         "Who has the most recorded match losses?",
@@ -1119,7 +1163,7 @@ fn build_match_questions(
             "matches",
             format!(
                 "What is {}'s recorded match record?",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             correct.clone(),
             records
@@ -1128,7 +1172,7 @@ fn build_match_questions(
                 .map(|(_, value)| value.clone()),
             format!(
                 "As of game start, {} was {correct}.",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             format!("player:{player_id}"),
             false,
@@ -1141,6 +1185,7 @@ fn build_rating_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let mut glicko = BTreeMap::new();
@@ -1178,6 +1223,7 @@ fn build_rating_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "ratings:glicko_leader",
         "ratings",
         "Among active calibrated players, who has the highest Glicko rating?",
@@ -1192,6 +1238,7 @@ fn build_rating_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "ratings:openskill_leader",
         "ratings",
         "Among active calibrated players, who has the highest OpenSkill display rating?",
@@ -1212,6 +1259,7 @@ fn build_rating_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "ratings:largest_display_gap",
         "ratings",
         "Whose Glicko and OpenSkill display ratings disagree by the most points?",
@@ -1228,6 +1276,7 @@ fn build_rating_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "ratings:smallest_display_gap",
         "ratings",
         "Whose Glicko and OpenSkill display ratings are closest together?",
@@ -1262,6 +1311,7 @@ fn build_rating_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "ratings:largest_rank_gap",
         "ratings",
         "Whose Glicko rank and OpenSkill rank disagree by the most places?",
@@ -1278,6 +1328,7 @@ fn build_rating_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "ratings:smallest_rank_gap",
         "ratings",
         "Whose Glicko rank and OpenSkill rank are closest?",
@@ -1303,7 +1354,7 @@ fn build_rating_questions(
             "ratings",
             format!(
                 "What is {}'s Glicko rank among active calibrated players?",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             correct.clone(),
             rank_options
@@ -1312,7 +1363,7 @@ fn build_rating_questions(
                 .cloned(),
             format!(
                 "As of game start, {} ranked {correct} by Glicko.",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             format!("player:{player_id}"),
             false,
@@ -1323,6 +1374,7 @@ fn build_rating_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "ratings:most_recalibrations",
         "ratings",
         "Who has completed the most recorded rating recalibrations?",
@@ -1355,6 +1407,7 @@ fn build_rating_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "ratings:largest_single_gain",
         "ratings",
         "Who has the largest single-match Glicko rating gain on record?",
@@ -1376,6 +1429,7 @@ fn build_hero_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let mut distinct_played = BTreeMap::<DiscordId, BTreeSet<i64>>::new();
@@ -1411,6 +1465,7 @@ fn build_hero_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "heroes:most_distinct_played",
         "heroes",
         "Who has played the widest variety of heroes in enriched matches?",
@@ -1434,6 +1489,7 @@ fn build_hero_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "heroes:most_distinct_won",
         "heroes",
         "Who has recorded wins with the most distinct heroes?",
@@ -1453,6 +1509,7 @@ fn build_hero_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "heroes:most_distinct_lost",
         "heroes",
         "Who has recorded losses with the most distinct heroes?",
@@ -1506,13 +1563,13 @@ fn build_hero_questions(
                 "heroes",
                 format!(
                     "Which hero has {} played most often?",
-                    player_label(*player_id)
+                    player_label(labels, *player_id)
                 ),
                 hero.clone(),
                 all_hero_names.iter().filter(|name| *name != &hero).cloned(),
                 format!(
                     "As of game start, {} had {} enriched games on {hero}.",
-                    player_label(*player_id),
+                    player_label(labels, *player_id),
                     ordered_counts[0].1
                 ),
                 format!("player:{player_id}"),
@@ -1531,7 +1588,7 @@ fn build_hero_questions(
             "heroes",
             format!(
                 "Which hero did {} play most recently?",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             latest_hero.clone(),
             all_hero_names
@@ -1540,7 +1597,7 @@ fn build_hero_questions(
                 .cloned(),
             format!(
                 "Ordering enriched matches by match date and match ID, {}'s latest hero was {latest_hero}.",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             format!("player:{player_id}"),
             false,
@@ -1560,13 +1617,13 @@ fn build_hero_questions(
                 "heroes",
                 format!(
                     "Which hero has {} won with most often?",
-                    player_label(*player_id)
+                    player_label(labels, *player_id)
                 ),
                 hero.clone(),
                 all_hero_names.iter().filter(|name| *name != &hero).cloned(),
                 format!(
                     "As of game start, {} had {} wins on {hero}.",
-                    player_label(*player_id),
+                    player_label(labels, *player_id),
                     ordered_wins[0].1
                 ),
                 format!("player:{player_id}"),
@@ -1599,13 +1656,13 @@ fn build_hero_questions(
                     "heroes",
                     format!(
                         "Which qualifying hero gives {} their lowest win rate?",
-                        player_label(*player_id)
+                        player_label(labels, *player_id)
                     ),
                     hero.clone(),
                     rates.iter().skip(1).map(|row| hero_name(row.0)),
                     format!(
                         "As of game start, {} was {:.1}% across {} games on {hero}.",
-                        player_label(*player_id),
+                        player_label(labels, *player_id),
                         rates[0].1 * 100.0,
                         rates[0].2
                     ),
@@ -1637,7 +1694,7 @@ fn build_hero_questions(
                 "lanes",
                 format!(
                     "Which lane has {} played most often?",
-                    player_label(*player_id)
+                    player_label(labels, *player_id)
                 ),
                 lane.to_owned(),
                 ["Roaming", "Safe Lane", "Mid Lane", "Off Lane", "Jungle"]
@@ -1646,7 +1703,7 @@ fn build_hero_questions(
                     .map(str::to_owned),
                 format!(
                     "As of game start, {} had {} enriched games in the {lane}.",
-                    player_label(*player_id),
+                    player_label(labels, *player_id),
                     lanes[0].1
                 ),
                 format!("player:{player_id}"),
@@ -1655,13 +1712,14 @@ fn build_hero_questions(
             );
         }
     }
-    build_performance_questions(candidates, &eligible, players, random);
+    build_performance_questions(candidates, &eligible, players, labels, random);
 }
 
 fn build_performance_questions(
     candidates: &mut Vec<Candidate>,
     enriched: &BTreeMap<DiscordId, Vec<&ParticipantRow>>,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     type Metric = (
@@ -1702,6 +1760,7 @@ fn build_performance_questions(
         add_player_leader(
             candidates,
             players,
+            labels,
             &format!("performance:highest_{field}_average"),
             "performance",
             &format!("Among players with at least 10 enriched games, who has the highest {label}?"),
@@ -1740,6 +1799,7 @@ fn build_performance_questions(
         add_player_leader(
             candidates,
             players,
+            labels,
             &format!("performance:record_{field}"),
             "performance",
             &format!("Who holds the highest {label}?"),
@@ -1758,6 +1818,7 @@ fn build_pairing_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     type PairRecord = (i64, i64);
@@ -1809,14 +1870,17 @@ fn build_pairing_questions(
                     "pairings",
                     format!(
                         "Who has played alongside {} most often?",
-                        player_label(player_id)
+                        player_label(labels, player_id)
                     ),
-                    player_label(teammate_id),
-                    by_games.iter().skip(1).map(|row| player_label(*row.0)),
+                    player_label(labels, teammate_id),
+                    by_games
+                        .iter()
+                        .skip(1)
+                        .map(|row| player_label(labels, *row.0)),
                     format!(
                         "As of game start, {} and {} had shared {games} matches.",
-                        player_label(player_id),
-                        player_label(teammate_id)
+                        player_label(labels, player_id),
+                        player_label(labels, teammate_id)
                     ),
                     format!("player:{teammate_id}"),
                     false,
@@ -1842,10 +1906,13 @@ fn build_pairing_questions(
                     "pairings",
                     format!(
                         "Among qualifying teammates, who has the highest win rate with {}?",
-                        player_label(player_id)
+                        player_label(labels, player_id)
                     ),
-                    player_label(teammate_id),
-                    qualifying.iter().skip(1).map(|row| player_label(row.0)),
+                    player_label(labels, teammate_id),
+                    qualifying
+                        .iter()
+                        .skip(1)
+                        .map(|row| player_label(labels, row.0)),
                     format!(
                         "As of game start, they were {wins}W–{}L together ({:.1}%).",
                         games - wins,
@@ -1868,10 +1935,13 @@ fn build_pairing_questions(
                     "pairings",
                     format!(
                         "Among qualifying teammates, who has the lowest win rate with {}?",
-                        player_label(player_id)
+                        player_label(labels, player_id)
                     ),
-                    player_label(teammate_id),
-                    qualifying.iter().skip(1).map(|row| player_label(row.0)),
+                    player_label(labels, teammate_id),
+                    qualifying
+                        .iter()
+                        .skip(1)
+                        .map(|row| player_label(labels, row.0)),
                     format!(
                         "As of game start, they were {wins}W–{}L together ({:.1}%).",
                         games - wins,
@@ -1896,14 +1966,17 @@ fn build_pairing_questions(
                     "pairings",
                     format!(
                         "Who has faced {} as an opponent most often?",
-                        player_label(player_id)
+                        player_label(labels, player_id)
                     ),
-                    player_label(opponent_id),
-                    by_games.iter().skip(1).map(|row| player_label(*row.0)),
+                    player_label(labels, opponent_id),
+                    by_games
+                        .iter()
+                        .skip(1)
+                        .map(|row| player_label(labels, *row.0)),
                     format!(
                         "As of game start, {} had faced {} {games} times.",
-                        player_label(player_id),
-                        player_label(opponent_id)
+                        player_label(labels, player_id),
+                        player_label(labels, opponent_id)
                     ),
                     format!("player:{opponent_id}"),
                     false,
@@ -1929,15 +2002,18 @@ fn build_pairing_questions(
                     "pairings",
                     format!(
                         "Against which qualifying opponent does {} have the best win rate?",
-                        player_label(player_id)
+                        player_label(labels, player_id)
                     ),
-                    player_label(opponent_id),
-                    qualifying.iter().skip(1).map(|row| player_label(row.0)),
+                    player_label(labels, opponent_id),
+                    qualifying
+                        .iter()
+                        .skip(1)
+                        .map(|row| player_label(labels, row.0)),
                     format!(
                         "As of game start, {} was {wins}W–{}L against {} ({:.1}%).",
-                        player_label(player_id),
+                        player_label(labels, player_id),
                         games - wins,
-                        player_label(opponent_id),
+                        player_label(labels, opponent_id),
                         rate * 100.0
                     ),
                     format!("player:{opponent_id}"),
@@ -1953,6 +2029,7 @@ fn build_economy_and_tip_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let balances = players
@@ -1962,6 +2039,7 @@ fn build_economy_and_tip_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "economy:highest_balance",
         "economy",
         "Who has the highest current Jopacoin balance?",
@@ -1980,6 +2058,7 @@ fn build_economy_and_tip_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "economy:lowest_balance",
         "economy",
         "Who has the lowest current Jopacoin balance?",
@@ -2003,6 +2082,7 @@ fn build_economy_and_tip_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "economy:deepest_historical_debt",
         "economy",
         "Who has recorded the deepest all-time Jopacoin debt?",
@@ -2028,7 +2108,7 @@ fn build_economy_and_tip_questions(
             "economy",
             format!(
                 "What was {}'s Jopacoin balance when this game began?",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             correct.clone(),
             balance_options
@@ -2037,7 +2117,7 @@ fn build_economy_and_tip_questions(
                 .map(|(_, value)| value.clone()),
             format!(
                 "At the question snapshot, {} had {correct}.",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             format!("player:{player_id}"),
             false,
@@ -2053,6 +2133,7 @@ fn build_economy_and_tip_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "economy:most_bankruptcies",
         "economy",
         "Who has the most recorded bankruptcy declarations?",
@@ -2082,6 +2163,7 @@ fn build_economy_and_tip_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "tips:most_jc_sent",
         "tips",
         "Who has sent the most total JC through tips?",
@@ -2099,6 +2181,7 @@ fn build_economy_and_tip_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "tips:most_transactions_sent",
         "tips",
         "Who has sent the most individual tip transactions?",
@@ -2116,6 +2199,7 @@ fn build_economy_and_tip_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "tips:most_transactions_received",
         "tips",
         "Who has received the most individual tip transactions?",
@@ -2133,6 +2217,7 @@ fn build_economy_and_tip_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "tips:most_jc_received",
         "tips",
         "Who has received the most total JC through tips?",
@@ -2153,6 +2238,7 @@ fn build_betting_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     #[derive(Default)]
@@ -2204,6 +2290,7 @@ fn build_betting_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "betting:most_bets",
         "betting",
         "Who has placed the most settled match bets?",
@@ -2221,6 +2308,7 @@ fn build_betting_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "betting:most_wagered",
         "betting",
         "Who has wagered the most total leveraged JC on settled matches?",
@@ -2239,6 +2327,7 @@ fn build_betting_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "betting:highest_win_rate",
         "betting",
         "Among players with at least five settled bets, who has the best betting win rate?",
@@ -2267,6 +2356,7 @@ fn build_betting_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "betting:largest_loss",
         "betting",
         "Who has the largest cumulative loss on settled match bets?",
@@ -2312,6 +2402,7 @@ fn build_wheel_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let rows = snapshot
@@ -2342,6 +2433,7 @@ fn build_wheel_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "wheel:most_spins",
         "wheel",
         "Who has the most recorded Wheel of Fortune spins?",
@@ -2377,13 +2469,13 @@ fn build_wheel_questions(
             "wheel",
             format!(
                 "Which exact wheel outcome has {} recorded most often?",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             code.clone(),
             all_codes.iter().filter(|other| *other != code).cloned(),
             format!(
                 "As of game start, {} had landed {code} {times} times.",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             format!("player:{player_id}"),
             false,
@@ -2403,6 +2495,7 @@ fn build_wheel_questions(
         add_player_leader(
             candidates,
             players,
+            labels,
             &format!("wheel:exact_outcome_leader:{slug}"),
             "wheel",
             &format!("Who has recorded the exact wheel outcome {code} most often?"),
@@ -2448,13 +2541,13 @@ fn build_wheel_questions(
                 "wheel",
                 format!(
                     "How many times has {} recorded the exact wheel outcome {code}?",
-                    player_label(*player_id)
+                    player_label(labels, *player_id)
                 ),
                 correct.clone(),
                 plausible.into_iter().map(count_option),
                 format!(
                     "At the question snapshot, {} had recorded {code} {correct}.",
-                    player_label(*player_id)
+                    player_label(labels, *player_id)
                 ),
                 format!("player:{player_id}"),
                 false,
@@ -2481,14 +2574,14 @@ fn build_wheel_questions(
                 ),
                 "wheel",
                 format!("Who most recently recorded the exact wheel outcome {code}?"),
-                player_label(player_id),
+                player_label(labels, player_id),
                 players
                     .keys()
                     .filter(|other_id| **other_id != player_id)
-                    .map(|other_id| player_label(*other_id)),
+                    .map(|other_id| player_label(labels, *other_id)),
                 format!(
                     "The latest recorded {code} outcome belonged to {}.",
-                    player_label(player_id)
+                    player_label(labels, player_id)
                 ),
                 format!("player:{player_id}"),
                 false,
@@ -2502,6 +2595,7 @@ fn build_double_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let mut attempts = BTreeMap::<DiscordId, i64>::new();
@@ -2516,6 +2610,7 @@ fn build_double_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "double:most_attempts",
         "double-or-nothing",
         "Who has attempted Double or Nothing most often?",
@@ -2535,6 +2630,7 @@ fn build_double_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "double:most_wins",
         "double-or-nothing",
         "Who has the most recorded Double-or-Nothing wins?",
@@ -2563,6 +2659,7 @@ fn build_double_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "double:highest_win_rate",
         "double-or-nothing",
         "Among players with five attempts, who has the best Double-or-Nothing win rate?",
@@ -2618,6 +2715,7 @@ fn build_prediction_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let mut by_player = BTreeMap::<DiscordId, Vec<(&PredictionPositionRow, i64, String)>>::new();
@@ -2669,6 +2767,7 @@ fn build_prediction_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "predictions:most_wins",
         "predictions",
         "Among players with three resolved positions, who has the most profitable prediction markets?",
@@ -2687,6 +2786,7 @@ fn build_prediction_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "predictions:best_total_pnl",
         "predictions",
         "Among players with three resolved positions, who has the highest total prediction P&L?",
@@ -2703,6 +2803,7 @@ fn build_prediction_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "predictions:most_losses",
         "predictions",
         "Who has lost JC on the most resolved prediction markets?",
@@ -2748,13 +2849,13 @@ fn build_prediction_questions(
                     "predictions",
                     format!(
                         "Which resolved market did {} finish with a loss on?",
-                        player_label(*player_id)
+                        player_label(labels, *player_id)
                     ),
                     market.clone(),
                     non_losses.clone(),
                     format!(
                         "As of game start, {} had a {pnl:+} JC result on {market}.",
-                        player_label(*player_id)
+                        player_label(labels, *player_id)
                     ),
                     format!("player:{player_id}"),
                     false,
@@ -2767,13 +2868,13 @@ fn build_prediction_questions(
                     "predictions",
                     format!(
                         "Which resolved market did {} finish with a profit on?",
-                        player_label(*player_id)
+                        player_label(labels, *player_id)
                     ),
                     market.clone(),
                     non_wins.clone(),
                     format!(
                         "As of game start, {} had a +{pnl} JC result on {market}.",
-                        player_label(*player_id)
+                        player_label(labels, *player_id)
                     ),
                     format!("player:{player_id}"),
                     false,
@@ -2803,6 +2904,7 @@ fn build_prediction_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "predictions:most_trades",
         "predictions",
         "Who has made the most trades in resolved prediction markets?",
@@ -2822,6 +2924,7 @@ fn build_prediction_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "predictions:most_contract_volume",
         "predictions",
         "Who has traded the most contracts in resolved prediction markets?",
@@ -2844,6 +2947,7 @@ fn build_dig_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let tunnels = snapshot
@@ -2900,6 +3004,7 @@ fn build_dig_questions(
         add_player_leader(
             candidates,
             players,
+            labels,
             &format!("dig:{suffix}"),
             "dig",
             text,
@@ -2972,7 +3077,7 @@ fn build_dig_questions(
                 "dig",
                 format!(
                     "What was {}'s {label} when this game began?",
-                    player_label(*player_id)
+                    player_label(labels, *player_id)
                 ),
                 correct.clone(),
                 rendered
@@ -2981,7 +3086,7 @@ fn build_dig_questions(
                     .map(|(_, rendered)| rendered.clone()),
                 format!(
                     "At the question snapshot, {}'s {label} was {correct}.",
-                    player_label(*player_id)
+                    player_label(labels, *player_id)
                 ),
                 format!("player:{player_id}"),
                 false,
@@ -3029,6 +3134,7 @@ fn build_dig_questions(
         add_player_leader(
             candidates,
             players,
+            labels,
             key,
             "dig",
             text,
@@ -3061,6 +3167,7 @@ fn build_dig_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "dig:most_cave_ins",
         "dig",
         "Who has the most recorded Dig cave-ins or depth-losing collapses?",
@@ -3085,6 +3192,7 @@ fn build_mafia_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let games = snapshot
@@ -3127,6 +3235,7 @@ fn build_mafia_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "mafia:most_games",
         "mafia",
         "Who has played the most resolved, non-cancelled Mafia games?",
@@ -3146,6 +3255,7 @@ fn build_mafia_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "mafia:most_wins",
         "mafia",
         "Among players with three resolved Mafia games, who has the most wins?",
@@ -3174,6 +3284,7 @@ fn build_mafia_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "mafia:most_mvp_awards",
         "mafia",
         "Who has earned the most Mafia MVP awards?",
@@ -3213,13 +3324,13 @@ fn build_mafia_questions(
             "mafia",
             format!(
                 "Which Mafia role has {} received most often?",
-                player_label(*player_id)
+                player_label(labels, *player_id)
             ),
             role.clone(),
             all_roles.iter().filter(|other| *other != &role).cloned(),
             format!(
                 "Across resolved, non-cancelled games, {} had the {role} role {} times.",
-                player_label(*player_id),
+                player_label(labels, *player_id),
                 ordered[0].1
             ),
             format!("player:{player_id}"),
@@ -3251,6 +3362,7 @@ fn build_mafia_questions(
         add_player_leader(
             candidates,
             players,
+            labels,
             &format!("mafia:most_{}_actions", action_type.to_lowercase()),
             "mafia",
             &format!("Who has made the most recorded {label} in resolved Mafia games?"),
@@ -3283,6 +3395,7 @@ fn build_trivia_history_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let mut sessions = BTreeMap::<DiscordId, i64>::new();
@@ -3322,6 +3435,7 @@ fn build_trivia_history_questions(
         add_player_leader(
             candidates,
             players,
+            labels,
             key,
             "trivia",
             text,
@@ -3343,6 +3457,7 @@ fn build_disbursement_questions(
     candidates: &mut Vec<Candidate>,
     snapshot: &PlayerTriviaSnapshot,
     players: &BTreeMap<DiscordId, &PlayerTriviaPlayer>,
+    labels: &PlayerLabels,
     random: &mut impl PlayerTriviaRandom,
 ) {
     let rows = snapshot
@@ -3377,6 +3492,7 @@ fn build_disbursement_questions(
     add_player_leader(
         candidates,
         players,
+        labels,
         "disburse:most_finalized_ballots",
         "disbursement",
         "Who has cast the most ballots in finalized nonprofit disbursements?",
@@ -3412,13 +3528,13 @@ fn build_disbursement_questions(
             "disbursement",
             format!(
                 "Which finalized disbursement method has {} voted for most often?",
-                player_label(player_id)
+                player_label(labels, player_id)
             ),
             method.clone(),
             all_methods.iter().filter(|other| *other != method).cloned(),
             format!(
                 "As of game start, {} had cast {votes} finalized ballots for {method}.",
-                player_label(player_id)
+                player_label(labels, player_id)
             ),
             format!("player:{player_id}"),
             false,

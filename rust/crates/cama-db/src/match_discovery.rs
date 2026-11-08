@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
+use rusqlite::{OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -58,7 +58,7 @@ impl MatchDiscoveryRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         let connection = open_runtime_connection(&self.path)?;
         #[cfg(test)]
         connection.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, self.trace);

@@ -1,14 +1,12 @@
 //! Native semantic PNG charts for `/ratinganalysis`.
 
-use std::sync::OnceLock;
-
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 
 use crate::drawing::{
     DISCORD_ACCENT, DISCORD_BG, DISCORD_DARKER, DISCORD_GREEN, DISCORD_GREY, DISCORD_GRID,
     DISCORD_WHITE, DISCORD_YELLOW, Rgba,
 };
-use crate::font_assets::{DejaVuFace, load_dejavu_font};
+use crate::font_assets::{DejaVuFace, dejavu_font};
 use crate::rating_analysis_command::{CalibrationCurveData, RatingAnalysisDrawingPort};
 use crate::rating_comparison_service::RatingComparisonResult;
 
@@ -549,19 +547,11 @@ impl Canvas {
 }
 
 fn rating_font(bold: bool) -> Option<&'static Font> {
-    static REGULAR: OnceLock<Option<Font>> = OnceLock::new();
-    static BOLD: OnceLock<Option<Font>> = OnceLock::new();
-    let slot = if bold { &BOLD } else { &REGULAR };
-    slot.get_or_init(|| {
-        load_dejavu_font(if bold {
-            DejaVuFace::SansBold
-        } else {
-            DejaVuFace::Sans
-        })
-        .ok()
-        .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+    dejavu_font(if bold {
+        DejaVuFace::SansBold
+    } else {
+        DejaVuFace::Sans
     })
-    .as_ref()
 }
 
 fn rating_font_size(scale: i32) -> f32 {
@@ -633,59 +623,7 @@ fn glyph(character: char) -> [u8; 7] {
 }
 
 fn encode_png(canvas: &Canvas) -> Vec<u8> {
-    let mut filtered = Vec::with_capacity((canvas.width * 4 + 1) * canvas.height);
-    for row in canvas.pixels.chunks_exact(canvas.width * 4) {
-        filtered.push(0);
-        filtered.extend_from_slice(row);
-    }
-    let mut zlib = vec![0x78, 0x01];
-    let blocks = filtered.chunks(65_535).collect::<Vec<_>>();
-    for (index, block) in blocks.iter().enumerate() {
-        zlib.push(u8::from(index + 1 == blocks.len()));
-        let length = u16::try_from(block.len()).unwrap_or(u16::MAX);
-        zlib.extend_from_slice(&length.to_le_bytes());
-        zlib.extend_from_slice(&(!length).to_le_bytes());
-        zlib.extend_from_slice(block);
-    }
-    zlib.extend_from_slice(&adler32(&filtered).to_be_bytes());
-    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-    let mut header = Vec::new();
-    header.extend_from_slice(&(canvas.width as u32).to_be_bytes());
-    header.extend_from_slice(&(canvas.height as u32).to_be_bytes());
-    header.extend_from_slice(&[8, 6, 0, 0, 0]);
-    append_chunk(&mut png, b"IHDR", &header);
-    append_chunk(&mut png, b"IDAT", &zlib);
-    append_chunk(&mut png, b"IEND", &[]);
-    png
-}
-
-fn append_chunk(png: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
-    png.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    png.extend_from_slice(kind);
-    png.extend_from_slice(payload);
-    let mut crc_data = kind.to_vec();
-    crc_data.extend_from_slice(payload);
-    png.extend_from_slice(&crc32(&crc_data).to_be_bytes());
-}
-
-fn adler32(bytes: &[u8]) -> u32 {
-    let (mut first, mut second) = (1_u32, 0_u32);
-    for byte in bytes {
-        first = (first + u32::from(*byte)) % 65_521;
-        second = (second + first) % 65_521;
-    }
-    (second << 16) | first
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffff_u32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320_u32 & (0_u32.wrapping_sub(crc & 1)));
-        }
-    }
-    !crc
+    crate::png_encoder::encode_rgba_png(canvas.width, canvas.height, &canvas.pixels)
 }
 
 #[cfg(test)]

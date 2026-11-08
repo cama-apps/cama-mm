@@ -56,11 +56,6 @@ impl UserId {
     pub const fn value(self) -> i64 {
         self.0
     }
-
-    #[must_use]
-    pub const fn is_deliverable(self) -> bool {
-        self.0 > 0
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -411,18 +406,6 @@ impl InMemoryReminderStore {
         self.state
             .lock()
             .map_err(|_| PortError::new("in_memory_reminder_store", "state lock poisoned"))
-    }
-
-    pub fn seed_player_rating(
-        &self,
-        user_id: UserId,
-        guild_id: GuildId,
-        rating: Option<f64>,
-    ) -> Result<(), PortError> {
-        self.lock_state()?
-            .ratings
-            .insert((guild_id, user_id), rating);
-        Ok(())
     }
 
     pub fn seed_reminder_timestamps(
@@ -813,7 +796,6 @@ pub struct ReminderService<S, C> {
     store: S,
     clock: C,
     tasks: BTreeMap<ReminderTaskKey, ScheduledReminder>,
-    cancelled_tasks: BTreeSet<TaskId>,
     next_task_id: u64,
     dig_reconcile_versions: BTreeMap<ReminderTaskKey, u64>,
     dig_reference_times: BTreeMap<ReminderTaskKey, i64>,
@@ -832,7 +814,6 @@ where
             store,
             clock,
             tasks: BTreeMap::new(),
-            cancelled_tasks: BTreeSet::new(),
             next_task_id: 0,
             dig_reconcile_versions: BTreeMap::new(),
             dig_reference_times: BTreeMap::new(),
@@ -865,16 +846,6 @@ where
     #[must_use]
     pub fn task(&self, key: ReminderTaskKey) -> Option<&ScheduledReminder> {
         self.tasks.get(&key)
-    }
-
-    #[must_use]
-    pub fn was_cancelled(&self, task_id: TaskId) -> bool {
-        self.cancelled_tasks.contains(&task_id)
-    }
-
-    #[must_use]
-    pub fn dig_reconcile_version(&self, key: ReminderTaskKey) -> Option<u64> {
-        self.dig_reconcile_versions.get(&key).copied()
     }
 
     pub fn get_preferences(
@@ -914,21 +885,6 @@ where
     }
 
     #[cfg(test)]
-    fn add_lobby_player_subscription(
-        &self,
-        subscriber_id: UserId,
-        target_id: UserId,
-        guild_id: Option<GuildId>,
-    ) -> Result<bool, PortError> {
-        self.store.add_lobby_target_subscription(
-            subscriber_id,
-            target_id,
-            GuildId::normalize(guild_id),
-            self.clock.now_nanoseconds(),
-        )
-    }
-
-    #[cfg(test)]
     fn schedule_dig_reminder(
         &mut self,
         user_id: UserId,
@@ -942,19 +898,6 @@ where
             ReminderKind::Dig,
             ready_at,
             preference_enabled,
-        )
-    }
-
-    pub fn has_lobby_player_subscription(
-        &self,
-        subscriber_id: UserId,
-        target_id: UserId,
-        guild_id: Option<GuildId>,
-    ) -> Result<bool, PortError> {
-        self.store.has_lobby_target_subscription(
-            subscriber_id,
-            target_id,
-            GuildId::normalize(guild_id),
         )
     }
 
@@ -1089,7 +1032,6 @@ where
         let mut changed = Vec::with_capacity(old_keys.len() * 2);
         for key in old_keys {
             let task = self.tasks.remove(&key).expect("collected pending task");
-            self.cancelled_tasks.insert(task.id);
             changed.push(key);
             let replacement = ReminderTaskKey {
                 user_id: new,
@@ -1496,9 +1438,7 @@ where
     }
 
     fn cancel_task(&mut self, key: ReminderTaskKey) -> Option<TaskId> {
-        let task_id = self.tasks.remove(&key).map(|task| task.id)?;
-        self.cancelled_tasks.insert(task_id);
-        Some(task_id)
+        self.tasks.remove(&key).map(|task| task.id)
     }
 
     fn cancel_stale_dig_for_recovery(

@@ -360,6 +360,8 @@ version = "0.1.0"
 dependencies = [
  "cama-db",
  "cama-domain",
+ "chrono",
+ "fontdue",
  "gif",
  "rusqlite",
  "serde_json",
@@ -554,7 +556,6 @@ dependencies = [
  "cama-steam",
  "chrono",
  "fastrand",
- "flate2",
  "fontdue",
  "fs2",
  "getrandom 0.4.3",

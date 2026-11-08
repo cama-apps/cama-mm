@@ -25,16 +25,6 @@ fn bet(at: i64, profit: i64) -> GambleEvent {
 }
 
 #[test]
-fn number_formatting_groups_and_signs() {
-    assert_eq!(thousands(0), "0");
-    assert_eq!(thousands(1_234_567), "1,234,567");
-    assert_eq!(thousands(-4_520), "-4,520");
-    assert_eq!(signed(4_520), "+4,520");
-    assert_eq!(signed(-12), "-12");
-    assert_eq!(signed(0), "0");
-}
-
-#[test]
 fn copy_choices_are_stable_per_player_and_vary_across_players() {
     let pool = ["a", "b", "c", "d"];
     assert_eq!(pick(SEED, 1, &pool), pick(SEED, 1, &pool));

@@ -707,6 +707,63 @@ async fn reconnect_ready_never_releases_a_live_correction_lease() {
     assert_eq!(owner.as_deref(), Some("live-command-owner"));
 }
 
+/// The test runtime has a single thread, so a lease release that blocked on
+/// the SQLite lock inline would finish (after the busy timeout) before this
+/// test could observe the recovery task still waiting.
+#[tokio::test(flavor = "current_thread")]
+async fn ready_recovery_waits_for_sqlite_without_blocking_the_async_worker() {
+    let fixture = Fixture::new();
+    let repository = MatchCorrectionRepository::new(fixture.database.path());
+    let control = Arc::new(ProductionAdminMatchCorrectionControl {
+        repository: repository.clone(),
+        database_path: fixture.database.path().to_path_buf(),
+        openskill: CamaOpenSkillSystem::default(),
+        rating: CamaRatingSystem::default(),
+        new_player_mmr_discount: 0,
+        house_payout_multiplier: 1.0,
+        bankruptcy_penalty_rate_per_game: 0.05,
+        vanity_tax_rate: 0.1,
+        low_priority_tax_rate: 0.1,
+        rewards: Arc::new(RepositoryReward {
+            repository,
+            calls: AtomicUsize::new(0),
+        }),
+        vanity_tax: Arc::new(NoVanityTax),
+        replay_gate: Arc::new(AllowReplay),
+    });
+    let observer = Arc::new(AdminMatchCorrectionRecoveryObserver {
+        control,
+        startup_guild_leases_released: Mutex::new(BTreeSet::new()),
+    });
+    let writer = fixture.connection();
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("hold the database write lock");
+
+    let recovery = tokio::spawn({
+        let observer = Arc::clone(&observer);
+        async move {
+            observer
+                .ready_recovery(ReadyRecoveryContext::new(
+                    [GUILD as u64],
+                    Arc::new(EmptyMemberSource),
+                ))
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !recovery.is_finished(),
+        "the lease release must wait on the blocking pool, not the async worker"
+    );
+
+    writer
+        .execute_batch("ROLLBACK")
+        .expect("release the database write lock");
+    let report = recovery.await.expect("recovery task did not panic");
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+}
+
 #[tokio::test]
 async fn ready_observer_leaves_foreign_guild_correction_and_lease_untouched() {
     let fixture = Fixture::new();

@@ -93,7 +93,7 @@ impl MatchDraftRepository {
         guild_id: i64,
     ) -> Result<Option<MatchDraftAnalysis>, MatchDraftRepositoryError> {
         Ok(read_current(
-            &open_runtime_connection(&self.path)?,
+            &*open_runtime_connection(&self.path)?,
             match_id,
             guild_id,
         )?)

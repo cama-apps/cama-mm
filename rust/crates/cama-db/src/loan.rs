@@ -11,9 +11,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{
-    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
-};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
 
 use self::white_stipend::{WhiteStipendFailure, pay_white_stipend};
@@ -194,7 +192,7 @@ impl LoanRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

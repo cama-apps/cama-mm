@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cama_domain::openskill::CamaOpenSkillSystem;
+use cama_domain::openskill::{CamaOpenSkillSystem, OPENSKILL_ALGORITHM_VERSION};
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU};
 use cama_domain::rating::{MAX_GLICKO_RD, cap_glicko_rd};
 use chrono::Utc;
@@ -25,8 +25,6 @@ pub use account_lookup::{AdminAccountLookup, recovery_discord_id};
 #[path = "admin/account_transfer.rs"]
 mod account_transfer;
 pub use account_transfer::TransferError;
-
-const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdminPlayerSnapshot {

@@ -4686,14 +4686,23 @@ fn test_shuffle_display_uses_configured_flat_off_role_value_penalty() {
     ];
     let player_ids = fixture.add_shuffle_pool_from(5_000, player_specs.len(), false);
     let repository = PlayerRepository::new(fixture.database.path());
+    let connection = Connection::open(fixture.database.path()).expect("open display fixture");
     for (player_id, rating, preferred_role) in player_specs {
-        repository
-            .update_roles(player_id, Some(GUILD), &[preferred_role.to_owned()])
-            .expect("set configured display role");
-        repository
-            .update_glicko_rating(player_id, Some(GUILD), rating as f64, 350.0, 0.06)
-            .expect("set configured display rating");
+        connection
+            .execute(
+                "UPDATE players SET preferred_roles=?1, glicko_rating=?2, glicko_rd=350.0,
+                        glicko_volatility=0.06
+                 WHERE discord_id=?3 AND guild_id=?4",
+                params![
+                    format!("[\"{preferred_role}\"]"),
+                    rating as f64,
+                    player_id,
+                    GUILD
+                ],
+            )
+            .expect("set configured display role and rating");
     }
+    drop(connection);
     let inputs = repository
         .get_shuffle_inputs(&player_ids, Some(GUILD))
         .expect("load configured display players");
