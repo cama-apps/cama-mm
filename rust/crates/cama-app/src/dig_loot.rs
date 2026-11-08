@@ -2152,6 +2152,92 @@ pub fn artifact_catalog() -> Vec<ArtifactDef> {
         .collect()
 }
 
+/// One artifact's authored presentation: its name, lore, and effect text.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct ArtifactCatalogEntry {
+    pub id: String,
+    pub name: String,
+    pub layer: String,
+    pub rarity: String,
+    pub lore_text: String,
+    pub is_relic: bool,
+    /// `None` for a curio, which has no equip effect.
+    pub effect: Option<String>,
+    pub min_prestige: i64,
+}
+
+/// Every discoverable artifact with its lore and effect, in authored order.
+/// The embedded snapshot is parsed once per process.
+#[must_use]
+pub fn artifact_catalog_entries() -> &'static [ArtifactCatalogEntry] {
+    static CATALOG: OnceLock<Vec<ArtifactCatalogEntry>> = OnceLock::new();
+    CATALOG.get_or_init(|| {
+        serde_json::from_str(include_str!("dig_artifact_catalog.json"))
+            .unwrap_or_else(|error| panic!("invalid embedded Dig artifact catalog: {error}"))
+    })
+}
+
+/// Readable name for a stored artifact id.
+///
+/// A catalog artifact uses its authored name. A pinnacle relic id
+/// (`pinnacle:<base>:<suffix>:<stat>...`) reads as `<base> of <suffix>`, with a
+/// legacy random-pool suffix re-derived from its stats, and with the stat
+/// labels in parentheses when `with_stats` is set. Any other id is shown as
+/// capitalized words rather than the raw id.
+#[must_use]
+pub fn artifact_display_label(artifact_id: &str, with_stats: bool) -> String {
+    if let Some(entry) = artifact_catalog_entries()
+        .iter()
+        .find(|entry| entry.id == artifact_id)
+    {
+        return entry.name.clone();
+    }
+    if let Some(parts) = artifact_id
+        .strip_prefix("pinnacle:")
+        .map(|rest| rest.split(':').collect::<Vec<_>>())
+        .filter(|parts| parts.len() >= 2)
+    {
+        use crate::dig_bosses::{PINNACLE_RELIC_STATS, pinnacle_suffix_from_stats};
+        use cama_domain::dig_gear::PINNACLE_RELIC_SUFFIX_POOL;
+        let stats = parts[2..]
+            .iter()
+            .filter_map(|id| PINNACLE_RELIC_STATS.iter().find(|stat| stat.id == *id))
+            .collect::<Vec<_>>();
+        let mut suffix = parts[1].to_owned();
+        if !stats.is_empty()
+            && (suffix.is_empty() || PINNACLE_RELIC_SUFFIX_POOL.contains(&parts[1]))
+        {
+            suffix =
+                pinnacle_suffix_from_stats(&stats.iter().map(|stat| stat.id).collect::<Vec<_>>());
+        }
+        let mut label = if suffix.is_empty() {
+            parts[0].to_owned()
+        } else {
+            format!("{} of {suffix}", parts[0])
+        };
+        if with_stats && !stats.is_empty() {
+            let labels = stats.iter().map(|stat| stat.label).collect::<Vec<_>>();
+            label.push_str(&format!(" ({})", labels.join(", ")));
+        }
+        return label;
+    }
+    let words = artifact_id
+        .split(['_', ':'])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(chars).collect()
+            })
+        })
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        "Unknown artifact".to_owned()
+    } else {
+        words.join(" ")
+    }
+}
+
 pub trait LootEntropy {
     fn unit(&mut self) -> f64;
     fn advance(&mut self, minimum: i64, maximum: i64) -> i64;

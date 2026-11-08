@@ -7050,39 +7050,14 @@ impl DigInteractionHandler {
         let artifacts = blocking(move || {
             cama_app::dig_runtime::DigRuntimeService::sqlite(&path)
                 .snapshot(user_id, guild_id)
-                .map(|snapshot| {
-                    let mut grouped = BTreeMap::<String, bool>::new();
-                    for artifact in snapshot.artifacts {
-                        grouped
-                            .entry(artifact.artifact_id)
-                            .and_modify(|equipped| *equipped |= artifact.equipped)
-                            .or_insert(artifact.equipped);
-                    }
-                    grouped.into_iter().collect::<Vec<_>>()
-                })
+                .map(|snapshot| snapshot.artifacts)
                 .map_err(|error| error.to_string())
         })
         .await?;
-        let description = if artifacts.is_empty() {
-            "You haven't found any artifacts yet.".to_owned()
-        } else {
-            artifacts
-                .iter()
-                .map(|(id, equipped)| {
-                    format!("• `{id}`{}", if *equipped { " *(equipped)*" } else { "" })
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        followup(
-            &responder,
-            InteractionResponse::message("").embed(
-                InteractionEmbed::titled("Artifact Catalog")
-                    .description(description)
-                    .color(GOLD_COLOR),
-            ),
-        )
-        .await
+        for embed in artifact_catalog_embeds(&artifacts) {
+            followup(&responder, InteractionResponse::message("").embed(embed)).await?;
+        }
+        Ok(())
     }
 
     async fn command_gear(
@@ -9419,6 +9394,201 @@ fn artifact_name(artifact_id: &str) -> String {
         )
 }
 
+const ARTIFACT_FIELDS_PER_EMBED: usize = 20;
+const ARTIFACT_FIELD_CHARACTER_BUDGET: usize = cama_domain::embed_safety::TOTAL_LIMIT - 700;
+
+fn artifact_ownership_suffix(ownership: Option<(usize, usize)>) -> String {
+    ownership.map_or_else(String::new, |(copies, equipped)| {
+        let mut suffix = format!(" — Owned ×{copies}");
+        if equipped > 0 {
+            suffix.push_str(&format!(" • Equipped ×{equipped}"));
+        }
+        suffix
+    })
+}
+
+/// One catalog artifact as an embed field: rarity, layer, kind, lore, effect.
+fn artifact_definition_field(
+    artifact: &cama_app::dig_loot::ArtifactCatalogEntry,
+    ownership: Option<(usize, usize)>,
+) -> (String, String) {
+    use cama_domain::embed_safety::{FIELD_NAME_LIMIT, FIELD_VALUE_LIMIT, truncate_field};
+    let kind = if artifact.is_relic { "Relic" } else { "Curio" };
+    let mut metadata = format!(
+        "**{}** • **{}** • **{kind}**",
+        artifact.rarity, artifact.layer
+    );
+    if artifact.min_prestige != 0 {
+        metadata.push_str(&format!(" • **Prestige P{}+**", artifact.min_prestige));
+    }
+    let effect = artifact
+        .effect
+        .as_deref()
+        .filter(|effect| !effect.is_empty())
+        .unwrap_or("Collectible only (no equip effect).");
+    (
+        truncate_field(
+            &format!("{}{}", artifact.name, artifact_ownership_suffix(ownership)),
+            FIELD_NAME_LIMIT,
+        ),
+        truncate_field(
+            &format!("{metadata}\n*{}*\n**Effect:** {effect}", artifact.lore_text),
+            FIELD_VALUE_LIMIT,
+        ),
+    )
+}
+
+/// An owned artifact missing from the catalog: a rolled pinnacle relic or a
+/// retired id.
+fn artifact_fallback_field(
+    artifact_id: &str,
+    copies: usize,
+    equipped: usize,
+    is_relic: bool,
+) -> (String, String) {
+    use cama_domain::embed_safety::{FIELD_NAME_LIMIT, FIELD_VALUE_LIMIT, truncate_field};
+    let (rarity, layer, lore, effect) = if artifact_id.starts_with("pinnacle:") {
+        (
+            "Unique",
+            "Special reward",
+            "A one-of-a-kind artifact whose properties were rolled when it was found.",
+            "Its generated effects are listed in the artifact name.",
+        )
+    } else {
+        (
+            "Legacy",
+            "Unknown layer",
+            "This owned artifact is no longer present in the current catalog.",
+            "No current effect description is available.",
+        )
+    };
+    let kind = if is_relic { "Relic" } else { "Curio" };
+    (
+        truncate_field(
+            &format!(
+                "{}{}",
+                cama_app::dig_loot::artifact_display_label(artifact_id, true),
+                artifact_ownership_suffix(Some((copies, equipped)))
+            ),
+            FIELD_NAME_LIMIT,
+        ),
+        truncate_field(
+            &format!("**{rarity}** • **{layer}** • **{kind}**\n*{lore}*\n**Effect:** {effect}"),
+            FIELD_VALUE_LIMIT,
+        ),
+    )
+}
+
+/// Split fields into gold pages under Discord's field-count and text limits.
+fn artifact_catalog_pages(
+    fields: Vec<(String, String)>,
+    title: &str,
+    description: &str,
+    footer_label: &str,
+    empty_message: Option<&str>,
+) -> Vec<InteractionEmbed> {
+    let mut pages: Vec<Vec<(String, String)>> = Vec::new();
+    let mut current: Vec<(String, String)> = Vec::new();
+    let mut current_characters = 0;
+    for field in fields {
+        let field_characters = field.0.chars().count() + field.1.chars().count();
+        if !current.is_empty()
+            && (current.len() >= ARTIFACT_FIELDS_PER_EMBED
+                || current_characters + field_characters > ARTIFACT_FIELD_CHARACTER_BUDGET)
+        {
+            pages.push(std::mem::take(&mut current));
+            current_characters = 0;
+        }
+        current.push(field);
+        current_characters += field_characters;
+    }
+    if !current.is_empty() || pages.is_empty() {
+        pages.push(current);
+    }
+    let page_count = pages.len();
+    pages
+        .into_iter()
+        .enumerate()
+        .map(|(index, page_fields)| {
+            let page_number = index + 1;
+            let page_title = if page_count > 1 {
+                format!("{title} ({page_number}/{page_count})")
+            } else {
+                title.to_owned()
+            };
+            let mut embed = InteractionEmbed::titled(cama_domain::embed_safety::truncate_field(
+                &page_title,
+                cama_domain::embed_safety::TITLE_LIMIT,
+            ))
+            .color(GOLD_COLOR);
+            if page_number == 1 {
+                embed = embed.description(match empty_message {
+                    Some(message) if page_fields.is_empty() => {
+                        format!("{description}\n\n{message}")
+                    }
+                    _ => description.to_owned(),
+                });
+            }
+            for (name, value) in page_fields {
+                embed = embed.field(name, value, false);
+            }
+            embed.footer(format!("{footer_label} • Page {page_number}/{page_count}"))
+        })
+        .collect()
+}
+
+/// The full artifact catalog followed by the caller's own collection.
+fn artifact_catalog_embeds(
+    owned_rows: &[cama_app::dig_runtime::DigRuntimeArtifact],
+) -> Vec<InteractionEmbed> {
+    let catalog = cama_app::dig_loot::artifact_catalog_entries();
+    let mut embeds = artifact_catalog_pages(
+        catalog
+            .iter()
+            .map(|artifact| artifact_definition_field(artifact, None))
+            .collect(),
+        "Dig Artifact Catalog",
+        "Every discoverable artifact. Relics have equippable effects; curios are collectible keepsakes.",
+        &format!("Catalog: {} artifacts", catalog.len()),
+        None,
+    );
+
+    // (copies, equipped, is_relic) per owned artifact id.
+    let mut owned = BTreeMap::<&str, (usize, usize, bool)>::new();
+    for row in owned_rows.iter().filter(|row| !row.artifact_id.is_empty()) {
+        let summary = owned.entry(row.artifact_id.as_str()).or_default();
+        summary.0 += 1;
+        summary.1 += usize::from(row.equipped);
+        summary.2 |= row.is_relic;
+    }
+    let mut owned_fields = catalog
+        .iter()
+        .filter_map(|artifact| {
+            owned
+                .remove(artifact.id.as_str())
+                .map(|(copies, equipped, _)| {
+                    artifact_definition_field(artifact, Some((copies, equipped)))
+                })
+        })
+        .collect::<Vec<_>>();
+    owned_fields.extend(
+        owned
+            .into_iter()
+            .map(|(artifact_id, (copies, equipped, is_relic))| {
+                artifact_fallback_field(artifact_id, copies, equipped, is_relic)
+            }),
+    );
+    let unique_owned = owned_fields.len();
+    embeds.extend(artifact_catalog_pages(
+        owned_fields,
+        "Your Artifacts",
+        "Artifacts owned by you in this server, repeated from the catalog for quick reference.",
+        &format!("Your collection: {unique_owned} unique artifacts"),
+        Some("You haven't found any artifacts yet."),
+    ));
+    embeds
+}
+
 fn layer_color(layer: cama_app::dig_service::Layer) -> u32 {
     match layer.name {
         "Dirt" => 0x8B_45_13,
@@ -9726,6 +9896,13 @@ fn python_dig_result_embed(
             true,
         );
     }
+    if result.streak_charm_used {
+        embed = embed.field(
+            "Streak Charm",
+            "Saved your daily streak after the missed day.",
+            false,
+        );
+    }
     if let Some(artifact_id) = result.artifact_id.as_deref() {
         let artifact_name = cama_app::dig_loot::artifact_catalog()
             .into_iter()
@@ -9738,6 +9915,29 @@ fn python_dig_result_embed(
     }
     if !result.items_used.is_empty() {
         embed = embed.field("Items Used", result.items_used.join(", "), true);
+    }
+    let auto_buy_lines = result
+        .auto_purchases
+        .iter()
+        .filter_map(|purchase| {
+            let item = &purchase.item;
+            match purchase.status.as_str() {
+                "purchased" => Some(format!(
+                    "{item}: bought ({} {JOPACOIN_EMOTE})",
+                    purchase.cost
+                )),
+                "queued_from_inventory" => Some(format!("{item}: from inventory")),
+                "skipped_insufficient_balance" => {
+                    Some(format!("{item}: skipped (need {} JC)", purchase.cost))
+                }
+                "skipped_inventory_full" => Some(format!("{item}: skipped (inventory full)")),
+                "skipped_error" => Some(format!("{item}: skipped")),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    if !auto_buy_lines.is_empty() {
+        embed = embed.field("Auto-Buy", auto_buy_lines.join("\n"), true);
     }
     if result.luminosity_drained > 0 || result.luminosity_after < 100 {
         let luminosity = result.luminosity_after.clamp(0, 100);

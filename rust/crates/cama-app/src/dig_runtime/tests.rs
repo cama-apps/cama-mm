@@ -6437,6 +6437,17 @@ fn sqlite_auto_buy_hard_hat_charges_the_shop_catalog_price() {
             .expect("hard hat catalog entry")
             .cost
     );
+    // The result card shows the same purchase under the shop name.
+    assert_eq!(
+        outcome.auto_purchases,
+        [super::DigRuntimeAutoPurchase {
+            item: "Hard Hat".to_owned(),
+            status: "purchased".to_owned(),
+            cost: crate::dig_loot::consumable("hard_hat")
+                .expect("hard hat catalog entry")
+                .cost,
+        }]
+    );
 }
 
 #[test]
@@ -7440,4 +7451,210 @@ fn test_boss_is_never_reopened_on_the_dig_right_after_a_fight() {
         })
         .expect("boss reopen");
     assert_eq!(reopened.boss_boundary, Some(25));
+}
+
+/// Seed a running daily streak whose last dig was `days_ago` game days before
+/// the Dig at `now`, plus `charms` Streak Charms in the satchel.
+fn seed_streak_charm_tunnel(
+    database: &FastTestDatabase,
+    discord_id: i64,
+    guild_id: i64,
+    now: i64,
+    days_ago: i64,
+    charms: usize,
+) -> String {
+    seed_live_runtime_tunnel(
+        database,
+        discord_id,
+        guild_id,
+        now,
+        10,
+        1,
+        Some(now - 7_200),
+    );
+    let today = super::game_date_for_timestamp(now as f64).expect("game date");
+    let last = (chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d").expect("game date")
+        - chrono::Duration::days(days_ago))
+    .format("%Y-%m-%d")
+    .to_string();
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .execute(
+            "UPDATE tunnels SET streak_days=5, streak_last_date=?1
+                 WHERE discord_id=?2 AND guild_id=?3",
+            params![last, discord_id, guild_id],
+        )
+        .expect("seed streak");
+    for _ in 0..charms {
+        connection
+            .execute(
+                "INSERT INTO dig_inventory (discord_id,guild_id,item_type,queued,created_at)
+                     VALUES (?1,?2,'streak_charm',0,?3)",
+                params![discord_id, guild_id, now - 86_400],
+            )
+            .expect("seed streak charm");
+    }
+    last
+}
+
+/// The persisted `(streak_days, streak_last_date, streak charms held)`.
+fn streak_charm_state(
+    database: &FastTestDatabase,
+    discord_id: i64,
+    guild_id: i64,
+) -> (i64, String, i64) {
+    let connection = Connection::open(database.path()).expect("open database");
+    let (days, last) = connection
+        .query_row(
+            "SELECT streak_days, streak_last_date FROM tunnels
+                 WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .expect("streak state");
+    let charms = connection
+        .query_row(
+            "SELECT COUNT(*) FROM dig_inventory
+                 WHERE discord_id=?1 AND guild_id=?2 AND item_type='streak_charm'",
+            params![discord_id, guild_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("streak charm count");
+    (days, last, charms)
+}
+
+fn streak_charm_dig(
+    database: &FastTestDatabase,
+    discord_id: i64,
+    guild_id: i64,
+    now: i64,
+) -> super::DigRuntimeOutcome {
+    DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id,
+            guild_id,
+            now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("streak dig")
+}
+
+#[test]
+fn streak_charm_keeps_the_streak_across_one_missed_day_and_spends_one_charm() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_101, 60_102);
+    let now = find_non_cave_dig_time(actor, guild, 1_900_100_000);
+    seed_streak_charm_tunnel(&database, actor, guild, now, 2, 2);
+
+    let outcome = streak_charm_dig(&database, actor, guild, now);
+
+    assert!(outcome.success, "{outcome:?}");
+    assert!(!outcome.cave_in);
+    assert!(outcome.streak_charm_used);
+    let today = super::game_date_for_timestamp(now as f64).expect("game date");
+    assert_eq!(
+        streak_charm_state(&database, actor, guild),
+        (6, today, 1),
+        "the streak continues and exactly one charm is spent"
+    );
+    assert_eq!(
+        latest_dig_detail(&database, actor, guild)["streak_charm_used"],
+        true
+    );
+}
+
+#[test]
+fn missed_day_without_a_streak_charm_resets_the_streak() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_103, 60_104);
+    let now = find_non_cave_dig_time(actor, guild, 1_900_110_000);
+    seed_streak_charm_tunnel(&database, actor, guild, now, 2, 0);
+
+    let outcome = streak_charm_dig(&database, actor, guild, now);
+
+    assert!(outcome.success, "{outcome:?}");
+    assert!(!outcome.streak_charm_used);
+    let today = super::game_date_for_timestamp(now as f64).expect("game date");
+    assert_eq!(streak_charm_state(&database, actor, guild), (1, today, 0));
+}
+
+#[test]
+fn streak_charm_is_kept_when_no_day_was_missed() {
+    for (days_ago, streak_after) in [(1, 6), (0, 5)] {
+        let database = fast_migrated_database();
+        let (actor, guild) = (60_105, 60_106);
+        let now = find_non_cave_dig_time(actor, guild, 1_900_120_000);
+        seed_streak_charm_tunnel(&database, actor, guild, now, days_ago, 1);
+
+        let outcome = streak_charm_dig(&database, actor, guild, now);
+
+        assert!(outcome.success, "{outcome:?}");
+        assert!(!outcome.streak_charm_used, "days ago {days_ago}");
+        let today = super::game_date_for_timestamp(now as f64).expect("game date");
+        assert_eq!(
+            streak_charm_state(&database, actor, guild),
+            (streak_after, today, 1),
+            "days ago {days_ago}"
+        );
+    }
+}
+
+#[test]
+fn streak_charm_cannot_bridge_two_missed_days() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_107, 60_108);
+    let now = find_non_cave_dig_time(actor, guild, 1_900_130_000);
+    seed_streak_charm_tunnel(&database, actor, guild, now, 3, 1);
+
+    let outcome = streak_charm_dig(&database, actor, guild, now);
+
+    assert!(outcome.success, "{outcome:?}");
+    assert!(!outcome.streak_charm_used);
+    let today = super::game_date_for_timestamp(now as f64).expect("game date");
+    assert_eq!(streak_charm_state(&database, actor, guild), (1, today, 1));
+}
+
+#[test]
+fn cave_in_leaves_the_streak_and_the_streak_charm_untouched() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_109, 60_110);
+    let now = find_cave_dig_time(actor, guild, 1_900_140_000);
+    let last = seed_streak_charm_tunnel(&database, actor, guild, now, 2, 1);
+
+    let outcome = streak_charm_dig(&database, actor, guild, now);
+
+    assert!(outcome.success, "{outcome:?}");
+    assert!(outcome.cave_in);
+    assert!(!outcome.streak_charm_used);
+    assert_eq!(streak_charm_state(&database, actor, guild), (5, last, 1));
+}
+
+#[test]
+fn streak_charm_rolls_back_with_a_failed_dig_commit() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_111, 60_112);
+    let now = find_non_cave_dig_time(actor, guild, 1_900_150_000);
+    let last = seed_streak_charm_tunnel(&database, actor, guild, now, 2, 1);
+    // Fail the dig's own audit insert, which runs after the charm row is
+    // deleted inside the same transaction.
+    Connection::open(database.path())
+        .expect("open database")
+        .execute_batch(
+            "CREATE TRIGGER fail_dig_audit BEFORE INSERT ON dig_actions
+                 BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END;",
+        )
+        .expect("install failing audit trigger");
+
+    DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect_err("the dig commit fails");
+
+    assert_eq!(streak_charm_state(&database, actor, guild), (5, last, 1));
 }

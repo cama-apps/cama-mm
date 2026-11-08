@@ -2029,3 +2029,295 @@ fn pending_legacy_relic_finale_uses_already_granted_artifact_metadata() {
     assert_eq!(reward_row_id, Some(relic_row));
     assert_eq!(fixture.count_actions(ACTOR, "quest_finale_relic"), 1);
 }
+
+/// The first authored, non-splash event whose `choice` failure satisfies
+/// `wanted` while its success neither costs streak days nor curses.
+fn authored_failure(
+    choice: &str,
+    wanted: impl Fn(&crate::dig_loot::CanonicalEventOutcome) -> bool,
+) -> (String, crate::dig_loot::CanonicalEventOutcome) {
+    crate::dig_loot::canonical_event_catalog()
+        .iter()
+        .filter(|event| event.splash.is_none())
+        .find_map(|event| {
+            let option = match choice {
+                "risky" => event.risky_option.as_ref(),
+                "desperate" => event.desperate_option.as_ref(),
+                _ => None,
+            }?;
+            let failure = option.failure.as_ref()?;
+            (wanted(failure)
+                && !failure.cave_in
+                && option.success.streak_loss == 0
+                && option.success.curse.is_none())
+            .then(|| (event.id.clone(), failure.clone()))
+        })
+        .unwrap_or_else(|| panic!("an authored {choice} failure"))
+}
+
+fn set_streak(fixture: &Fixture, streak_days: i64) {
+    fixture
+        .connection()
+        .execute(
+            "UPDATE tunnels SET streak_days=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![streak_days, ACTOR, GUILD],
+        )
+        .expect("seed streak");
+}
+
+#[test]
+fn event_streak_setback_is_partial_grows_with_the_streak_and_stops_at_zero() {
+    let (event_id, failure) = authored_failure("risky", |outcome| {
+        outcome.streak_loss > 0 && outcome.curse.is_none()
+    });
+    let loss = failure.streak_loss;
+    for streak in [10, 45, 60, 1] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 100, 50, 0);
+        set_streak(&fixture, streak);
+        let key = key_for_outcome(&fixture.snapshot(), &event_id, "risky", false);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request(&event_id, "risky", &key))
+            .expect("streak failure");
+
+        // One extra day of setback per twenty days already banked.
+        let expected_after = (streak - (loss + streak / 20)).max(0);
+        let resolution = outcome.resolution.as_ref().expect("resolution");
+        assert!(!resolution.succeeded);
+        assert_eq!(
+            fixture.snapshot().streak_days,
+            expected_after,
+            "streak {streak}"
+        );
+        assert_eq!(
+            resolution.streak_loss,
+            streak - expected_after,
+            "streak {streak}"
+        );
+    }
+
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    set_streak(&fixture, 10);
+    let key = key_for_outcome(&fixture.snapshot(), &event_id, "risky", true);
+    let outcome = fixture
+        .service()
+        .resolve_event(request(&event_id, "risky", &key))
+        .expect("streak success");
+    assert_eq!(
+        outcome.resolution.as_ref().expect("resolution").streak_loss,
+        0
+    );
+    assert_eq!(fixture.snapshot().streak_days, 10);
+}
+
+#[test]
+fn event_curse_is_strengthened_replaces_the_old_curse_and_keeps_the_buff() {
+    const BUFF: &str = r#"{"id":"power","digs_remaining":3}"#;
+    for choice in ["risky", "desperate"] {
+        let (event_id, failure) = authored_failure(choice, |outcome| {
+            outcome.curse.is_some() && outcome.streak_loss == 0
+        });
+        let curse = failure.curse.expect("authored curse");
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 100, 50, 0);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE tunnels SET temp_buffs=?1, temp_curses=?2
+                     WHERE discord_id=?3 AND guild_id=?4",
+                params![
+                    BUFF,
+                    r#"{"id":"old_hex","name":"Old Hex","digs_remaining":9,"effect":{"advance_bonus":-1}}"#,
+                    ACTOR,
+                    GUILD
+                ],
+            )
+            .expect("seed buff and old curse");
+        let key = key_for_outcome(&fixture.snapshot(), &event_id, choice, false);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request(&event_id, choice, &key))
+            .expect("curse failure");
+
+        // The result names the authored curse; the stored one runs two digs
+        // longer at one and a half times the strength.
+        let resolution = outcome.resolution.as_ref().expect("resolution");
+        assert_eq!(resolution.curse.as_ref(), Some(&curse), "{event_id}");
+        let snapshot = fixture.snapshot();
+        assert_eq!(snapshot.temp_buff_json.as_deref(), Some(BUFF), "{event_id}");
+        let stored: serde_json::Value =
+            serde_json::from_str(snapshot.temp_curse_json.as_deref().expect("stored curse"))
+                .expect("curse JSON");
+        assert_eq!(stored["id"], curse.id.as_str(), "{event_id}");
+        assert_eq!(
+            stored["digs_remaining"],
+            curse.duration_digs + 2,
+            "{event_id}"
+        );
+        let authored = curse.effect.as_object().expect("authored effect");
+        let strengthened = stored["effect"].as_object().expect("stored effect");
+        assert_eq!(
+            strengthened.keys().collect::<Vec<_>>(),
+            authored.keys().collect::<Vec<_>>()
+        );
+        for (name, value) in authored {
+            let scaled = value.as_f64().expect("numeric effect") * 1.5;
+            if matches!(name.as_str(), "cave_in_bonus" | "cooldown_penalty") {
+                let stored = strengthened[name].as_f64().expect("fractional effect");
+                assert!((stored - scaled).abs() < 1e-9, "{event_id} {name}");
+            } else {
+                assert_eq!(
+                    strengthened[name].as_i64(),
+                    Some(scaled.round_ties_even() as i64),
+                    "{event_id} {name}"
+                );
+            }
+        }
+    }
+}
+
+/// The live burn for one authored splash victim at the runtime's scale.
+fn live_burn(penalty_jc: i64) -> i64 {
+    scale_deflationary_minigame_jc_delta(
+        strengthen_dig_event_penalty(penalty_jc) as f64,
+        DigRuntimeConfig::default().minigame_jc_delta_scale,
+    )
+}
+
+fn authored_splash(event_id: &str) -> crate::dig_loot::CanonicalSplash {
+    crate::dig_loot::canonical_event_catalog()
+        .iter()
+        .find(|event| event.id == event_id)
+        .and_then(|event| event.splash.clone())
+        .unwrap_or_else(|| panic!("{event_id} splash"))
+}
+
+#[test]
+fn themed_burn_events_hit_only_the_richest_and_destroy_more_than_they_pay() {
+    for (event_id, actor_balance, depth, others, victims) in [
+        (
+            "underworld_reclaims",
+            500,
+            80,
+            vec![(1, 1_300), (2, 1_200), (3, 1_100), (4, 900)],
+            vec![1, 2, 3],
+        ),
+        (
+            "ember_clearinghouse",
+            500,
+            80,
+            vec![(1, 1_300), (2, 1_200), (3, 1_100), (4, 1_000)],
+            vec![1, 2, 3],
+        ),
+        (
+            "hungering_dark",
+            10_000,
+            120,
+            vec![(1, 1_000), (2, 1_000), (3, 1_000)],
+            vec![1, 2],
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, actor_balance, depth, 0);
+        for (offset, balance) in &others {
+            fixture.seed_actor(ACTOR + offset, *balance, 10, 0);
+        }
+        let splash = authored_splash(event_id);
+        assert_eq!(
+            (splash.mode.as_str(), splash.strategy.as_str()),
+            ("burn", "richest_n")
+        );
+        let key = key_for_outcome(&fixture.snapshot(), event_id, "risky", true);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request(event_id, "risky", &key))
+            .expect("themed burn");
+
+        let burn = live_burn(splash.penalty_jc);
+        let burned = outcome.splash.as_ref().expect("burn splash");
+        assert_eq!(
+            burned.victims,
+            victims
+                .iter()
+                .map(|offset| (ACTOR + offset, burn))
+                .collect::<Vec<_>>(),
+            "{event_id}"
+        );
+        for (offset, balance) in &others {
+            let expected = if victims.contains(offset) {
+                balance - burn
+            } else {
+                *balance
+            };
+            assert_eq!(fixture.balance(ACTOR + offset), expected, "{event_id}");
+        }
+        let actor_gain = fixture.balance(ACTOR) - actor_balance;
+        let resolution = outcome.resolution.as_ref().expect("resolution");
+        assert_eq!(actor_gain, resolution.jc, "{event_id}");
+        assert!(actor_gain > 0, "{event_id}");
+        assert!(
+            burned.total_moved > actor_gain,
+            "{event_id} stays deflationary"
+        );
+    }
+}
+
+#[test]
+fn burn_event_pays_nothing_when_no_one_can_be_burned() {
+    // No other miners, or only miners under the hostile-loss floor.
+    for others in [vec![], vec![(1, 3), (2, 3)]] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 500, 80, 0);
+        for (offset, balance) in &others {
+            fixture.seed_actor(ACTOR + offset, *balance, 10, 0);
+        }
+        let key = key_for_outcome(&fixture.snapshot(), "wealth_siphon", "risky", true);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request("wealth_siphon", "risky", &key))
+            .expect("unfunded burn");
+
+        assert!(outcome.resolution.as_ref().expect("resolution").succeeded);
+        assert_eq!(outcome.resolution.as_ref().expect("resolution").jc, 0);
+        assert!(
+            outcome
+                .splash
+                .as_ref()
+                .is_none_or(|splash| splash.victims.is_empty() && splash.total_moved == 0)
+        );
+        assert_eq!(fixture.balance(ACTOR), 500);
+        for (offset, balance) in &others {
+            assert_eq!(fixture.balance(ACTOR + offset), *balance);
+        }
+    }
+}
+
+#[test]
+fn failed_burn_event_burns_no_one() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 500, 80, 0);
+    fixture.seed_actor(ACTOR + 1, 1_000, 10, 0);
+    let key = key_for_outcome(&fixture.snapshot(), "wealth_siphon", "risky", false);
+
+    let outcome = fixture
+        .service()
+        .resolve_event(request("wealth_siphon", "risky", &key))
+        .expect("failed burn");
+
+    let resolution = outcome.resolution.as_ref().expect("resolution");
+    assert!(!resolution.succeeded);
+    assert!(
+        outcome
+            .splash
+            .as_ref()
+            .is_none_or(|splash| splash.victims.is_empty())
+    );
+    assert_eq!(fixture.balance(ACTOR + 1), 1_000);
+    assert_eq!(fixture.balance(ACTOR), 500 + resolution.jc);
+}

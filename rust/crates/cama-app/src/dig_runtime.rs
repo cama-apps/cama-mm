@@ -1037,6 +1037,22 @@ pub struct DigRuntimeOutcome {
     /// means no curse is active once this Dig's decrement is accounted for.
     #[serde(default)]
     pub active_curse: Option<ActiveCurseSummary>,
+    /// A Streak Charm was spent to keep the daily streak across one missed day.
+    #[serde(default)]
+    pub streak_charm_used: bool,
+    /// What auto-buy queued or bought for this Dig, in selection order.
+    #[serde(default)]
+    pub auto_purchases: Vec<DigRuntimeAutoPurchase>,
+}
+
+/// One auto-buy decision made for a Dig, as shown on its result card.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DigRuntimeAutoPurchase {
+    /// Shop display name of the consumable.
+    pub item: String,
+    /// The auto-buy status token, such as `purchased` or `skipped_inventory_full`.
+    pub status: String,
+    pub cost: i64,
 }
 
 /// A curse currently afflicting the miner, with what it costs per Dig.
@@ -1135,6 +1151,8 @@ impl DigRuntimeOutcome {
             relic_trim_notice: false,
             weather: None,
             active_curse: None,
+            streak_charm_used: false,
+            auto_purchases: Vec::new(),
         }
     }
 }
@@ -1660,6 +1678,8 @@ where
                 relic_trim_notice: false,
                 weather: None,
                 active_curse: None,
+                streak_charm_used: false,
+                auto_purchases: Vec::new(),
             });
         }
 
@@ -1751,6 +1771,8 @@ where
                 relic_trim_notice: false,
                 weather: None,
                 active_curse: None,
+                streak_charm_used: false,
+                auto_purchases: Vec::new(),
             });
         }
 
@@ -2035,6 +2057,8 @@ where
                 relic_trim_notice: false,
                 weather: None,
                 active_curse: None,
+                streak_charm_used: false,
+                auto_purchases: Vec::new(),
             };
             let receipt =
                 self.commit_dig(commit, first_outcome.clone(), delivery_context.as_ref())?;
@@ -2374,7 +2398,14 @@ where
             &self.config.economy_event,
         )?;
         let economy_multiplier_basis_points = (economy_multiplier.max(0.0) * 10_000.0 + 0.5) as i64;
-        let streak_days = next_daily_streak(&tunnel, &today);
+        let streak_charm_id = current
+            .inventory
+            .iter()
+            .rev()
+            .find(|item| item.item_type == "streak_charm")
+            .map(|item| item.id);
+        let (streak_days, streak_charm_needed) =
+            next_daily_streak(&tunnel, &today, streak_charm_id.is_some());
         let streak_reward = crate::dig_service::streak_bonus(streak_days);
         let next_cavein_free_streak = tunnel.cavein_free_streak.max(0).saturating_add(1);
         let mut gross_jc = 0_i64;
@@ -3084,9 +3115,20 @@ where
                 }
             }
         }
-        if let Some(next_tunnel) = staged.tunnel.as_mut() {
+        // A cave-in leaves the daily streak untouched, so only a dig that
+        // lands records the day and spends the charm that bridged a missed
+        // one. The charm row is burned in the same commit as the streak it
+        // bought.
+        let streak_charm_used = streak_charm_needed && !outcome.cave_in;
+        if !outcome.cave_in
+            && let Some(next_tunnel) = staged.tunnel.as_mut()
+        {
             next_tunnel.streak_days = streak_days;
             next_tunnel.streak_last_date = Some(today.clone());
+        }
+        if streak_charm_used && let Some(charm_id) = streak_charm_id {
+            staged.inventory.retain(|item| item.id != charm_id);
+            consumed_item_ids.push(charm_id);
         }
         if let Some((_, remaining)) = active_curse_effects(tunnel.temp_curses.as_deref())
             && let Some(next_tunnel) = staged.tunnel.as_mut()
@@ -3262,6 +3304,7 @@ where
             "gross_jc": outcome.gross_jc,
             "economy_adjusted_jc": outcome.economy_adjusted_jc,
             "economy_reward_multiplier": economy_multiplier,
+            "streak_charm_used": streak_charm_used,
             "auto_purchases": auto_purchases.iter().map(|purchase| serde_json::json!({
                 "item": purchase.item_type,
                 "status": purchase.status.as_str(),
@@ -3386,6 +3429,17 @@ where
                 })
             }),
             active_curse,
+            streak_charm_used,
+            auto_purchases: auto_purchases
+                .iter()
+                .map(|purchase| DigRuntimeAutoPurchase {
+                    item: consumable(&purchase.item_type)
+                        .map_or(purchase.item_type.as_str(), |definition| definition.name)
+                        .to_owned(),
+                    status: purchase.status.as_str().to_owned(),
+                    cost: purchase.cost,
+                })
+                .collect(),
         };
         let receipt =
             self.commit_dig(commit, runtime_outcome.clone(), delivery_context.as_ref())?;
@@ -3621,24 +3675,32 @@ fn apply_luminosity_refill(tunnel: &mut DigRuntimeTunnel, now: i64) {
     tunnel.last_lum_update_at = Some(now);
 }
 
-fn next_daily_streak(tunnel: &DigRuntimeTunnel, today: &str) -> i64 {
+/// Today's daily streak and whether a Streak Charm paid for it.
+///
+/// A charm forgives exactly one missed day of a running streak; a longer gap
+/// resets the streak whether or not the miner holds one.
+fn next_daily_streak(
+    tunnel: &DigRuntimeTunnel,
+    today: &str,
+    has_streak_charm: bool,
+) -> (i64, bool) {
     let existing = tunnel.streak_days.max(0);
     let Some(last) = tunnel.streak_last_date.as_deref() else {
-        return 1;
+        return (1, false);
     };
     if last == today {
-        return existing.max(1);
+        return (existing.max(1), false);
     }
     let (Ok(today), Ok(last)) = (
         NaiveDate::parse_from_str(today, "%Y-%m-%d"),
         NaiveDate::parse_from_str(last, "%Y-%m-%d"),
     ) else {
-        return 1;
+        return (1, false);
     };
-    if today.signed_duration_since(last).num_days() == 1 {
-        existing.saturating_add(1).max(1)
-    } else {
-        1
+    match today.signed_duration_since(last).num_days() {
+        1 => (existing.saturating_add(1).max(1), false),
+        2 if existing > 0 && has_streak_charm => (existing.saturating_add(1), true),
+        _ => (1, false),
     }
 }
 

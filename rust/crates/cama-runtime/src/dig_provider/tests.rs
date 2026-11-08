@@ -2708,6 +2708,8 @@ fn hook_outcome() -> DigRuntimeOutcome {
         relic_trim_notice: false,
         weather: None,
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     }
 }
 
@@ -5897,6 +5899,8 @@ fn paid_prompt_is_tokenized_owner_bound_one_shot_and_exactly_formatted() {
         relic_trim_notice: false,
         weather: None,
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     };
     let response = super::paid_dig_response(&result, "secret-token");
     assert_eq!(response.embeds[0].color, Some(0xFF_A5_00));
@@ -7057,6 +7061,8 @@ fn rendered_media_keeps_stats_and_event_ui_separate_with_exact_attachments() {
                 .to_owned(),
         }),
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     };
 
     let (stats, event) =
@@ -7184,6 +7190,8 @@ fn event_prompt_applies_durable_darkness_and_reading_the_stone_policy() {
         relic_trim_notice: false,
         weather: None,
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     };
     let prompt = cama_app::dig_event_runtime::DigEventActionPresentation {
         event: cama_app::dig_loot::canonical_event_presentation("underground_stream")
@@ -9053,6 +9061,71 @@ fn dig_result_embed_omits_the_curse_field_when_uncursed() {
     );
 }
 
+#[test]
+fn dig_result_embed_shows_the_streak_charm_and_auto_buy_results() {
+    let purchase =
+        |item: &str, status: &str, cost: i64| cama_app::dig_runtime::DigRuntimeAutoPurchase {
+            item: item.to_owned(),
+            status: status.to_owned(),
+            cost,
+        };
+    let mut result = hook_outcome();
+    result.streak_charm_used = true;
+    result.auto_purchases = vec![
+        purchase("Hard Hat", "purchased", 8),
+        purchase("Torch", "queued_from_inventory", 0),
+        purchase("Grappling Hook", "skipped_insufficient_balance", 25),
+        purchase("Hard Hat", "skipped_inventory_full", 0),
+        purchase("Torch", "skipped_error", 4),
+        purchase("Torch", "already_queued", 0),
+    ];
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+    let field = |name: &str| {
+        embed
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("{name} field"))
+    };
+
+    assert_eq!(
+        field("Streak Charm").value,
+        "Saved your daily streak after the missed day."
+    );
+    let auto_buy = field("Auto-Buy");
+    assert!(auto_buy.inline);
+    assert_eq!(
+        auto_buy.value,
+        format!(
+            "Hard Hat: bought (8 {JOPACOIN_EMOTE})\nTorch: from inventory\n\
+             Grappling Hook: skipped (need 25 JC)\nHard Hat: skipped (inventory full)\n\
+             Torch: skipped"
+        )
+    );
+}
+
+#[test]
+fn dig_result_embed_omits_streak_charm_and_auto_buy_when_unused() {
+    let mut result = hook_outcome();
+    result.auto_purchases = vec![cama_app::dig_runtime::DigRuntimeAutoPurchase {
+        item: "Torch".to_owned(),
+        status: "already_queued".to_owned(),
+        cost: 0,
+    }];
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+
+    assert!(
+        embed
+            .fields
+            .iter()
+            .all(|field| field.name != "Streak Charm" && field.name != "Auto-Buy"),
+        "{:?}",
+        embed.fields
+    );
+}
+
 /// Commit a real Dig that parks on the boss 25 gate and return its
 /// still-pending Boss-kind delivery row.
 async fn committed_boss_delivery(
@@ -9605,4 +9678,515 @@ fn recycling_picker_offers_every_recipe_in_a_large_inventory() {
     }
     assert_eq!(seen, expected);
     assert!(response.components.len() <= 5);
+}
+
+fn embed_text_length(embed: &crate::registration::InteractionEmbed) -> usize {
+    let count = |text: &Option<String>| text.as_deref().map_or(0, |text| text.chars().count());
+    count(&embed.title)
+        + count(&embed.description)
+        + count(&embed.footer)
+        + embed
+            .fields
+            .iter()
+            .map(|field| field.name.chars().count() + field.value.chars().count())
+            .sum::<usize>()
+}
+
+#[tokio::test]
+async fn artifacts_command_shows_names_lore_and_effects_instead_of_ids() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    let connection = Connection::open(database.path()).expect("artifact database");
+    for (artifact_id, is_relic, equipped) in [
+        ("mole_claws", 1, 1),
+        ("mole_claws", 1, 0),
+        ("miner_s_lullaby", 0, 0),
+        ("pinnacle:Crown:Echoes:hp_plus_1:boss_payout_5", 1, 0),
+        ("retired_trinket", 0, 0),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO dig_artifacts
+                     (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+                 VALUES (?1,?2,?3,0,?4,?5)",
+                params![USER as i64, GUILD as i64, artifact_id, is_relic, equipped],
+            )
+            .expect("seed artifact");
+    }
+    drop(connection);
+
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            command_request(30, "artifacts", Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("artifacts render");
+
+    let followups = responder.followups.lock().expect("artifact followups");
+    let embeds = followups
+        .iter()
+        .flat_map(|response| response.embeds.iter())
+        .collect::<Vec<_>>();
+    let catalog = cama_app::dig_loot::artifact_catalog_entries();
+    let catalog_pages = catalog.len().div_ceil(20);
+    assert_eq!(embeds.len(), catalog_pages + 1);
+    for embed in &embeds {
+        assert!(embed.fields.len() <= 25);
+        assert!(embed_text_length(embed) <= 6_000);
+    }
+    let catalog_fields = embeds[..catalog_pages]
+        .iter()
+        .flat_map(|embed| embed.fields.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        catalog_fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        catalog
+            .iter()
+            .map(|artifact| artifact.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    for (field, artifact) in catalog_fields.iter().zip(catalog) {
+        assert!(!field.name.contains('_'), "{}", field.name);
+        assert!(field.value.contains(&artifact.lore_text), "{}", field.value);
+        let effect = artifact
+            .effect
+            .as_deref()
+            .unwrap_or("Collectible only (no equip effect).");
+        assert!(
+            field.value.ends_with(&format!("**Effect:** {effect}")),
+            "{}",
+            field.value
+        );
+    }
+    assert_eq!(
+        embeds[0].title.as_deref(),
+        Some(format!("Dig Artifact Catalog (1/{catalog_pages})").as_str())
+    );
+    assert_eq!(
+        embeds[0].footer.as_deref(),
+        Some(
+            format!(
+                "Catalog: {} artifacts • Page 1/{catalog_pages}",
+                catalog.len()
+            )
+            .as_str()
+        )
+    );
+
+    let mine = embeds[catalog_pages];
+    assert_eq!(mine.title.as_deref(), Some("Your Artifacts"));
+    assert_eq!(
+        mine.fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Mole Claws — Owned ×2 • Equipped ×1",
+            "The Miner's Lullaby — Owned ×1",
+            "Crown of Scales and Tribute (Tougher skin, Bosses pay better) — Owned ×1",
+            "Retired Trinket — Owned ×1",
+        ]
+    );
+    assert!(
+        mine.fields[0]
+            .value
+            .starts_with("**Uncommon** • **Dirt** • **Relic**")
+    );
+    assert!(mine.fields[1].value.contains("**Curio**"));
+    assert!(
+        mine.fields[2]
+            .value
+            .starts_with("**Unique** • **Special reward** • **Relic**")
+    );
+    assert!(
+        mine.fields[3]
+            .value
+            .starts_with("**Legacy** • **Unknown layer** • **Curio**")
+    );
+    assert_eq!(
+        mine.footer.as_deref(),
+        Some("Your collection: 4 unique artifacts • Page 1/1")
+    );
+}
+
+#[tokio::test]
+async fn artifacts_command_without_finds_says_so_under_the_catalog() {
+    let (_database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            command_request(31, "artifacts", Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("artifacts render");
+
+    let followups = responder.followups.lock().expect("artifact followups");
+    let mine = followups
+        .last()
+        .and_then(|response| response.embeds.first())
+        .expect("collection page");
+    assert_eq!(mine.title.as_deref(), Some("Your Artifacts"));
+    assert!(mine.fields.is_empty());
+    assert!(
+        mine.description
+            .as_deref()
+            .is_some_and(|text| text.ends_with("\n\nYou haven't found any artifacts yet.")),
+        "{:?}",
+        mine.description
+    );
+}
+
+const PENDING_STONE_ROUTE: &str = r#"{"layer":"Stone","start_depth":25,"end_depth":50,"offered":["shored_passage","old_supports","fossil_seam"],"selected":null}"#;
+
+fn set_route_state(database: &NamedTempFile, route_state: Option<&str>) {
+    Connection::open(database.path())
+        .expect("open route fixture")
+        .execute(
+            "UPDATE tunnels SET route_state=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![route_state, USER as i64, GUILD as i64],
+        )
+        .expect("seed route state");
+}
+
+fn selected_route(database: &NamedTempFile) -> Option<String> {
+    let raw: Option<String> = Connection::open(database.path())
+        .expect("open route state")
+        .query_row(
+            "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+            |row| row.get(0),
+        )
+        .expect("route state");
+    cama_app::dig_routes::parse_route_state(raw.as_deref()).and_then(|state| state.selected)
+}
+
+fn stone_route_choice() -> super::DigRouteChoiceView {
+    super::route_choice_from_state(Some(PENDING_STONE_ROUTE)).expect("pending Stone route")
+}
+
+#[tokio::test]
+async fn pending_route_dig_reopens_the_junction_and_one_click_locks_the_route() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    set_route_state(&database, Some(PENDING_STONE_ROUTE));
+
+    // A dig with an unchosen route reopens the junction instead of digging.
+    let reopen = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), reopen.clone())
+        .await
+        .expect("pending route reopens the junction");
+    let junction = reopen
+        .followups
+        .lock()
+        .expect("junction followups")
+        .iter()
+        .find(|response| {
+            response
+                .embeds
+                .first()
+                .is_some_and(|embed| embed.title.as_deref() == Some("Stone Junction"))
+        })
+        .cloned()
+        .expect("junction view");
+    let old_supports = junction.components[0]
+        .buttons
+        .iter()
+        .find(|button| button.custom_id.ends_with(":old_supports"))
+        .expect("Old Supports button")
+        .custom_id
+        .clone();
+
+    let click = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(old_supports.clone(), Vec::new()),
+            click.clone(),
+        )
+        .await
+        .expect("route click");
+    let locked = click.original_edits.lock().expect("route edits").clone();
+    assert_eq!(locked.len(), 1);
+    assert_eq!(
+        locked[0].embeds[0].title.as_deref(),
+        Some("Route Locked: Old Supports")
+    );
+    assert!(
+        locked[0].components.is_empty(),
+        "the route buttons are removed"
+    );
+    assert_eq!(selected_route(&database).as_deref(), Some("old_supports"));
+
+    // A second click on the same view is acknowledged but settles nothing.
+    let again = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(component_request(old_supports, Vec::new()), again.clone())
+        .await
+        .expect("duplicate route click");
+    assert_eq!(again.defers.lock().unwrap().as_slice(), &[false]);
+    assert!(again.original_edits.lock().unwrap().is_empty());
+    assert!(again.followups.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_route_choice_releases_the_view_for_another_try() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    // The view offers a route, but the tunnel no longer has a pending choice.
+    set_route_state(&database, None);
+    let token = provider
+        .handler
+        .create_route_view(
+            USER as i64,
+            GUILD as i64,
+            stone_route_choice(),
+            super::unix_now(),
+        )
+        .expect("route view");
+    let custom_id = super::route_component_id(
+        &provider.handler.state.view_nonce,
+        USER as i64,
+        GUILD as i64,
+        &token,
+        "old_supports",
+    );
+
+    for attempt in 0..2 {
+        let click = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                component_request(custom_id.clone(), Vec::new()),
+                click.clone(),
+            )
+            .await
+            .expect("failed route click");
+        let followups = click.followups.lock().unwrap();
+        assert_eq!(followups.len(), 1, "attempt {attempt}");
+        assert!(followups[0].ephemeral);
+        assert!(
+            !followups[0].content.contains("expired"),
+            "attempt {attempt}: {}",
+            followups[0].content
+        );
+        assert!(click.original_edits.lock().unwrap().is_empty());
+    }
+    assert_eq!(selected_route(&database), None);
+}
+
+#[tokio::test]
+async fn timed_out_route_view_never_selects_a_route() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    set_route_state(&database, Some(PENDING_STONE_ROUTE));
+    let token = provider
+        .handler
+        .create_route_view(
+            USER as i64,
+            GUILD as i64,
+            stone_route_choice(),
+            super::unix_now() - super::ROUTE_VIEW_TIMEOUT_SECONDS,
+        )
+        .expect("route view");
+    let custom_id = super::route_component_id(
+        &provider.handler.state.view_nonce,
+        USER as i64,
+        GUILD as i64,
+        &token,
+        "fossil_seam",
+    );
+
+    let click = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(component_request(custom_id, Vec::new()), click.clone())
+        .await
+        .expect("expired route click");
+    let responses = click.responses.lock().unwrap();
+    assert!(
+        responses
+            .last()
+            .is_some_and(|response| response.content.contains("This route view expired")),
+        "{responses:?}"
+    );
+    assert_eq!(selected_route(&database), None);
+}
+
+fn bonus_selecting_action_id(from: i64) -> i64 {
+    (from..from + 10_000)
+        .find(|action_id| {
+            cama_app::dig_bonus_events::pick_dig_bonus(super::deterministic_dig_bonus_roll(
+                *action_id,
+            ))
+            .is_some()
+        })
+        .expect("stable test action should select a bonus")
+}
+
+#[tokio::test]
+async fn dig_bonus_never_rolls_for_a_blocked_or_first_dig() {
+    let (_database, provider, _discord) = fixture();
+    let dispatcher = Arc::new(RecordingBonusDispatcher::default());
+    provider.set_bonus_dispatcher(dispatcher.clone());
+    for (success, first_dig) in [(false, false), (true, true)] {
+        let mut outcome = hook_outcome();
+        outcome.action_id = Some(bonus_selecting_action_id(1));
+        outcome.success = success;
+        outcome.first_dig = first_dig;
+        provider
+            .handler
+            .maybe_send_dig_bonus(
+                &outcome,
+                USER as i64,
+                GUILD as i64,
+                CHANNEL as i64,
+                Arc::new(TestResponder::default()),
+            )
+            .await;
+    }
+    assert!(dispatcher.bonuses.lock().expect("bonus calls").is_empty());
+}
+
+#[tokio::test]
+async fn failed_bonus_dispatch_says_the_reward_may_already_be_recorded() {
+    let (_database, provider, _discord) = fixture();
+    provider.set_bonus_dispatcher(Arc::new(FailingBonusDispatcher::default()));
+    let mut outcome = hook_outcome();
+    outcome.action_id = Some(bonus_selecting_action_id(1));
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .maybe_send_dig_bonus(
+            &outcome,
+            USER as i64,
+            GUILD as i64,
+            CHANNEL as i64,
+            responder.clone(),
+        )
+        .await;
+
+    let followups = responder.followups.lock().expect("bonus failure report");
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert_eq!(
+        followups[0].content,
+        cama_app::dig_bonus_events::PARTIAL_BONUS_FAILURE
+    );
+    assert!(followups[0].content.contains("may already be recorded"));
+}
+
+/// Records how much of the dig result had been delivered when its bonus ran.
+struct OrderingBonusDispatcher {
+    responder: Arc<TestResponder>,
+    discord: Arc<TestDiscord>,
+    delivered_before_bonus: StdMutex<Vec<(i64, usize)>>,
+}
+
+#[async_trait]
+impl DigBonusDispatchPort for OrderingBonusDispatcher {
+    async fn dispatch_bonus(
+        &self,
+        action_id: i64,
+        _user_id: i64,
+        _guild_id: i64,
+        _channel_id: i64,
+        _bonus: cama_app::dig_bonus_events::DigBonus,
+        _responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let delivered = self.responder.followups.lock().expect("followups").len()
+            + self.discord.public.lock().expect("public posts").len();
+        self.delivered_before_bonus
+            .lock()
+            .expect("bonus order")
+            .push((action_id, delivered));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn dig_bonus_runs_only_after_the_dig_result_is_delivered() {
+    let (database, provider, discord) = fixture();
+    provider
+        .handler
+        .handle(go_request(), Arc::new(TestResponder::default()))
+        .await
+        .expect("first dig creates a tunnel");
+    let action_id = bonus_selecting_action_id(100);
+    let connection = Connection::open(database.path()).expect("bonus fixture");
+    connection
+        .execute(
+            "UPDATE sqlite_sequence SET seq=?1 WHERE name='dig_actions'",
+            params![action_id - 1],
+        )
+        .expect("align the next dig action id");
+    connection
+        .execute(
+            "UPDATE tunnels SET last_dig_at=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![super::unix_now() - 86_400, USER as i64, GUILD as i64],
+        )
+        .expect("clear the dig cooldown");
+    drop(connection);
+    discord.public.lock().expect("public posts").clear();
+    let responder = Arc::new(TestResponder::default());
+    let dispatcher = Arc::new(OrderingBonusDispatcher {
+        responder: responder.clone(),
+        discord: discord.clone(),
+        delivered_before_bonus: StdMutex::new(Vec::new()),
+    });
+    provider.set_bonus_dispatcher(dispatcher.clone());
+
+    provider
+        .handler
+        .handle(go_request(), responder.clone())
+        .await
+        .expect("second dig");
+
+    let order = dispatcher
+        .delivered_before_bonus
+        .lock()
+        .expect("bonus order");
+    assert_eq!(order.len(), 1, "{order:?}");
+    assert_eq!(order[0].0, action_id);
+    assert!(
+        order[0].1 > 0,
+        "the dig result is delivered before its bonus"
+    );
 }

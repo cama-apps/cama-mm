@@ -122,6 +122,9 @@ fn prestige_five_bosses_pause_resume_and_advance_through_their_phases() {
         }));
         assert!(service.repository.active_duel(key()).is_none());
 
+        // Every hit lands and one blow fells the boss, so each phase is a win.
+        service = service.with_combat_preparation(FixedCombatPreparation(winning_override()));
+        service.entropy = SequenceEntropy::constant(0.0);
         for (before, after) in [
             (BossStatus::Active, BossStatus::PhaseOneDefeated),
             (BossStatus::PhaseOneDefeated, BossStatus::PhaseTwoDefeated),
@@ -141,14 +144,7 @@ fn prestige_five_bosses_pause_resume_and_advance_through_their_phases() {
                 .boss_progress
                 .insert(depth.to_string(), entry(before, id));
             service.repository.insert_tunnel(key(), current);
-            let result = service
-                .fight_boss_with_override(
-                    key(),
-                    RiskTier::Cautious,
-                    0,
-                    Some(combat(20, 1, 1.0, 0.0)),
-                )
-                .unwrap();
+            let result = fight_through_prompt(&mut service, RiskTier::Cautious, 0);
             assert!(result.won);
             let current = service.repository.load_tunnel(key()).unwrap();
             let BossProgressValue::Entry(progress) = &current.boss_progress[&depth.to_string()]
@@ -220,6 +216,20 @@ impl BossCombatPreparationPort for OneHpCombatPreparation {
     ) -> BossCombatPreparation {
         base_combat.player_hp = 1;
         BossCombatPreparation::neutral(base_combat)
+    }
+}
+
+/// Replaces the authored base combat so a live duel's outcome is fixed.
+#[derive(Clone, Debug)]
+struct FixedCombatPreparation(CombatState);
+
+impl BossCombatPreparationPort for FixedCombatPreparation {
+    fn prepare(
+        &self,
+        _request: BossCombatPreparationRequest<'_>,
+        _base_combat: CombatState,
+    ) -> BossCombatPreparation {
+        BossCombatPreparation::neutral(self.0.clone())
     }
 }
 
@@ -555,14 +565,13 @@ fn test_rolls_when_locked_boss_id_is_empty() {
 
 #[test]
 fn test_fight_boss_locks_boss_id_when_empty() {
-    let mut service = test_service(0.01);
+    let mut service =
+        test_service(0.01).with_combat_preparation(FixedCombatPreparation(winning_override()));
     seed_at_first_boss(&mut service);
     let mut progress = canonical_boss_progress();
     progress.insert("25".to_owned(), entry(BossStatus::Active, ""));
     set_progress(&mut service, progress, 24);
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 10, Some(winning_override()))
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(result.won);
     assert_eq!(result.boss_id, "grothak");
     assert!(
@@ -1492,14 +1501,13 @@ fn test_extra_knockback_widens_loss() {
 
 #[test]
 fn test_cursed_status_written_on_loss() {
-    let mut service = test_service(0.999);
+    let mut service =
+        test_service(0.999).with_combat_preparation(FixedCombatPreparation(losing_override()));
     seed_at_first_boss(&mut service);
     let mut progress = canonical_boss_progress();
     progress.insert("25".to_owned(), entry(BossStatus::Active, "ogre_magi"));
     set_progress(&mut service, progress, 24);
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 10, Some(losing_override()))
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(!result.won);
     assert_eq!(result.extra_cooldown_seconds, 900);
     let fresh = service
@@ -1511,15 +1519,14 @@ fn test_cursed_status_written_on_loss() {
 
 #[test]
 fn test_cursed_status_writes_when_configured() {
-    let mut service = test_service(0.999);
+    let mut service =
+        test_service(0.999).with_combat_preparation(FixedCombatPreparation(losing_override()));
     service.repository.insert_tunnel(key(), tunnel(49, 0, 500));
     let mut progress = canonical_boss_progress();
     progress.insert("25".to_owned(), entry(BossStatus::Defeated, "grothak"));
     progress.insert("50".to_owned(), entry(BossStatus::Active, "crystal_maiden"));
     set_progress(&mut service, progress, 49);
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 10, Some(losing_override()))
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(!result.won);
     let fresh = service
         .repository
@@ -1530,14 +1537,13 @@ fn test_cursed_status_writes_when_configured() {
 
 #[test]
 fn test_echo_written_under_specific_boss_id() {
-    let mut service = test_service(0.0);
+    let mut service =
+        test_service(0.0).with_combat_preparation(FixedCombatPreparation(winning_override()));
     seed_at_first_boss(&mut service);
     let mut progress = canonical_boss_progress();
     progress.insert("25".to_owned(), entry(BossStatus::Active, "pudge"));
     set_progress(&mut service, progress, 24);
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 10, Some(winning_override()))
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(result.won);
     assert!(
         service
@@ -1574,10 +1580,15 @@ fn test_win_applies_economy_event_and_bankruptcy_debuff() {
         HalvingBankruptcy::default(),
         InMemoryGearRepair::default(),
         InMemoryBossOutcomeSink::default(),
-    );
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 0, Some(winning_override()))
-        .expect("fight resolves");
+    )
+    .with_combat_preparation(FixedCombatPreparation(winning_override()));
+    let result = match service
+        .start_boss_duel(key(), RiskTier::Cautious, 0)
+        .expect("duel starts")
+    {
+        StartBossDuelOutcome::Resolved(resolved) => resolved,
+        StartBossDuelOutcome::Paused(_) => panic!("a one-hit win resolves before any mechanic"),
+    };
     assert!(result.won);
     let base = boss_base_reward(25, 0);
     assert_eq!(result.gross_payout, 2 * base);
@@ -1590,13 +1601,12 @@ fn test_win_applies_economy_event_and_bankruptcy_debuff() {
 #[test]
 fn regular_win_enters_phase_two_only_from_prestige_two() {
     for (prestige, expected) in [(1, BossStatus::Defeated), (2, BossStatus::PhaseOneDefeated)] {
-        let mut service = test_service(0.01);
+        let mut service =
+            test_service(0.01).with_combat_preparation(FixedCombatPreparation(winning_override()));
         service
             .repository
             .insert_tunnel(key(), tunnel(24, prestige, 500));
-        let result = service
-            .fight_boss_with_override(key(), RiskTier::Cautious, 0, Some(winning_override()))
-            .expect("fight resolves");
+        let result = fight_through_prompt(&mut service, RiskTier::Cautious, 0);
         assert!(result.won);
         let current = service.repository.load_tunnel(key()).unwrap();
         assert_eq!(
@@ -1703,12 +1713,11 @@ fn every_boss_stinger_and_phase_event_resolves_in_the_live_catalogs() {
 
 #[test]
 fn test_free_fight_loss_repair_bill_floors_at_live_balance() {
-    let mut service = test_service(0.5);
+    let mut service =
+        test_service(0.5).with_combat_preparation(FixedCombatPreparation(losing_override()));
     service.repository.insert_tunnel(key(), tunnel(24, 0, 2));
     assert!(service.gear_repair.repair_bill() > 2);
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 0, Some(losing_override()))
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 0);
     assert!(!result.won);
     assert_eq!(result.jc_delta, -2);
     assert_eq!(
