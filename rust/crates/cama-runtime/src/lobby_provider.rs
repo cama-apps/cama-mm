@@ -57,8 +57,8 @@ use tracing::{debug, warn};
 use crate::application_config::ApplicationConfig;
 use crate::curfew_sweep_worker::CurfewLobbyDisplayPort;
 use crate::discord_transport::{
-    DiscordAllowedMentions, DiscordEmoji, DiscordMessage, DiscordPresence, DiscordTransport,
-    GuildPlayerNameDirectory, resolve_guild_player_names,
+    DiscordEmoji, DiscordMessage, DiscordPresence, DiscordTransport, GuildPlayerNameDirectory,
+    resolve_guild_player_names,
 };
 use crate::first_game_pool_worker::FirstGamePoolDisplayPort;
 use crate::gateway_events::{
@@ -4472,32 +4472,6 @@ struct InteractionLobbyTransport {
 
 #[async_trait]
 impl LobbyRuntimeTransport for InteractionLobbyTransport {
-    async fn sync_lobby_display(&self, scope: LobbyScope) -> Result<(), String> {
-        self.state.sync_lobby_display(scope).await
-    }
-
-    async fn send_thread_message(
-        &self,
-        thread_id: AppChannelId,
-        content: &str,
-        allowed_mentions: AllowedMentions,
-    ) -> Result<(), String> {
-        let message = match allowed_mentions {
-            AllowedMentions::None => DiscordMessage::silent(InteractionResponse::message(content)),
-            AllowedMentions::Default => DiscordMessage {
-                response: InteractionResponse::message(content),
-                allowed_mentions: DiscordAllowedMentions::Users(BTreeSet::new()),
-                content_mode: crate::discord_transport::DiscordMessageContentMode::Replace,
-                suppress_notifications: false,
-            },
-        };
-        self.state
-            .transport
-            .send_message(to_u64(thread_id.0)?, message)
-            .await
-            .map(|_| ())
-    }
-
     async fn close_lobby_message(
         &self,
         scope: LobbyScope,

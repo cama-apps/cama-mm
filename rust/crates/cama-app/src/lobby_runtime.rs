@@ -6,7 +6,7 @@
 //! performs around it: explicit lobby selection, cross-lobby match eviction,
 //! leave-all behavior, and reset serialization with fail-soft Discord cleanup.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -79,8 +79,6 @@ pub enum AllowedMentions {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublicationStage {
-    Display,
-    Thread,
     Close,
     Archive,
     Unpin,
@@ -99,19 +97,6 @@ pub struct PublicationFailure {
 /// unavailable.
 #[async_trait]
 pub trait LobbyRuntimeTransport: Send + Sync {
-    async fn sync_lobby_display(&self, _scope: LobbyScope) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn send_thread_message(
-        &self,
-        _thread_id: ChannelId,
-        _content: &str,
-        _allowed_mentions: AllowedMentions,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
     async fn close_lobby_message(
         &self,
         _scope: LobbyScope,
@@ -147,19 +132,6 @@ pub trait LobbyRuntimeTransport: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CrossLobbyEvictionReport {
-    pub evicted: BTreeMap<LobbyKind, BTreeSet<UserId>>,
-    pub publication_failures: Vec<PublicationFailure>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct LeaveAllOutcome {
-    pub left: Vec<LobbyKind>,
-    pub pinned: Vec<LobbyKind>,
-    pub content: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -305,138 +277,6 @@ where
     #[must_use]
     pub fn ready_notification(&self, scope: LobbyScope) -> Option<MessageId> {
         self.ready_notifications().get(&scope).copied()
-    }
-
-    /// Reserve while holding the same per-scope operation lock used by reset.
-    /// This closes the cleanup/start window: after reset wins the lock, a
-    /// waiting match start sees that the roster no longer exists.
-    pub async fn reserve_for_match(
-        &self,
-        player_ids: &BTreeSet<UserId>,
-        scope: LobbyScope,
-    ) -> bool {
-        let lock = self.operation_lock(scope);
-        let _guard = lock.lock().await;
-        self.service.reserve_lobby_players(player_ids, scope)
-    }
-
-    pub async fn evict_matched_players_from_other_lobbies(
-        &self,
-        player_ids: &BTreeSet<UserId>,
-        popped_scope: LobbyScope,
-        transport: &dyn LobbyRuntimeTransport,
-    ) -> CrossLobbyEvictionReport {
-        let mut report = CrossLobbyEvictionReport::default();
-        if player_ids.is_empty() {
-            return report;
-        }
-
-        for other_kind in [LobbyKind::Open, LobbyKind::LowSkill] {
-            if other_kind == popped_scope.kind {
-                continue;
-            }
-            let other_scope = LobbyScope::new(popped_scope.guild_id, other_kind);
-            let removed = self
-                .service
-                .remove_players_from_lobby(player_ids, other_scope);
-            if removed.is_empty() {
-                continue;
-            }
-            report.evicted.insert(other_kind, removed.clone());
-
-            // The state reconciliation is authoritative and happens even when
-            // every following Discord operation fails.
-            let confirmed = self.service.prune_readycheck_to_lobby_members(other_scope);
-            if let Err(message) = transport.sync_lobby_display(other_scope).await {
-                report.publication_failures.push(PublicationFailure {
-                    scope: other_scope,
-                    stage: PublicationStage::Display,
-                    message,
-                });
-            }
-            if confirmed < self.service.ready_threshold() {
-                self.ready_notifications().remove(&other_scope);
-            }
-
-            let Some(thread_id) = self
-                .service
-                .get_lobby(other_scope)
-                .and_then(|lobby| lobby.message_ids.thread_id)
-            else {
-                continue;
-            };
-            let mentions = removed
-                .iter()
-                .map(|player_id| format!("<@{}>", player_id.0))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let content = format!(
-                "🔀 {mentions} left for the {} match.",
-                popped_scope.kind.label()
-            );
-            if let Err(message) = transport
-                .send_thread_message(thread_id, &content, AllowedMentions::None)
-                .await
-            {
-                report.publication_failures.push(PublicationFailure {
-                    scope: other_scope,
-                    stage: PublicationStage::Thread,
-                    message,
-                });
-            }
-        }
-        report
-    }
-
-    #[must_use]
-    pub fn leave_every_lobby(&self, player_id: UserId, guild_id: GuildId) -> LeaveAllOutcome {
-        let memberships = self.service.get_lobby_kinds_for_player(player_id, guild_id);
-        if memberships.is_empty() {
-            return LeaveAllOutcome {
-                content: "⚠️ You're not in a lobby.".to_owned(),
-                ..LeaveAllOutcome::default()
-            };
-        }
-
-        let mut left = Vec::new();
-        let mut pinned = Vec::new();
-        for kind in memberships {
-            let scope = LobbyScope::new(guild_id, kind);
-            if self.service.leave_lobby(player_id, scope) {
-                left.push(kind);
-            } else if self
-                .service
-                .get_in_flight_lobby_kind_for_player(player_id, guild_id)
-                == Some(kind)
-            {
-                pinned.push(kind);
-            }
-        }
-
-        let content = if left.is_empty() {
-            if pinned.is_empty() {
-                "⚠️ You’re no longer in the lobby.".to_owned()
-            } else {
-                format!(
-                    "❌ You can’t leave {} while its shuffle or draft is in progress.",
-                    format_lobby_labels(&pinned)
-                )
-            }
-        } else {
-            let mut content = format!("✅ Left {}.", format_lobby_labels(&left));
-            if !pinned.is_empty() {
-                content.push_str(&format!(
-                    "\n⚠️ Still in {} — its shuffle or draft is in progress.",
-                    format_lobby_labels(&pinned)
-                ));
-            }
-            content
-        };
-        LeaveAllOutcome {
-            left,
-            pinned,
-            content,
-        }
     }
 
     pub fn select_readycheck_lobby(

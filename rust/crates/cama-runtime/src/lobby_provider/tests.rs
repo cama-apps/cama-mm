@@ -4,7 +4,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::discord_transport::{
-    DiscordGuildMemberSnapshot, DiscordMessageReceipt, DiscordMessageSnapshot, DiscordUserSnapshot,
+    DiscordAllowedMentions, DiscordGuildMemberSnapshot, DiscordMessageReceipt,
+    DiscordMessageSnapshot, DiscordUserSnapshot,
 };
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource};
 use crate::push_notification_provider::{PushNotificationRegistrationProvider, PushPublisher};
