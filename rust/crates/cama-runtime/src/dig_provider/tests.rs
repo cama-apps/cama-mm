@@ -2629,6 +2629,8 @@ fn hook_outcome() -> DigRuntimeOutcome {
         relic_trim_notice: false,
         weather: None,
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     }
 }
 
@@ -5818,6 +5820,8 @@ fn paid_prompt_is_tokenized_owner_bound_one_shot_and_exactly_formatted() {
         relic_trim_notice: false,
         weather: None,
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     };
     let response = super::paid_dig_response(&result, "secret-token");
     assert_eq!(response.embeds[0].color, Some(0xFF_A5_00));
@@ -6862,6 +6866,8 @@ fn rendered_media_keeps_stats_and_event_ui_separate_with_exact_attachments() {
                 .to_owned(),
         }),
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     };
 
     let (stats, event) =
@@ -6989,6 +6995,8 @@ fn event_prompt_applies_durable_darkness_and_reading_the_stone_policy() {
         relic_trim_notice: false,
         weather: None,
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     };
     let prompt = cama_app::dig_event_runtime::DigEventActionPresentation {
         event: cama_app::dig_loot::canonical_event_presentation("underground_stream")
@@ -8855,6 +8863,71 @@ fn dig_result_embed_omits_the_curse_field_when_uncursed() {
             .iter()
             .all(|field| !field.name.contains("Cursed")),
         "an uncursed dig must not render a curse field"
+    );
+}
+
+#[test]
+fn dig_result_embed_shows_the_streak_charm_and_auto_buy_results() {
+    let purchase =
+        |item: &str, status: &str, cost: i64| cama_app::dig_runtime::DigRuntimeAutoPurchase {
+            item: item.to_owned(),
+            status: status.to_owned(),
+            cost,
+        };
+    let mut result = hook_outcome();
+    result.streak_charm_used = true;
+    result.auto_purchases = vec![
+        purchase("Hard Hat", "purchased", 8),
+        purchase("Torch", "queued_from_inventory", 0),
+        purchase("Grappling Hook", "skipped_insufficient_balance", 25),
+        purchase("Hard Hat", "skipped_inventory_full", 0),
+        purchase("Torch", "skipped_error", 4),
+        purchase("Torch", "already_queued", 0),
+    ];
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+    let field = |name: &str| {
+        embed
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("{name} field"))
+    };
+
+    assert_eq!(
+        field("Streak Charm").value,
+        "Saved your daily streak after the missed day."
+    );
+    let auto_buy = field("Auto-Buy");
+    assert!(auto_buy.inline);
+    assert_eq!(
+        auto_buy.value,
+        format!(
+            "Hard Hat: bought (8 {JOPACOIN_EMOTE})\nTorch: from inventory\n\
+             Grappling Hook: skipped (need 25 JC)\nHard Hat: skipped (inventory full)\n\
+             Torch: skipped"
+        )
+    );
+}
+
+#[test]
+fn dig_result_embed_omits_streak_charm_and_auto_buy_when_unused() {
+    let mut result = hook_outcome();
+    result.auto_purchases = vec![cama_app::dig_runtime::DigRuntimeAutoPurchase {
+        item: "Torch".to_owned(),
+        status: "already_queued".to_owned(),
+        cost: 0,
+    }];
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+
+    assert!(
+        embed
+            .fields
+            .iter()
+            .all(|field| field.name != "Streak Charm" && field.name != "Auto-Buy"),
+        "{:?}",
+        embed.fields
     );
 }
 

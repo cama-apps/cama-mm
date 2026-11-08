@@ -9617,6 +9617,13 @@ fn python_dig_result_embed(
             true,
         );
     }
+    if result.streak_charm_used {
+        embed = embed.field(
+            "Streak Charm",
+            "Saved your daily streak after the missed day.",
+            false,
+        );
+    }
     if let Some(artifact_id) = result.artifact_id.as_deref() {
         let artifact_name = cama_app::dig_loot::artifact_catalog()
             .into_iter()
@@ -9629,6 +9636,29 @@ fn python_dig_result_embed(
     }
     if !result.items_used.is_empty() {
         embed = embed.field("Items Used", result.items_used.join(", "), true);
+    }
+    let auto_buy_lines = result
+        .auto_purchases
+        .iter()
+        .filter_map(|purchase| {
+            let item = &purchase.item;
+            match purchase.status.as_str() {
+                "purchased" => Some(format!(
+                    "{item}: bought ({} {JOPACOIN_EMOTE})",
+                    purchase.cost
+                )),
+                "queued_from_inventory" => Some(format!("{item}: from inventory")),
+                "skipped_insufficient_balance" => {
+                    Some(format!("{item}: skipped (need {} JC)", purchase.cost))
+                }
+                "skipped_inventory_full" => Some(format!("{item}: skipped (inventory full)")),
+                "skipped_error" => Some(format!("{item}: skipped")),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    if !auto_buy_lines.is_empty() {
+        embed = embed.field("Auto-Buy", auto_buy_lines.join("\n"), true);
     }
     if result.luminosity_drained > 0 || result.luminosity_after < 100 {
         let luminosity = result.luminosity_after.clamp(0, 100);
