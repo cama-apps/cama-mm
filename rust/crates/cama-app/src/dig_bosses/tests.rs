@@ -504,7 +504,6 @@ fn test_each_pinnacle_has_three_phases() {
 #[test]
 fn test_relic_pool_non_empty() {
     assert!(PINNACLE_RELIC_STATS.len() >= 8);
-    assert!(PINNACLE_RELIC_SUFFIX_POOL.len() >= 6);
 }
 
 #[test]
@@ -515,98 +514,6 @@ fn test_known_archetypes_defined() {
         assert!(definition.hit_offset.abs() <= 0.10);
         assert!(definition.damage_offset >= 0);
     }
-}
-
-#[test]
-fn test_no_row_returns_none() {
-    let store = InMemoryBossStore::default();
-    assert!(store.active_boss_echo(Some(1), "grothak", 1_000).is_none());
-}
-
-#[test]
-fn test_record_then_read() {
-    let mut store = InMemoryBossStore::default();
-    store.record_boss_echo(Some(1), "grothak", 25, 777, 3_600, 1_000);
-    let echo = store
-        .active_boss_echo(Some(1), "grothak", 1_001)
-        .expect("active echo");
-    assert_eq!(echo.killer_discord_id, 777);
-    assert_eq!(echo.depth, 25);
-    assert!(echo.weakened_until > 1_001);
-}
-
-#[test]
-fn test_expired_row_returns_none() {
-    let mut store = InMemoryBossStore::default();
-    store.record_boss_echo(Some(1), "crystalia", 50, 111, 60, 1_000);
-    assert!(
-        store
-            .active_boss_echo(Some(1), "crystalia", 4_600)
-            .is_none()
-    );
-}
-
-#[test]
-fn test_overwrite_restarts_window() {
-    let mut store = InMemoryBossStore::default();
-    store.record_boss_echo(Some(1), "magmus_rex", 75, 111, 60, 1_000);
-    store.record_boss_echo(Some(1), "magmus_rex", 75, 222, 3_600, 1_010);
-    assert_eq!(
-        store
-            .active_boss_echo(Some(1), "magmus_rex", 1_011)
-            .expect("echo")
-            .killer_discord_id,
-        222
-    );
-}
-
-#[test]
-fn test_boss_id_isolation() {
-    let mut store = InMemoryBossStore::default();
-    store.record_boss_echo(Some(1), "pudge", 25, 1, 3_600, 1_000);
-    store.record_boss_echo(Some(1), "crystalia", 50, 2, 3_600, 1_000);
-    assert_eq!(
-        store
-            .active_boss_echo(Some(1), "pudge", 1_001)
-            .expect("pudge")
-            .killer_discord_id,
-        1
-    );
-    assert_eq!(
-        store
-            .active_boss_echo(Some(1), "crystalia", 1_001)
-            .expect("crystalia")
-            .killer_discord_id,
-        2
-    );
-    assert!(store.active_boss_echo(Some(1), "grothak", 1_001).is_none());
-    assert!(
-        store
-            .active_boss_echo(Some(1), "ogre_magi", 1_001)
-            .is_none()
-    );
-}
-
-#[test]
-fn test_guild_isolation() {
-    let mut store = InMemoryBossStore::default();
-    store.record_boss_echo(Some(1_000), "grothak", 25, 1, 3_600, 1_000);
-    store.record_boss_echo(Some(2_000), "grothak", 25, 2, 3_600, 1_000);
-    assert_eq!(
-        store
-            .active_boss_echo(Some(1_000), "grothak", 1_001)
-            .expect("guild one")
-            .killer_discord_id,
-        1
-    );
-    assert_eq!(
-        store
-            .active_boss_echo(Some(2_000), "grothak", 1_001)
-            .expect("guild two")
-            .killer_discord_id,
-        2
-    );
-    assert!(store.active_boss_echo(None, "grothak", 1_001).is_none());
 }
 
 #[test]

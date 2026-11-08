@@ -1135,3 +1135,60 @@ fn a_lost_lantern_race_rolls_the_whole_settlement_back() {
     );
     assert_eq!(after.depth, snapshot.depth);
 }
+
+/// Boss echoes are keyed by guild and boss, expire at `weakened_until`, and a
+/// newer kill overwrites the killer and restarts the window.
+#[test]
+fn boss_echoes_are_guild_and_boss_scoped_expire_and_overwrite() {
+    const OTHER_GUILD: i64 = -83_003;
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    assert_eq!(
+        repository.active_echo(GUILD, "grothak", 1_000).unwrap(),
+        None
+    );
+    let mut connection = Connection::open(database.path()).expect("echo connection");
+    let transaction = connection.transaction().expect("echo transaction");
+    for (guild_id, boss_id, depth, killer_id, weakened_until) in [
+        (GUILD, "magmus_rex", 75, 111, 1_060),
+        (GUILD, "magmus_rex", 75, 222, 4_610),
+        (GUILD, "crystalia", 50, 2, 1_060),
+        (OTHER_GUILD, "magmus_rex", 75, 333, 4_610),
+    ] {
+        upsert_echo(
+            &transaction,
+            guild_id,
+            DigBossRuntimeEcho {
+                boss_id,
+                depth,
+                killer_id,
+                weakened_until,
+            },
+        )
+        .expect("upsert echo");
+    }
+    transaction.commit().expect("commit echoes");
+
+    assert_eq!(
+        repository.active_echo(GUILD, "magmus_rex", 1_100).unwrap(),
+        Some((75, 222, 4_610))
+    );
+    assert_eq!(
+        repository.active_echo(GUILD, "crystalia", 1_001).unwrap(),
+        Some((50, 2, 1_060))
+    );
+    assert_eq!(
+        repository.active_echo(GUILD, "crystalia", 1_060).unwrap(),
+        None
+    );
+    assert_eq!(
+        repository.active_echo(GUILD, "grothak", 1_001).unwrap(),
+        None
+    );
+    assert_eq!(
+        repository
+            .active_echo(OTHER_GUILD, "magmus_rex", 1_100)
+            .unwrap(),
+        Some((75, 333, 4_610))
+    );
+}
