@@ -1,6 +1,6 @@
 //! Cards for the parts of a year that happen outside the match queue: the
 //! dig, the Camagotchi, gamba, and Mafia, plus the month-by-month arc and the
-//! "Cama type" that sums the whole year up.
+//! activity summary for the year.
 //!
 //! Every card is backed by a recorded number. Copy is chosen from the numbers
 //! and a per-player seed, so a story reads the same every time it is replayed.
@@ -163,27 +163,24 @@ pub fn months_card(match_dates: &[&str], seed: u64) -> Option<ChapterCard> {
         "story_months",
         CardStyle::Bars,
         CardMood::Months,
-        "Your year in queue",
+        "Your Dota year",
     );
     card.headline = pick(
         seed,
         1,
         &[
-            "{month} had you in a chokehold.",
-            "{month} was your peak era.",
-            "You were unstoppable in {month}.",
+            "You played most in {month}.",
+            "{month} was your busiest month.",
+            "Your most active month was {month}.",
         ],
     )
     .replace("{month}", MONTHS[peak]);
     card.stat_value = format_grouped(shown[peak]);
     card.stat_label = if shown[quiet] == 0 {
-        format!(
-            "games in {}. Then {} happened: zero games.",
-            MONTHS[peak], MONTHS[quiet]
-        )
+        format!("games in {}. No games in {}.", MONTHS[peak], MONTHS[quiet])
     } else if quiet != peak && shown[quiet] * 3 <= shown[peak] {
         format!(
-            "games in {}. {} was suspiciously quiet.",
+            "games in {}. You played less in {}.",
             MONTHS[peak], MONTHS[quiet]
         )
     } else {
@@ -276,9 +273,9 @@ pub fn gamba_cards(
             seed,
             2,
             &[
-                "The house would like a word.",
-                "Somehow, profitable.",
-                "You beat the house. Don't tell it.",
+                "You finished with a profit.",
+                "Your net result was a profit.",
+                "You came out ahead.",
             ],
         )
     } else if summary.net < 0 {
@@ -286,13 +283,13 @@ pub fn gamba_cards(
             seed,
             2,
             &[
-                "The house sends its regards.",
-                "Every bet was a lesson.",
-                "You funded the house this year.",
+                "You finished with a loss.",
+                "Your net result was a loss.",
+                "You ended the year down.",
             ],
         )
     } else {
-        "Perfectly balanced, as all things should be."
+        "You broke even."
     }
     .to_owned();
     curve.stat_value = format!("{} JC", format_grouped_signed(summary.net));
@@ -300,12 +297,12 @@ pub fn gamba_cards(
     curve.badge = rank_badge(year.rank, "Wagered more than", "bettor");
     if summary.peak > 0 && summary.net < summary.peak {
         curve.lines.push(format!(
-            "Peaked at {} JC. You kept going.",
+            "Highest net profit: {} JC.",
             format_grouped_signed(summary.peak)
         ));
     } else if summary.trough < 0 && summary.net > 0 {
         curve.lines.push(format!(
-            "Down {} JC at one point. Never in doubt.",
+            "Largest net loss: {} JC.",
             format_grouped(-summary.trough)
         ));
     }
@@ -319,12 +316,9 @@ pub fn gamba_cards(
         } else {
             CardMood::GambaDown
         },
-        "Degen report",
+        "Gamba results",
     );
-    report.headline = degen
-        .map(|(_, title)| title.to_owned())
-        .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| "The receipts".to_owned());
+    report.headline = "Your biggest wins and losses.".to_owned();
     if let Some((score, _)) = degen {
         report
             .rows
@@ -333,13 +327,13 @@ pub fn gamba_cards(
     if summary.best > 0 {
         report.rows.push((
             format_grouped_signed(summary.best),
-            "best single gamble".to_owned(),
+            "biggest win (JC)".to_owned(),
         ));
     }
     if summary.worst < 0 {
         report.rows.push((
             format_grouped(summary.worst),
-            "worst single gamble".to_owned(),
+            "biggest loss (JC)".to_owned(),
         ));
     }
     if year.wheel.spins > 0 {
@@ -356,7 +350,7 @@ pub fn gamba_cards(
     if summary.double_or_nothing > 0 {
         report.rows.push((
             format_grouped(summary.double_or_nothing),
-            "double or nothings".to_owned(),
+            "double-or-nothing games".to_owned(),
         ));
     }
     if bankruptcies > 0 {
@@ -373,12 +367,12 @@ pub fn gamba_cards(
     report.rows.truncate(6);
     if year.wheel.bankrupts > 0 {
         report.lines.push(format!(
-            "The wheel bankrupted you {}. You kept spinning.",
+            "The wheel bankrupted you {}.",
             plural(year.wheel.bankrupts, "time", "times")
         ));
     } else if summary.losing_streak >= 5 {
         report.lines.push(format!(
-            "You lost {} in a row once. And then you bet again.",
+            "Longest losing streak: {} gambles.",
             summary.losing_streak
         ));
     }
@@ -388,7 +382,7 @@ pub fn gamba_cards(
         .and_then(|tally| Some((names(tally.discord_id)?, tally.count)))
     {
         report.lines.push(format!(
-            "Your favorite charity: {}, with {} JC in tips.",
+            "You tipped {} the most: {} JC.",
             friend.0,
             format_grouped(friend.1)
         ));
@@ -441,9 +435,9 @@ pub fn dig_cards(
         seed,
         3,
         &[
-            "You went looking for trouble.",
-            "The surface was never enough.",
-            "Down was the only direction.",
+            "Your year in Dig.",
+            "Your digging totals.",
+            "How far you dug.",
         ],
     )
     .to_owned();
@@ -452,19 +446,19 @@ pub fn dig_cards(
     dig.stat_label = if year.blocks_dug > 0 {
         match context.deepest_layer {
             Some(layer) => format!(
-                "blocks down. Deepest: {} in {layer}.",
+                "blocks dug. Deepest: {} in {layer}.",
                 format_grouped(year.deepest)
             ),
-            None => format!("blocks down. Deepest: {}.", format_grouped(year.deepest)),
+            None => format!("blocks dug. Deepest: {}.", format_grouped(year.deepest)),
         }
     } else {
         "digs".to_owned()
     };
-    dig.badge = rank_badge(year.rank, "You out-dug", "digger");
+    dig.badge = rank_badge(year.rank, "Dug more than", "digger");
     if year.cave_ins >= 3 {
         dig.lines.push(format!(
-            "The tunnel caved in on you {}. You kept digging.",
-            plural(year.cave_ins, "time", "times")
+            "You had {} cave-ins.",
+            format_grouped(year.cave_ins)
         ));
     }
     if year.artifacts > 0 {
@@ -496,11 +490,7 @@ pub fn dig_cards(
             "story_dig_boss",
             CardStyle::Spotlight,
             mood,
-            if boss.losses > boss.wins {
-                "Your white whale"
-            } else {
-                "Your favorite punching bag"
-            },
+            "Boss you fought most",
         );
         card.art = if boss.wins == 0 {
             CardArt::BossDefeat(boss.boss_id.clone())
@@ -512,12 +502,12 @@ pub fn dig_cards(
         card.headline = name;
         card.stat_value = plural(boss.fights(), "fight", "fights");
         card.stat_label = if boss.wins == 0 {
-            "It won every one. It remembers you.".to_owned()
+            "You lost every fight.".to_owned()
         } else if boss.losses == 0 {
-            "You won every one. It would like a rematch.".to_owned()
+            "You won every fight.".to_owned()
         } else {
             format!(
-                "You won {}. It won {}.",
+                "Won: {}. Lost: {}.",
                 format_grouped(boss.wins),
                 format_grouped(boss.losses)
             )
@@ -526,8 +516,8 @@ pub fn dig_cards(
         if others > 0 {
             let won = year.bosses.iter().map(|boss| boss.wins).sum::<i64>();
             card.lines.push(format!(
-                "Plus {} more. {} boss wins all year.",
-                plural(others as i64, "boss", "bosses"),
+                "Other bosses fought: {}. Total boss wins: {}.",
+                format_grouped(others as i64),
                 format_grouped(won)
             ));
         }
@@ -543,12 +533,12 @@ pub fn dig_cards(
             "story_dig_feud",
             CardStyle::BigNumber,
             CardMood::DigDeep,
-            "Tunnel politics",
+            "Dig sabotage",
         );
         card.headline = match &target {
-            Some((name, _)) => format!("{name} was in your crosshairs."),
-            None if year.sabotages_sent == 0 => "You never threw the first rock.".to_owned(),
-            None => "You made enemies underground.".to_owned(),
+            Some((name, _)) => format!("You targeted {name} most often."),
+            None if year.sabotages_sent == 0 => "You received sabotage but sent none.".to_owned(),
+            None => "Your sabotage activity.".to_owned(),
         };
         card.stat_value = format_grouped(year.sabotages_sent);
         card.stat_label = match &target {
@@ -565,13 +555,13 @@ pub fn dig_cards(
             .and_then(|tally| Some((names(tally.discord_id)?, tally.count)))
         {
             card.lines.push(format!(
-                "{name} got you back {}.",
+                "{name} sabotaged you {}.",
                 plural(count, "time", "times")
             ));
         }
         if year.helps_given > 0 {
             card.lines.push(format!(
-                "You also helped others {}. It's complicated.",
+                "You helped others {}.",
                 plural(year.helps_given, "time", "times")
             ));
         }
@@ -585,7 +575,7 @@ fn cause_of_death(cause: Option<&str>) -> &'static str {
         Some("starvation" | "starved" | "hunger") => "starved",
         Some("eaten") => "got eaten",
         Some("brawl") => "fell in a brawl",
-        _ => "crossed the rainbow bridge",
+        _ => "died",
     }
 }
 
@@ -615,18 +605,8 @@ pub fn pet_cards(year: &PetYear, names: NameLookup<'_>, seed: u64) -> Vec<Chapte
     pet.stat_value = plural(meals, "meal", "meals");
     pet.stat_label = if year.pets.len() > 1 {
         format!("served across {} pets", year.pets.len())
-    } else if meals == 0 {
-        pick(
-            seed,
-            4,
-            &[
-                "served. It is fine. Probably.",
-                "served. Someone call welfare.",
-            ],
-        )
-        .to_owned()
     } else {
-        "served, and not one thank-you".to_owned()
+        "served this year".to_owned()
     };
     pet.badge = rank_badge(year.rank, "Fed more than", "pet parent");
     if year.jc_spent > 0 && pet.badge.is_empty() {
@@ -666,15 +646,15 @@ pub fn pet_cards(year: &PetYear, names: NameLookup<'_>, seed: u64) -> Vec<Chapte
             "story_pet_grave",
             CardStyle::BigNumber,
             CardMood::PetGrave,
-            "In loving memory",
+            "Pets lost",
         );
         grave.headline = pick(
             seed,
             5,
             &[
-                "Not everyone made it.",
-                "Gone, but not forgotten. Mostly.",
-                "Some goodbyes were your fault.",
+                "Remembering your pets.",
+                "Your pets who died this year.",
+                "Pets you lost this year.",
             ],
         )
         .to_owned();
@@ -714,29 +694,26 @@ pub fn mafia_cards(year: &MafiaYear, names: NameLookup<'_>, seed: u64) -> Vec<Ch
         pick(
             seed,
             6,
-            &[
-                "You lied to your friends. It worked.",
-                "Trustworthy face. Terrible person.",
-            ],
+            &["You won games as Mafia.", "You had wins on the Mafia side."],
         )
     } else if year.mafia_games > 0 {
-        "You lied to your friends. They noticed."
+        "You played as Mafia but had no Mafia wins."
     } else if year.wins * 2 >= year.games {
-        "Town's most trusted citizen."
+        "You won at least half your games."
     } else {
-        "Town's most suspicious citizen."
+        "You won fewer than half your games."
     }
     .to_owned();
     let mut tiles = vec![
         (format_grouped(year.games), "games played".to_owned()),
-        (format_grouped(year.wins), "on the winning side".to_owned()),
+        (format_grouped(year.wins), "wins".to_owned()),
     ];
     for (count, label) in [
-        (year.mafia_games, "times Mafia"),
+        (year.mafia_games, "games as Mafia"),
         (year.kills, "night kills"),
         (year.saves, "lives saved"),
         (year.correct_reads, "Mafia caught"),
-        (year.mvps, "times MVP"),
+        (year.mvps, "MVP awards"),
         (year.jester_wins, "jester wins"),
     ] {
         if count > 0 {
@@ -747,13 +724,12 @@ pub fn mafia_cards(year: &MafiaYear, names: NameLookup<'_>, seed: u64) -> Vec<Ch
     card.rows = tiles;
     if year.votes_cast >= 3 {
         let percent = year.votes_on_mafia as f64 / year.votes_cast as f64 * 100.0;
-        card.lines.push(format!(
-            "{percent:.0}% of your votes landed on actual Mafia."
-        ));
+        card.lines
+            .push(format!("{percent:.0}% of your votes targeted Mafia."));
     }
     if year.first_night_deaths >= 2 {
         card.lines.push(format!(
-            "Killed on night one {}. They saw you coming.",
+            "Killed on the first night {}.",
             plural(year.first_night_deaths, "time", "times")
         ));
     }
@@ -768,11 +744,11 @@ pub fn mafia_cards(year: &MafiaYear, names: NameLookup<'_>, seed: u64) -> Vec<Ch
             "story_mafia_victim",
             CardStyle::BigNumber,
             CardMood::MafiaRed,
-            "Nothing personal",
+            "Your most frequent target",
         );
-        victim.headline = format!("{name} should sleep with one eye open.");
+        victim.headline = format!("You targeted {name} most often.");
         victim.stat_value = format_grouped(count);
-        victim.stat_label = "times you came for them at night".to_owned();
+        victim.stat_label = format!("night attacks against {name}");
         cards.push(victim);
     } else if let Some((name, count)) = year
         .top_accuser
@@ -783,15 +759,15 @@ pub fn mafia_cards(year: &MafiaYear, names: NameLookup<'_>, seed: u64) -> Vec<Ch
             "story_mafia_accuser",
             CardStyle::BigNumber,
             CardMood::MafiaRed,
-            "Trust issues",
+            "Votes against you",
         );
-        accuser.headline = format!("{name} never trusted you.");
+        accuser.headline = format!("{name} voted against you most often.");
         accuser.stat_value = format_grouped(count);
-        accuser.stat_label = "votes against you".to_owned();
+        accuser.stat_label = format!("votes from {name}");
         if year.mafia_games > 0 {
             accuser
                 .lines
-                .push("To be fair, sometimes they were right.".to_owned());
+                .push("You also played games as Mafia.".to_owned());
         }
         cards.push(accuser);
     }
@@ -831,44 +807,23 @@ pub enum QueueStyle {
 }
 
 impl PersonaActivity {
-    const fn noun(self) -> &'static str {
+    const fn summary(self) -> &'static str {
         match self {
-            Self::Queue(QueueStyle::Enabler) => "Enabler",
-            Self::Queue(QueueStyle::Headliner) => "Headliner",
-            Self::Queue(QueueStyle::Mapmaker) => "Cartographer",
-            Self::Queue(QueueStyle::Loyalist) => "Loyalist",
-            Self::Queue(QueueStyle::Sampler) => "Sampler",
-            Self::Queue(QueueStyle::Unknown) => "Queue Goblin",
-            Self::Dig => "Mole",
-            Self::Pets => "Pet Parent",
-            Self::GambaUp => "High Roller",
-            Self::GambaDown => "Degen",
-            Self::MafiaLiar => "Snake",
-            Self::MafiaTown => "Town Crier",
+            Self::Queue(_) => "Dota regular",
+            Self::Dig => "Dig regular",
+            Self::Pets => "Pet keeper",
+            Self::GambaUp | Self::GambaDown => "Gamba regular",
+            Self::MafiaLiar | Self::MafiaTown => "Mafia regular",
         }
     }
 
-    const fn adjective(self) -> &'static str {
+    const fn secondary_summary(self) -> &'static str {
         match self {
-            Self::Queue(_) => "Tryhard",
-            Self::Dig => "Subterranean",
-            Self::Pets => "Doting",
-            Self::GambaUp => "Lucky",
-            Self::GambaDown => "Unhinged",
-            Self::MafiaLiar => "Two-Faced",
-            Self::MafiaTown => "Paranoid",
-        }
-    }
-
-    const fn clause(self) -> &'static str {
-        match self {
-            Self::Queue(_) => "the queue was home",
-            Self::Dig => "the ground was a personal rival",
-            Self::Pets => "a small creature depended on you",
-            Self::GambaUp => "the house was your piggy bank",
-            Self::GambaDown => "the wheel was a financial plan",
-            Self::MafiaLiar => "your friends couldn't trust a word you said",
-            Self::MafiaTown => "you trusted absolutely no one",
+            Self::Queue(_) => "You also played Dota.",
+            Self::Dig => "You also played Dig.",
+            Self::Pets => "You also cared for pets.",
+            Self::GambaUp | Self::GambaDown => "You also played Gamba.",
+            Self::MafiaLiar | Self::MafiaTown => "You also played Mafia.",
         }
     }
 
@@ -890,8 +845,8 @@ impl PersonaActivity {
     }
 }
 
-/// The year in one name: the strongest activity is the noun, the runner-up
-/// the adjective. Ties break toward the order the signals were given.
+/// Summarizes the strongest activity and a runner-up from another activity.
+/// Ties break toward the order the signals were given.
 #[must_use]
 pub fn persona_card(signals: &[PersonaSignal]) -> Option<ChapterCard> {
     let mut ranked = signals
@@ -910,26 +865,18 @@ pub fn persona_card(signals: &[PersonaSignal]) -> Option<ChapterCard> {
         .skip(1)
         .map(|(_, signal)| *signal)
         .find(|signal| !signal.activity.same_family(primary.activity));
-    let adjective = match secondary {
-        Some(signal) => signal.activity.adjective(),
-        None if primary.strength >= 75.0 => "Certified",
-        None => "Part-Time",
-    };
     let mut card = ChapterCard::new(
         "story_persona",
         CardStyle::Persona,
         CardMood::Persona,
-        "Your Cama type",
+        "Your main activity",
     );
-    card.stat_value = format!("The {adjective} {}", primary.activity.noun());
-    card.headline = match secondary {
-        Some(second) => format!(
-            "A year where {}, and {}.",
-            primary.activity.clause(),
-            second.activity.clause()
-        ),
-        None => format!("A year where {}.", primary.activity.clause()),
-    };
+    card.stat_value = primary.activity.summary().to_owned();
+    card.headline = secondary
+        .map_or("Your main recorded activity this year.", |second| {
+            second.activity.secondary_summary()
+        })
+        .to_owned();
     card.rows = std::iter::once(primary)
         .chain(secondary)
         .chain(ranked.iter().map(|(_, signal)| *signal).filter(|signal| {

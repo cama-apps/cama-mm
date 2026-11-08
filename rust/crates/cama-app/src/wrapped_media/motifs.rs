@@ -14,7 +14,8 @@ const H: f32 = HEIGHT as f32;
 pub(super) fn paint(stage: &mut Stage<'_>) {
     match stage.slide.theme {
         WrappedTheme::Plain => {}
-        WrappedTheme::Cover | WrappedTheme::Months => waves(stage),
+        WrappedTheme::Cover => record_sleeve(stage),
+        WrappedTheme::Months => waves(stage),
         WrappedTheme::Queue | WrappedTheme::QueueAlt => rings(stage),
         WrappedTheme::Squad => treeline(stage),
         WrappedTheme::Heroes | WrappedTheme::Persona => burst(stage),
@@ -26,7 +27,29 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         WrappedTheme::PetGrave => graveyard(stage),
         WrappedTheme::Mafia | WrappedTheme::MafiaRed => eclipse(stage),
         WrappedTheme::Recap => confetti(stage),
+        WrappedTheme::Awards => {}
     }
+}
+
+/// A cropped record sleeve: the opening spins into place around the story.
+fn record_sleeve(stage: &mut Stage<'_>) {
+    let p = stage.palette;
+    let enter = stage.ease(0.0, 0.7);
+    let center = (W + 80.0 - 80.0 * enter, 440.0);
+    for index in 0..5 {
+        let radius = 180.0 + index as f32 * 56.0;
+        stage.canvas.ring(center, radius * enter, 22.0, p.soft);
+    }
+    let sweep = stage.ease(0.15, 0.65);
+    stage.canvas.polygon(
+        &[
+            (W, 610.0),
+            (W, 690.0),
+            (W - 400.0 * sweep, 900.0),
+            (W - 520.0 * sweep, 900.0),
+        ],
+        p.accent,
+    );
 }
 
 /// Small deterministic sequence: a card always moves the same way.

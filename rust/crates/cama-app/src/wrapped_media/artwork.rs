@@ -9,6 +9,7 @@ const CHARACTER_FRAME: (usize, usize) = (300, 300);
 const COVER_ART_HEIGHT: usize = 480;
 /// Hero portraits beside ranked rows: half of Steam's 256x144 portrait.
 pub(super) const ROW_FRAME: (usize, usize) = (128, 72);
+pub(super) const RECAP_ROW_FRAME: (usize, usize) = (80, 45);
 
 fn battlefield() -> Option<&'static DecodedPng> {
     static IMAGE: OnceLock<Option<DecodedPng>> = OnceLock::new();
@@ -57,15 +58,17 @@ pub(super) fn prepare(slide: &WrappedSlideData) -> Option<PreparedArt> {
 
 /// Resample each ranked row's picture once. Rows without one stay `None`.
 pub(super) fn prepare_rows(slide: &WrappedSlideData) -> Vec<Option<PreparedArt>> {
-    if slide.layout != WrappedLayout::TopList {
-        return Vec::new();
-    }
+    let frame = match slide.layout {
+        WrappedLayout::TopList => ROW_FRAME,
+        WrappedLayout::Recap => RECAP_ROW_FRAME,
+        _ => return Vec::new(),
+    };
     slide
         .rows
         .iter()
         .map(|row| {
             let image = decode_png(row.image_png.as_deref()?)?;
-            let (width, height) = fit_within(&image, ROW_FRAME);
+            let (width, height) = fit_within(&image, frame);
             Some(resample(&image, width, height))
         })
         .collect()

@@ -13,7 +13,9 @@ include!("wrapped_story/flavor_catalog.rs");
 pub mod chapters;
 #[path = "wrapped_story/personal_moments.rs"]
 mod personal_moments;
-pub use personal_moments::{PersonalMoment, PersonalMomentMatch, PersonalStory, personal_moments};
+pub use personal_moments::{
+    PersonalMoment, PersonalMomentMatch, PersonalStory, personal_moments, personal_superlatives,
+};
 
 pub fn flavor_pool(key: &str) -> Option<&'static [&'static str]> {
     FLAVOR_POOLS
@@ -535,7 +537,7 @@ pub fn generate_awards(
         awards.push(award_from_stats(
             stats,
             "performance",
-            "Gold Goblin",
+            "Highest average GPM",
             "Best GPM",
             format!("{:.0} avg", stats.avg_gpm),
             "💰",
@@ -545,7 +547,7 @@ pub fn generate_awards(
         awards.push(award_from_stats(
             stats,
             "fun",
-            "No Life",
+            "Most games played",
             "Most Games",
             stats.games_played.to_string(),
             "🕰️",
@@ -558,7 +560,7 @@ pub fn generate_awards(
     {
         awards.push(WrappedAward {
             category: "rating".to_owned(),
-            title: "Elo Inflation".to_owned(),
+            title: "Largest rating gain".to_owned(),
             stat_name: "Rating Gained".to_owned(),
             stat_value: format!("+{:.0}", change.rating_change),
             discord_id: change.discord_id,
@@ -574,7 +576,7 @@ pub fn generate_awards(
     {
         awards.push(WrappedAward {
             category: "rating".to_owned(),
-            title: "The Cliff".to_owned(),
+            title: "Largest rating loss".to_owned(),
             stat_name: "Rating Lost".to_owned(),
             stat_value: format!("{:.0}", change.rating_change),
             discord_id: change.discord_id,

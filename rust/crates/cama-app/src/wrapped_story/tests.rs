@@ -473,9 +473,14 @@ fn test_generate_awards_with_data() {
         .map(|award| award.title)
         .collect();
     assert!(
-        ["Gold Goblin", "Elo Inflation", "The Cliff", "No Life"]
-            .into_iter()
-            .all(|title| titles.contains(title))
+        [
+            "Highest average GPM",
+            "Largest rating gain",
+            "Largest rating loss",
+            "Most games played"
+        ]
+        .into_iter()
+        .all(|title| titles.contains(title))
     );
 }
 
@@ -483,7 +488,7 @@ fn test_generate_awards_with_data() {
 fn test_award_dataclass() {
     let award = WrappedAward {
         category: "performance".to_owned(),
-        title: "Gold Goblin".to_owned(),
+        title: "Highest average GPM".to_owned(),
         stat_name: "Best GPM".to_owned(),
         stat_value: "847 avg".to_owned(),
         discord_id: 123,
@@ -492,6 +497,6 @@ fn test_award_dataclass() {
         flavor_text: "Farming simulator champion".to_owned(),
     };
     assert_eq!(award.category, "performance");
-    assert_eq!(award.title, "Gold Goblin");
+    assert_eq!(award.title, "Highest average GPM");
     assert_eq!(award.emoji, "💰");
 }

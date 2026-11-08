@@ -298,7 +298,20 @@ pub(super) fn palette(theme: WrappedTheme) -> Palette {
         ),
         WrappedTheme::MafiaRed => (RED, INK, CREAM, Rgba::rgb(212, 32, 60), INK),
         WrappedTheme::Persona => (YELLOW, INK, VIOLET, Rgba::rgb(255, 226, 92), CREAM),
-        WrappedTheme::Recap => (INK, CREAM, LIME, Rgba::rgb(36, 34, 54), INK),
+        WrappedTheme::Awards => (
+            Rgba::rgb(44, 24, 120),
+            CREAM,
+            Rgba::rgb(255, 224, 92),
+            Rgba::rgb(73, 50, 144),
+            Rgba::rgb(44, 24, 120),
+        ),
+        WrappedTheme::Recap => (
+            COBALT,
+            CREAM,
+            Rgba::rgb(255, 183, 204),
+            Rgba::rgb(60, 70, 240),
+            INK,
+        ),
     };
     Palette {
         bg,
@@ -721,6 +734,7 @@ mod tests {
             WrappedTheme::Mafia,
             WrappedTheme::MafiaRed,
             WrappedTheme::Persona,
+            WrappedTheme::Awards,
             WrappedTheme::Recap,
         ] {
             let p = palette(theme);
