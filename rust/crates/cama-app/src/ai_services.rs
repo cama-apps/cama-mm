@@ -556,10 +556,26 @@ struct Invocation {
     timeout_override: Option<Duration>,
 }
 
+/// Monotonic time that bounds each provider attempt. Production reads the
+/// system clock; tests substitute one they advance by hand, so a slow cold
+/// load can be modelled without sleeping through it.
+trait AttemptClock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+struct SystemAttemptClock;
+
+impl AttemptClock for SystemAttemptClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 /// Provider-neutral orchestration.  Construction is side-effect free.
 pub struct AIService {
     candidates: Vec<ProviderCandidate>,
     recorder: Option<Arc<dyn AttemptRecorder>>,
+    deadline_clock: Arc<dyn AttemptClock>,
 }
 
 impl AIService {
@@ -571,7 +587,14 @@ impl AIService {
                 provider: Arc::new(LazyProvider::new(loader)),
             }],
             recorder: None,
+            deadline_clock: Arc::new(SystemAttemptClock),
         }
+    }
+
+    #[cfg(test)]
+    fn with_deadline_clock(mut self, clock: Arc<dyn AttemptClock>) -> Self {
+        self.deadline_clock = clock;
+        self
     }
 
     /// Add an opt-in fallback.  A one-candidate service preserves Python's
@@ -694,7 +717,7 @@ impl AIService {
             };
             let (sender, receiver) = mpsc::sync_channel(1);
             // The hard provider clock begins only after cold initialization.
-            let provider_started = Instant::now();
+            let provider_started = self.deadline_clock.now();
             let spawn_result = thread::Builder::new()
                 .name("cama-ai-provider-attempt".to_owned())
                 .spawn(move || {
@@ -712,18 +735,22 @@ impl AIService {
                 last_error = error;
                 continue;
             }
-            let result =
-                match receiver.recv_timeout(timeout.saturating_sub(provider_started.elapsed())) {
-                    Ok(result) => result,
-                    Err(mpsc::RecvTimeoutError::Timeout) => Err(ProviderError::new(
-                        ProviderErrorKind::Timeout,
-                        format!("provider exceeded {} ms", timeout.as_millis()),
-                    )),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => Err(ProviderError::new(
-                        ProviderErrorKind::Unavailable,
-                        "provider attempt terminated without a response",
-                    )),
-                };
+            let remaining = timeout.saturating_sub(
+                self.deadline_clock
+                    .now()
+                    .saturating_duration_since(provider_started),
+            );
+            let result = match receiver.recv_timeout(remaining) {
+                Ok(result) => result,
+                Err(mpsc::RecvTimeoutError::Timeout) => Err(ProviderError::new(
+                    ProviderErrorKind::Timeout,
+                    format!("provider exceeded {} ms", timeout.as_millis()),
+                )),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err(ProviderError::new(
+                    ProviderErrorKind::Unavailable,
+                    "provider attempt terminated without a response",
+                )),
+            };
             let latency = attempt_started.elapsed();
             match result {
                 Ok(response) => {
