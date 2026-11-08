@@ -885,14 +885,48 @@ fn recap(stage: &mut Stage<'_>) {
     let limit = HEIGHT - 150;
     let left_rows = rows.iter().take(5).collect::<Vec<_>>();
     let row_height = ((limit - content) / left_rows.len().max(1) as i32).min(66);
+    let (frame_width, frame_height) = super::artwork::RECAP_ROW_FRAME;
+    let portraits =
+        row_height >= frame_height as i32 + 8 && stage.row_art.iter().any(Option::is_some);
     for (index, row) in left_rows.iter().enumerate() {
         let top = content + index as i32 * row_height;
         let start = 0.34 + index as f32 * 0.06;
-        let entry = format!("{} {}", index + 1, row.primary);
+        let mut text = MARGIN;
+        if portraits {
+            let enter = stage.ease(start, start + 0.2);
+            let left = MARGIN - ((1.0 - enter) * 400.0) as i32;
+            let art_top = top + (row_height - frame_height as i32) / 2;
+            if let Some(art) = stage.row_art.get(index).and_then(Option::as_ref) {
+                let frame = (
+                    left,
+                    art_top,
+                    left + art.width as i32,
+                    art_top + art.height as i32,
+                );
+                super::artwork::paint(&mut stage.canvas, art, left, art_top, frame, 6.0);
+            } else {
+                stage.canvas.rounded_rect(
+                    (
+                        left as f32,
+                        art_top as f32,
+                        (left + frame_width as i32) as f32,
+                        (art_top + frame_height as i32) as f32,
+                    ),
+                    6.0,
+                    p.soft,
+                );
+            }
+            text += frame_width as i32 + 12;
+        }
+        let entry = if portraits {
+            row.primary.clone()
+        } else {
+            format!("{} {}", index + 1, row.primary)
+        };
         stage.block(
             &entry,
-            (MARGIN, top, left_width, row_height),
-            32.0,
+            (text, top, left_width - (text - MARGIN), row_height),
+            if portraits { 28.0 } else { 32.0 },
             Face::Bold,
             p.fg,
             Align::Left,

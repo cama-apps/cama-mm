@@ -414,6 +414,26 @@ fn top_heroes_show_portraits_and_keep_slots_for_missing_ones() {
 }
 
 #[test]
+fn recap_shows_cached_hero_portraits_with_missing_images() {
+    let mut slide = busy("story_finale");
+    slide.rows = (1..=5)
+        .map(|index| WrappedRow::new(format!("Hero {index}"), ""))
+        .collect();
+    slide.rows[0].image_png = Some(encode_png(&Canvas::new(256, 144, Rgba::rgb(0, 200, 0))));
+    slide.rows[2].image_png = Some(b"not png".to_vec());
+    let rendered = stage::render_still(&slide);
+    let shown = rendered
+        .pixels
+        .chunks_exact(4)
+        .filter(|pixel| pixel[..3] == [0, 200, 0])
+        .count();
+    assert!(shown > 80 * 45 * 9 / 10 && shown <= 80 * 45, "{shown}");
+    let mut prepared = stage::Stage::new(&slide);
+    prepared.paint(0.5);
+    assert!(rendered.pixels == prepared.paint(1.0).pixels);
+}
+
+#[test]
 fn coverage_labels_stay_visible_on_lists_and_bars() {
     for kind in ["story_hero", "story_lanes"] {
         let mut slide = WrappedSlideData::new(kind, "Recorded picks");

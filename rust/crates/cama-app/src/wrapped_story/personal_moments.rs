@@ -347,7 +347,7 @@ pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMom
             1.0 + deathless as f64 / survival.len() as f64,
             PersonalMoment {
                 key: "deathless",
-                title: "Deathless wins",
+                title: "Can't touch this",
                 headline: "You won without dying.",
                 value: deathless.to_string(),
                 label: "wins with zero deaths",
@@ -365,7 +365,7 @@ pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMom
             *peak as f64 / 20.0,
             PersonalMoment {
                 key: "supporting_cast",
-                title: "Most assists",
+                title: "Assist machine",
                 headline: "Your best game for assists.",
                 value: number(*peak),
                 label: "assists in one game",
@@ -389,10 +389,10 @@ pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMom
             1800.0 / duration as f64,
             PersonalMoment {
                 key: "speedrun",
-                title: "Fastest win",
+                title: "Speedrun",
                 headline: "You made it quick.",
                 value: format!("{}:{:02}", duration / 60, duration % 60),
-                label: "minutes : seconds",
+                label: "fastest win · min : sec",
                 detail: "Time shown in minutes and seconds.".to_owned(),
                 coverage: coverage(timed_results.len()),
             },
@@ -418,7 +418,7 @@ pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMom
             *kills as f64 / 15.0,
             PersonalMoment {
                 key: "bittersweet",
-                title: "Most kills in a loss",
+                title: "All kills, no win",
                 headline: "All those kills. Still a loss.",
                 value: format!("{kills} / {deaths} / {assists}"),
                 label: "kills / deaths / assists in a loss",
@@ -440,7 +440,7 @@ pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMom
             unique as f64 / 5.0,
             PersonalMoment {
                 key: "hero_sampler",
-                title: "Hero variety",
+                title: "Can't pick just one",
                 headline: "You tried plenty of heroes.",
                 value: unique.to_string(),
                 label: "different heroes played",

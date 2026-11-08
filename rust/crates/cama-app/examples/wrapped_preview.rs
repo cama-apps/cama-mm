@@ -108,6 +108,7 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     ]) {
         row.image_png = std::fs::read(portraits.join(format!("{slug}.png"))).ok();
     }
+    let recap_heroes = heroes.rows.clone();
     deck.push(heroes);
 
     // Exercise the production award policy, including a wide scoreline and
@@ -351,14 +352,8 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     let mut finale = card("story_finale", "2026 Wrapped");
     finale.stat_value = PLAYER.to_owned();
     finale.headline = "Dig regular".to_owned();
-    finale.badge = "Deathless wins".to_owned();
-    finale.rows = rows(&[
-        ("Queen of Pain", ""),
-        ("Crystal Maiden", ""),
-        ("Dark Willow", ""),
-        ("Pudge", ""),
-        ("Keeper of the Light", ""),
-    ]);
+    finale.badge = "Can't touch this".to_owned();
+    finale.rows = recap_heroes;
     finale.lines = lines(&[
         "185h|in matches",
         "247|games",

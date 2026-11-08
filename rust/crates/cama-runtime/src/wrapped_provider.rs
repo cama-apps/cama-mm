@@ -1654,7 +1654,11 @@ fn build_slides(
     finale.stat_value = target_display_name.to_owned();
     finale.rows = top_heroes(&app_heroes, target_id)
         .into_iter()
-        .map(|row| WrappedRow::new(hero_name(row.hero_id), ""))
+        .map(|row| {
+            let mut ranked = WrappedRow::new(hero_name(row.hero_id), "");
+            ranked.image_png = raw.hero_art.get(&row.hero_id).cloned();
+            ranked
+        })
         .collect();
     finale.lines = recap_numbers(
         personal.as_ref(),

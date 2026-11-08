@@ -1630,7 +1630,20 @@ fn top_heroes_wear_portraits_from_the_warm_cache_only() {
             .image_png
             .clone()
     };
-    assert_eq!(image("Anti-Mage"), Some(portrait));
+    assert_eq!(image("Anti-Mage"), Some(portrait.clone()));
+    let recap = slides
+        .iter()
+        .find(|slide| slide.kind == "story_finale")
+        .unwrap();
+    assert_eq!(
+        recap
+            .rows
+            .iter()
+            .find(|row| row.primary == "Anti-Mage")
+            .unwrap()
+            .image_png,
+        Some(portrait)
+    );
     // Axe was never cached, and Wrapped does not download it.
     assert_eq!(image("Axe"), None);
     assert!(!cache.join("heroes/axe.png").exists());
@@ -1895,11 +1908,11 @@ fn personal_superlatives_are_spaced_through_the_story_with_evidence_and_a_recap(
         assert!(!award.lines[0].is_empty());
         assert!(award.lines[1].contains("3 of 3"));
     }
-    assert_eq!(awards[0].1.title, "Deathless wins");
+    assert_eq!(awards[0].1.title, "Can't touch this");
     assert_eq!(awards[0].1.stat_value, "3");
-    assert_eq!(awards[1].1.title, "Fastest win");
+    assert_eq!(awards[1].1.title, "Speedrun");
     assert_eq!(awards[1].1.stat_value, "20:00");
-    assert_eq!(awards[2].1.title, "Most assists");
+    assert_eq!(awards[2].1.title, "Assist machine");
     assert_eq!(awards[2].1.stat_value, "30");
     assert_eq!(story.last().unwrap().badge, awards[0].1.title);
     assert!(story.iter().all(|slide| slide.kind != "chart_rating"));
