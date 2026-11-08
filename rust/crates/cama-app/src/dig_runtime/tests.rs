@@ -4210,6 +4210,78 @@ fn live_route_plain_dig(route_id: Option<&str>, now: i64) -> super::DigRuntimeOu
     outcome
 }
 
+/// Python's `choose_route`: one guarded claim per junction, audited once with
+/// the route and layer. Repeating the chosen route is a no-op, another route
+/// is refused, and another guild's junction for the same signed ID is untouched.
+#[test]
+fn route_choice_is_claimed_once_audited_and_guild_scoped() {
+    let (actor, guild, other_guild, now) = (-62_395, 62_396, -62_397, 1_900_097_000);
+    let pending = r#"{"end_depth": 50, "layer": "Stone", "offered": ["shored_passage", "old_supports", "fossil_seam"], "selected": null, "start_depth": 25}"#;
+    let database = fast_migrated_database();
+    for guild_id in [guild, other_guild] {
+        seed_live_runtime_tunnel(&database, actor, guild_id, now, 30, 1, Some(now - 7_200));
+        seed_route_state(&database, actor, guild_id, pending);
+    }
+    let runtime = DigRuntimeService::sqlite(database.path());
+
+    let chosen = runtime
+        .choose_route(actor, guild, "old_supports", now)
+        .expect("route choice");
+    assert!(chosen.success, "{:?}", chosen.error);
+    assert!(chosen.action_id.is_some());
+    let repeated = runtime
+        .choose_route(actor, guild, "old_supports", now + 1)
+        .expect("repeated route choice");
+    assert!(repeated.success && repeated.action_id.is_none());
+    let switched = runtime
+        .choose_route(actor, guild, "fossil_seam", now + 2)
+        .expect("switched route choice");
+    assert!(!switched.success);
+    assert!(
+        switched
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("already locked in"))
+    );
+    let unoffered = runtime
+        .choose_route(actor, other_guild, "lava_tube", now + 3)
+        .expect("unoffered route choice");
+    assert!(!unoffered.success);
+
+    let connection = Connection::open(database.path()).expect("route choice verify DB");
+    let details = connection
+        .prepare(
+            "SELECT detail FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='route_choice'",
+        )
+        .expect("route choice audit query")
+        .query_map(params![actor, guild], |row| row.get::<_, String>(0))
+        .expect("route choice audit rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("route choice audit details");
+    assert_eq!(details.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&details[0]).expect("route choice detail JSON"),
+        serde_json::json!({"route_id": "old_supports", "layer": "Stone"})
+    );
+    let route_state = |guild_id: i64| {
+        connection
+            .query_row(
+                "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+                params![actor, guild_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .expect("route state")
+    };
+    assert_eq!(
+        crate::dig_routes::route_status(route_state(guild).as_deref())
+            .active_route
+            .map(|route| route.id),
+        Some("old_supports")
+    );
+    assert_eq!(route_state(other_guild).as_deref(), Some(pending));
+}
+
 /// Run one non-cave Dig at `depth` under neutral weather, with or without an
 /// equipped Pathfinder's Spur, and return its advance.
 fn live_pathfinder_advance(depth: i64, equipped: bool, now: i64) -> i64 {

@@ -3434,6 +3434,11 @@ where
                 action_id: None,
             });
         }
+        let detail = serde_json::json!({
+            "route_id": route_id,
+            "layer": selected_state.as_ref().map(|state| state.layer.as_str()),
+        })
+        .to_string();
         let mut next = snapshot.clone();
         next.tunnel
             .as_mut()
@@ -3453,7 +3458,7 @@ where
             low_priority_tax: 0,
             balance_cost: 0,
             action_type: "route_choice".to_owned(),
-            detail: serde_json::json!({"route_id": route_id}).to_string(),
+            detail,
             now,
         })?;
         Ok(DigRuntimeActionResult {

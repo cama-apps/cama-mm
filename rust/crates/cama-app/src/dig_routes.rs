@@ -1,13 +1,9 @@
 //! Persistent route catalog and application policy for Dig.
 //!
-//! Route state is transport-independent. Entropy is injected and SQLite writes
-//! delegate to the existing-schema repository.
+//! Route state is transport-independent and entropy is injected; the Dig
+//! runtime and boss settlement persist it in their guarded commits.
 
 use std::fmt::{self, Display, Formatter};
-
-use cama_db::dig_routes_repository::{
-    DigRouteRepository, DigRouteRepositoryError, RouteChoiceClaim, RouteChoiceRequest,
-};
 
 use crate::dig_bosses::{BOSS_BOUNDARIES, PINNACLE_DEPTH};
 use crate::dig_service::LAYERS;
@@ -636,34 +632,6 @@ pub fn route_status(raw_state: Option<&str>) -> RouteStatus {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RouteChoiceResult {
-    pub success: bool,
-    pub error: Option<String>,
-    pub route: Option<&'static DigRoute>,
-    pub already_selected: bool,
-}
-
-impl RouteChoiceResult {
-    fn error(message: &str) -> Self {
-        Self {
-            success: false,
-            error: Some(message.to_owned()),
-            route: None,
-            already_selected: false,
-        }
-    }
-
-    fn selected(route: &'static DigRoute, already_selected: bool) -> Self {
-        Self {
-            success: true,
-            error: None,
-            route: Some(route),
-            already_selected,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub enum RouteChoiceEvaluation {
     Select {
         route: &'static DigRoute,
@@ -697,104 +665,6 @@ pub fn evaluate_route_choice(raw_state: Option<&str>, route_id: &str) -> RouteCh
     RouteChoiceEvaluation::Select {
         route,
         selected_state: state,
-    }
-}
-
-#[derive(Debug)]
-pub enum DigRouteAppError {
-    Repository(DigRouteRepositoryError),
-}
-
-impl Display for DigRouteAppError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Repository(error) => Display::fmt(error, formatter),
-        }
-    }
-}
-
-impl std::error::Error for DigRouteAppError {}
-
-impl From<DigRouteRepositoryError> for DigRouteAppError {
-    fn from(error: DigRouteRepositoryError) -> Self {
-        Self::Repository(error)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct DigRouteService {
-    repository: DigRouteRepository,
-}
-
-impl DigRouteService {
-    #[must_use]
-    pub const fn new(repository: DigRouteRepository) -> Self {
-        Self { repository }
-    }
-
-    pub fn choose_route(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        route_id: &str,
-        now: i64,
-    ) -> Result<RouteChoiceResult, DigRouteAppError> {
-        let Some(tunnel) = self.repository.tunnel(discord_id, guild_id)? else {
-            return Ok(RouteChoiceResult::error("You don't have a tunnel."));
-        };
-        let raw_pending = tunnel.route_state.as_deref();
-        let (route, state) = match evaluate_route_choice(raw_pending, route_id) {
-            RouteChoiceEvaluation::Select {
-                route,
-                selected_state,
-            } => (route, selected_state),
-            RouteChoiceEvaluation::AlreadySelected { route } => {
-                return Ok(RouteChoiceResult::selected(route, true));
-            }
-            RouteChoiceEvaluation::Rejected(message) => {
-                return Ok(RouteChoiceResult::error(message));
-            }
-        };
-        let raw_pending = raw_pending.expect("select evaluation requires persisted route state");
-        let selected_json = state.to_python_json();
-        let detail_json = format!(
-            "{{\"route_id\": {}, \"layer\": {}}}",
-            json_string(route_id),
-            json_string(&state.layer)
-        );
-        match self.repository.choose_route_atomic(RouteChoiceRequest {
-            discord_id,
-            guild_id,
-            expected_route_state: raw_pending,
-            selected_route_state: &selected_json,
-            route_id,
-            layer: &state.layer,
-            detail_json: &detail_json,
-            now,
-        })? {
-            RouteChoiceClaim::Claimed => Ok(RouteChoiceResult::selected(route, false)),
-            RouteChoiceClaim::MissingTunnel => {
-                Ok(RouteChoiceResult::error("You don't have a tunnel."))
-            }
-            RouteChoiceClaim::Conflict {
-                persisted_route_state,
-            } => {
-                let persisted = parse_route_state(persisted_route_state.as_deref());
-                Ok(
-                    if persisted
-                        .as_ref()
-                        .and_then(|state| state.selected.as_deref())
-                        == Some(route_id)
-                    {
-                        RouteChoiceResult::selected(route, true)
-                    } else {
-                        RouteChoiceResult::error(
-                            "Your route choice changed before it could be saved.",
-                        )
-                    },
-                )
-            }
-        }
     }
 }
 
