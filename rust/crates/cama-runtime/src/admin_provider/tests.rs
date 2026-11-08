@@ -1014,13 +1014,21 @@ struct ProviderFixture {
 
 impl ProviderFixture {
     fn new() -> Self {
+        Self::with_settings(&[])
+    }
+
+    /// Build the provider with extra deployment settings layered on top.
+    fn with_settings(settings: &[(&str, &str)]) -> Self {
         let database = NamedTempFile::new().expect("temporary admin database");
         initialize_or_migrate(database.path()).expect("migrate canonical admin database");
         let config = ApplicationConfig::from_lookup(|name| match name {
             "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
             "ADMIN_USER_IDS" => Some(ADMIN.to_string()),
             "ECONOMY_EVENTS_ENABLED" | "NEON_DEGEN_ENABLED" => Some("false".to_owned()),
-            _ => None,
+            _ => settings
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned()),
         })
         .expect("admin test configuration");
         let mut opendota_config = OpenDotaHttpConfig::new("http://127.0.0.1:9", None);
@@ -1903,6 +1911,50 @@ async fn test_setinitialrating_happy_path() {
     assert!(response.content.contains("Set initial rating"));
     assert!(response.content.contains("RD kept at 100.0"));
     assert!(response.ephemeral);
+}
+
+#[tokio::test]
+async fn rating_overrides_stamp_the_configured_openskill_fingerprint() {
+    let fixture = ProviderFixture::with_settings(&[("OPENSKILL_PERFORMANCE_STRENGTH", "0.5")]);
+    let configured = cama_domain::openskill::OpenSkillConfig {
+        performance_strength: 0.5,
+        ..cama_domain::openskill::OpenSkillConfig::default()
+    }
+    .algorithm_fingerprint();
+    assert_ne!(
+        configured,
+        cama_domain::openskill::OpenSkillConfig::default().algorithm_fingerprint()
+    );
+    fixture.player(TARGET, 2, 0, Some(1_500.0), Some(100.0), Some(0.07));
+    fixture
+        .dispatch(
+            "setrating",
+            vec![
+                user_option("user", TARGET, "Target"),
+                number_option("rating", 2_500.0),
+            ],
+            40,
+        )
+        .await;
+    let connection = Connection::open(fixture.database.path()).expect("inspect stamps");
+    let target = i64::try_from(TARGET).unwrap();
+    let guild = i64::try_from(GUILD).unwrap();
+    let player: String = connection
+        .query_row(
+            "SELECT os_algorithm_fingerprint FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![target, guild],
+            |row| row.get(0),
+        )
+        .expect("player stamp");
+    let event: String = connection
+        .query_row(
+            "SELECT os_algorithm_fingerprint FROM openskill_rating_events
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![target, guild],
+            |row| row.get(0),
+        )
+        .expect("event stamp");
+    assert_eq!((player, event), (configured.clone(), configured));
 }
 
 #[tokio::test]

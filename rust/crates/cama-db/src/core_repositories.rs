@@ -154,6 +154,8 @@ pub struct NewPlayer {
     pub glicko_volatility: Option<f64>,
     pub os_mu: Option<f64>,
     pub os_sigma: Option<f64>,
+    /// Fingerprint of the deployment's configured OpenSkill system.
+    pub openskill_algorithm_fingerprint: String,
 }
 
 impl NewPlayer {
@@ -177,6 +179,7 @@ impl NewPlayer {
             glicko_volatility: None,
             os_mu: None,
             os_sigma: None,
+            openskill_algorithm_fingerprint: CamaOpenSkillSystem::default().algorithm_fingerprint(),
         }
     }
 }
@@ -273,7 +276,7 @@ impl PlayerRepository {
             .filter(|roles| !roles.is_empty())
             .map(encode_string_array);
         let glicko_rd = player.glicko_rd.map(cap_glicko_rd);
-        let fingerprint = CamaOpenSkillSystem::default().algorithm_fingerprint();
+        let fingerprint = &player.openskill_algorithm_fingerprint;
         match connection.execute(
             "INSERT INTO players (
                 discord_id, guild_id, discord_username, dotabuff_url, steam_id,
@@ -3237,6 +3240,7 @@ impl MatchRepository {
         &self,
         guild_id: Option<i64>,
         entry: &NewCoreRatingHistory,
+        openskill_algorithm_fingerprint: &str,
     ) -> Result<i64, CoreRepositoryError> {
         let connection = self.connection()?;
         insert_sparse_rating_history(
@@ -3244,6 +3248,7 @@ impl MatchRepository {
             Self::normalize_guild_id(guild_id),
             entry,
             entry.match_id,
+            openskill_algorithm_fingerprint,
         )?;
         Ok(connection.last_insert_rowid())
     }
@@ -4259,6 +4264,7 @@ fn insert_sparse_rating_history(
     guild_id: i64,
     entry: &NewCoreRatingHistory,
     match_id: Option<i64>,
+    openskill_algorithm_fingerprint: &str,
 ) -> Result<(), rusqlite::Error> {
     connection.execute(
         "INSERT INTO rating_history (
@@ -4291,7 +4297,7 @@ fn insert_sparse_rating_history(
             entry.os_sigma_after,
             entry.fantasy_weight,
             OPENSKILL_ALGORITHM_VERSION,
-            CamaOpenSkillSystem::default().algorithm_fingerprint(),
+            openskill_algorithm_fingerprint,
             entry.streak_length,
             entry.streak_multiplier,
         ],
@@ -4717,6 +4723,7 @@ mod tests {
                         won,
                         ..NewCoreRatingHistory::default()
                     },
+                    &CamaOpenSkillSystem::default().algorithm_fingerprint(),
                 )
                 .expect("insert fixture rating history")
         }
@@ -7548,6 +7555,7 @@ mod tests {
                             os_sigma_before: Some(5.0),
                             ..NewCoreRatingHistory::default()
                         },
+                        &CamaOpenSkillSystem::default().algorithm_fingerprint(),
                     )
                     .unwrap();
             }
@@ -7565,6 +7573,7 @@ mod tests {
                     os_sigma_before: Some(5.0),
                     ..NewCoreRatingHistory::default()
                 },
+                &CamaOpenSkillSystem::default().algorithm_fingerprint(),
             )
             .unwrap();
         let ratings = fixture
@@ -7690,7 +7699,11 @@ mod tests {
         ] {
             fixture
                 .matches
-                .add_rating_history(Some(TEST_GUILD_ID), &entry)
+                .add_rating_history(
+                    Some(TEST_GUILD_ID),
+                    &entry,
+                    &CamaOpenSkillSystem::default().algorithm_fingerprint(),
+                )
                 .unwrap();
         }
         let stats = fixture
@@ -7737,7 +7750,11 @@ mod tests {
         ] {
             fixture
                 .matches
-                .add_rating_history(Some(TEST_GUILD_ID), &entry)
+                .add_rating_history(
+                    Some(TEST_GUILD_ID),
+                    &entry,
+                    &CamaOpenSkillSystem::default().algorithm_fingerprint(),
+                )
                 .unwrap();
         }
         let stats = fixture
@@ -7775,6 +7792,7 @@ mod tests {
                     os_mu_after: Some(39.8),
                     ..NewCoreRatingHistory::default()
                 },
+                &CamaOpenSkillSystem::default().algorithm_fingerprint(),
             )
             .unwrap();
         fixture.connection().execute("INSERT INTO match_predictions(match_id, expected_radiant_win_prob, openskill_radiant_win_prob) VALUES(?1,0.70,0.65)", [match_id]).unwrap();
@@ -7827,7 +7845,11 @@ mod tests {
         ] {
             fixture
                 .matches
-                .add_rating_history(Some(TEST_GUILD_ID), &entry)
+                .add_rating_history(
+                    Some(TEST_GUILD_ID),
+                    &entry,
+                    &CamaOpenSkillSystem::default().algorithm_fingerprint(),
+                )
                 .unwrap();
         }
         let p1 = &fixture
@@ -7862,6 +7884,7 @@ mod tests {
                     os_mu_after: Some(40.5),
                     ..NewCoreRatingHistory::default()
                 },
+                &CamaOpenSkillSystem::default().algorithm_fingerprint(),
             )
             .unwrap();
         let stats = &fixture
@@ -7901,7 +7924,11 @@ mod tests {
         ] {
             fixture
                 .matches
-                .add_rating_history(Some(TEST_GUILD_ID), &entry)
+                .add_rating_history(
+                    Some(TEST_GUILD_ID),
+                    &entry,
+                    &CamaOpenSkillSystem::default().algorithm_fingerprint(),
+                )
                 .unwrap();
         }
         let stats = fixture
@@ -8895,6 +8922,40 @@ mod tests {
             assert!(player.glicko_rd.unwrap() < 350.0);
             assert_eq!((player.wins, player.losses), (0, 1));
         }
+    }
+
+    #[test]
+    fn player_and_history_writes_stamp_the_supplied_openskill_fingerprint() {
+        let fixture = Fixture::new();
+        let mut player = configured_player(93_201, "Stamped", TEST_GUILD_ID);
+        player.openskill_algorithm_fingerprint = "0123456789abcdef".to_owned();
+        fixture.players.add(&player).unwrap();
+        fixture
+            .matches
+            .add_rating_history(
+                Some(TEST_GUILD_ID),
+                &NewCoreRatingHistory {
+                    discord_id: 93_201,
+                    rating: Some(1_500.0),
+                    ..NewCoreRatingHistory::default()
+                },
+                "0123456789abcdef",
+            )
+            .unwrap();
+        let stamps: (String, String) = fixture
+            .connection()
+            .query_row(
+                "SELECT p.os_algorithm_fingerprint, h.os_algorithm_fingerprint
+                 FROM players p JOIN rating_history h ON h.discord_id=p.discord_id
+                 WHERE p.discord_id=93201 AND p.guild_id=?1",
+                [TEST_GUILD_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            stamps,
+            ("0123456789abcdef".to_owned(), "0123456789abcdef".to_owned())
+        );
     }
 
     #[test]

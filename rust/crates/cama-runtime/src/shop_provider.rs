@@ -197,6 +197,7 @@ impl ShopRegistrationProvider {
                 initial_rd: runtime_config.recalibration_initial_rd,
                 initial_volatility: runtime_config.recalibration_initial_volatility,
                 min_games: RECALIBRATION_MIN_GAMES,
+                openskill_algorithm_fingerprint: config.migration.openskill.algorithm_fingerprint(),
             },
         );
         let flavor = ai_service.map(|ai| {
