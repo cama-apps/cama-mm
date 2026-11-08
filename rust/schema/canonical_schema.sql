@@ -1862,6 +1862,19 @@ CREATE INDEX idx_dig_actions_guild_type_created_actor
             ON dig_actions(guild_id, action_type, created_at DESC, actor_id)
             ;
 
+-- index: idx_dig_actions_pending_delivery
+CREATE INDEX idx_dig_actions_pending_delivery
+            ON dig_actions(guild_id, created_at)
+            WHERE action_type='dig'
+              AND json_valid(detail)
+              AND json_type(detail,'$.delivery')='object'
+              AND (
+                  COALESCE(json_extract(detail,'$.delivery.blood_pact'),'Pending')='Pending'
+                  OR json_extract(detail,'$.delivery.main_delivered_at') IS NULL
+                  OR (json_extract(detail,'$.delivery.render.kind')='Event'
+                      AND json_extract(detail,'$.delivery.event_delivered_at') IS NULL)
+              );
+
 -- index: idx_dig_artifacts_player
 CREATE INDEX idx_dig_artifacts_player
             ON dig_artifacts(discord_id, guild_id)
@@ -1934,6 +1947,12 @@ CREATE INDEX idx_economy_ledger_account
 CREATE INDEX idx_economy_ledger_guild_created
             ON economy_ledger_entries(guild_id, created_at DESC, ledger_id DESC)
             ;
+
+-- index: idx_economy_ledger_related
+CREATE INDEX idx_economy_ledger_related
+            ON economy_ledger_entries(
+                guild_id, source, related_type, related_id, account_type, account_id
+            );
 
 -- index: idx_economy_ledger_source
 CREATE INDEX idx_economy_ledger_source
