@@ -471,3 +471,35 @@ fn default_boss_risk_creates_profile_persists_and_can_be_cleared() {
     assert!(profile.auto_buy.torch);
     assert_eq!(service.default_boss_risk(USER, GUILD).unwrap(), None);
 }
+
+#[test]
+fn placeholder_tunnel_names_are_replaced_with_generated_names() {
+    let database = fixture(100);
+    Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO tunnels (discord_id,guild_id,tunnel_name,depth,max_depth)
+             VALUES (?1,?2,?3,24,24)",
+            params![USER, GUILD, format!("Miner {USER}")],
+        )
+        .unwrap();
+    let service = DigMinerRuntimeService::sqlite(database.path());
+    assert_eq!(
+        service.repair_placeholder_tunnel_names().expect("repair"),
+        1
+    );
+    let name: String = Connection::open(database.path())
+        .unwrap()
+        .query_row(
+            "SELECT tunnel_name FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![USER, GUILD],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        crate::dig_tunnel_naming::is_known_tunnel_name(&name),
+        "{name}"
+    );
+    assert!(!name.contains(&USER.abs().to_string()));
+    assert_eq!(service.repair_placeholder_tunnel_names().expect("retry"), 0);
+}

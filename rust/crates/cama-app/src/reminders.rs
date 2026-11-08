@@ -58,31 +58,7 @@ impl UserId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct GuildId(i64);
-
-impl GuildId {
-    pub const DIRECT_MESSAGE: Self = Self(0);
-
-    #[must_use]
-    pub const fn new(value: i64) -> Self {
-        Self(value)
-    }
-
-    /// Normalize the Python `None` guild convention to the persisted guild 0.
-    #[must_use]
-    pub const fn normalize(value: Option<Self>) -> Self {
-        match value {
-            Some(guild_id) => guild_id,
-            None => Self::DIRECT_MESSAGE,
-        }
-    }
-
-    #[must_use]
-    pub const fn value(self) -> i64 {
-        self.0
-    }
-}
+pub use cama_domain::guild::GuildId;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ReminderKind {

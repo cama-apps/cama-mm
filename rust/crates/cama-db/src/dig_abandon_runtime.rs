@@ -34,6 +34,30 @@ pub struct AtomicDigAbandonSettlement<'a> {
     pub boss_progress_json: &'a str,
     pub detail_json: &'a str,
     pub created_at: i64,
+    /// Boss stake the reset settles in the same transaction.
+    pub boss_stake: AbandonedBossStake<'a>,
+}
+
+/// A paused boss duel or carried boss wager that an abandonment settles, as
+/// the application read it. Any change since that read is a `Conflict`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AbandonedBossStake<'a> {
+    /// The paused duel forfeited and deleted with the reset. `None` requires
+    /// that no duel is paused.
+    pub paused_duel: Option<AbandonedBossDuel<'a>>,
+    /// The tunnel's `boss_progress` the carried wager was read from.
+    pub expected_boss_progress: Option<&'a str>,
+    /// Balance change for the stake: a legacy paused wager's forfeit
+    /// (negative, never more than the balance holds) or the unforfeited half
+    /// of an escrowed carried wager (positive).
+    pub balance_delta: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AbandonedBossDuel<'a> {
+    pub boss_id: &'a str,
+    pub boundary: i64,
+    pub created_at: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,9 +181,64 @@ impl DigAbandonRuntimeRepository {
         if already_abandoned {
             return Ok(DigAbandonSettlementOutcome::Cooldown);
         }
+        // The boss stake must still be the one the application settled: the
+        // same paused duel (or none) and, for a carried wager, the same
+        // progress it was read from.
+        let paused_duel = transaction
+            .query_row(
+                "SELECT boss_id,tier,created_at FROM dig_active_duels
+                  WHERE discord_id=?1 AND guild_id=?2",
+                params![
+                    request.expected.key.discord_id,
+                    request.expected.key.guild_id
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let expected_duel = request
+            .boss_stake
+            .paused_duel
+            .map(|duel| (duel.boss_id.to_owned(), duel.boundary, duel.created_at));
+        if paused_duel != expected_duel {
+            return Ok(DigAbandonSettlementOutcome::Conflict);
+        }
+        if let Some(expected_progress) = request.boss_stake.expected_boss_progress {
+            let progress: String = transaction.query_row(
+                "SELECT COALESCE(boss_progress,'{}') FROM tunnels
+                  WHERE discord_id=?1 AND guild_id=?2",
+                params![
+                    request.expected.key.discord_id,
+                    request.expected.key.guild_id
+                ],
+                |row| row.get(0),
+            )?;
+            if progress != expected_progress {
+                return Ok(DigAbandonSettlementOutcome::Conflict);
+            }
+        }
+        if paused_duel.is_some() {
+            transaction.execute(
+                "DELETE FROM dig_active_duels WHERE discord_id=?1 AND guild_id=?2",
+                params![
+                    request.expected.key.discord_id,
+                    request.expected.key.guild_id
+                ],
+            )?;
+        }
+        let boss_stake_delta = if request.boss_stake.balance_delta < 0 {
+            request.boss_stake.balance_delta.max(-balance_before.max(0))
+        } else {
+            request.boss_stake.balance_delta
+        };
 
         if request.refund != 0 {
-            set_ledger_context(&transaction, request)?;
+            set_ledger_context(&transaction, request, "abandon", "dig abandon credit")?;
             let update = transaction.execute(
                 "UPDATE players
                     SET jopacoin_balance=jopacoin_balance+?1,
@@ -167,6 +246,30 @@ impl DigAbandonRuntimeRepository {
                   WHERE discord_id=?2 AND guild_id=?3",
                 params![
                     request.refund,
+                    request.expected.key.discord_id,
+                    request.expected.key.guild_id
+                ],
+            );
+            let clear = clear_ledger_context(&transaction);
+            if update? == 0 {
+                return Ok(DigAbandonSettlementOutcome::MissingPlayer);
+            }
+            clear?;
+        }
+        if boss_stake_delta != 0 {
+            set_ledger_context(
+                &transaction,
+                request,
+                "boss",
+                "dig abandon boss wager settlement",
+            )?;
+            let update = transaction.execute(
+                "UPDATE players
+                    SET jopacoin_balance=jopacoin_balance+?1,
+                        updated_at=CURRENT_TIMESTAMP
+                  WHERE discord_id=?2 AND guild_id=?3",
+                params![
+                    boss_stake_delta,
                     request.expected.key.discord_id,
                     request.expected.key.guild_id
                 ],
@@ -210,7 +313,7 @@ impl DigAbandonRuntimeRepository {
             params![
                 request.expected.key.guild_id,
                 request.expected.key.discord_id,
-                request.refund,
+                request.refund.saturating_add(boss_stake_delta),
                 request.detail_json,
                 request.created_at,
             ],
@@ -222,7 +325,9 @@ impl DigAbandonRuntimeRepository {
                 depth_lost: depth,
                 prestige_level,
                 balance_before,
-                balance_after: balance_before.saturating_add(request.refund),
+                balance_after: balance_before
+                    .saturating_add(request.refund)
+                    .saturating_add(boss_stake_delta),
                 audit_action_id,
             },
         ))
@@ -232,15 +337,19 @@ impl DigAbandonRuntimeRepository {
 fn set_ledger_context(
     transaction: &Transaction<'_>,
     request: AtomicDigAbandonSettlement<'_>,
+    related_type: &str,
+    reason: &str,
 ) -> Result<(), rusqlite::Error> {
     transaction.execute("DELETE FROM economy_ledger_context", [])?;
     transaction.execute(
         "INSERT INTO economy_ledger_context
             (id, source, actor_id, related_type, related_id, reason, metadata)
-         VALUES (1, 'dig', ?1, 'abandon', ?2, 'dig abandon credit', ?3)",
+         VALUES (1, 'dig', ?1, ?2, ?3, ?4, ?5)",
         params![
             request.expected.key.discord_id,
+            related_type,
             request.expected.depth,
+            reason,
             request.detail_json,
         ],
     )?;

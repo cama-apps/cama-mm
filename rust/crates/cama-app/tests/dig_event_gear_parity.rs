@@ -1,9 +1,7 @@
 //! Exact public gear-registry, schema, and hydration counterparts.
 
 use cama_db::schema_manager::initialize_or_migrate;
-use cama_domain::dig_gear::{
-    Artifact, GearLoadout, GearPiece, GearService, GearSlot, GearStore, Tunnel, unique_gear,
-};
+use cama_domain::dig_gear::{GearLoadout, GearPiece, GearSlot, unique_gear};
 use rusqlite::Connection;
 use tempfile::NamedTempFile;
 
@@ -22,29 +20,6 @@ fn unique_piece(item_id: &str, slot: GearSlot, durability: i32) -> GearPiece {
         acquired_at: 1,
         source: "event:test".to_owned(),
         item_id: Some(item_id.to_owned()),
-    }
-}
-
-fn service_with_piece(piece: GearPiece) -> GearService {
-    GearService {
-        store: GearStore::from_persisted_player(
-            ACTOR,
-            GUILD,
-            Tunnel {
-                depth: 75,
-                max_depth: 75,
-                prestige_level: 0,
-                pickaxe_tier: 3,
-                relic_trim_notice: false,
-                cavein_free_streak: 0,
-            },
-            100,
-            vec![piece],
-            Vec::<Artifact>::new(),
-            42,
-            1,
-            2,
-        ),
     }
 }
 
@@ -136,10 +111,10 @@ fn dig_event_gear_hydrates_and_serializes_equipped_ring() {
 
 #[test]
 fn dig_event_gear_unique_weapon_uses_authored_dig_modifiers() {
-    let service = service_with_piece(unique_piece("glassbreaker_pick", GearSlot::Weapon, 8));
-    let modifiers = service
-        .active_pickaxe_data(ACTOR, GUILD)
-        .expect("active unique weapon");
+    // The Dig runtime reads an equipped unique weapon's modifiers from the
+    // authored unique-gear table.
+    let modifiers =
+        cama_domain::dig_gear::unique_gear("glassbreaker_pick").expect("authored unique weapon");
     assert_eq!(modifiers.name, "Glassbreaker Pick");
     assert_eq!(modifiers.advance_bonus, 2);
     assert_eq!(modifiers.cave_in_reduction, 0.05);

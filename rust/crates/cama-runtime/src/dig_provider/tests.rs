@@ -748,6 +748,41 @@ async fn run_dig_returns_the_registered_typed_execution_and_delivery_notice() {
 }
 
 #[tokio::test]
+async fn first_dig_names_the_new_tunnel_without_the_owner_id() {
+    let (database, provider, _discord) = fixture();
+    let execution = provider
+        .handler
+        .run_dig(
+            USER as i64,
+            GUILD as i64,
+            super::unix_now(),
+            false,
+            false,
+            cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                0x1235,
+                CHANNEL as i64,
+                "Dig Test Miner",
+                None,
+            ),
+        )
+        .await
+        .expect("first dig execution");
+    assert!(execution.outcome.success);
+    let stored: String = Connection::open(database.path())
+        .expect("open Dig database")
+        .query_row(
+            "SELECT tunnel_name FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+            |row| row.get(0),
+        )
+        .expect("stored tunnel name");
+    assert!(!stored.trim().is_empty());
+    assert!(!stored.contains(&USER.to_string()), "{stored}");
+    assert!(!stored.starts_with("Miner "), "{stored}");
+    assert_eq!(execution.outcome.tunnel_name, stored);
+}
+
+#[tokio::test]
 async fn durable_dig_delivery_keeps_stored_username_while_rendering_server_nickname() {
     let (database, provider, _discord) = fixture();
     let provider = provider.with_player_names(Arc::new(FixedPlayerNames(
@@ -1320,6 +1355,7 @@ fn boss_mechanic_prompt_shows_authored_copy_choices_and_live_hp() {
         forced_no_wager_phase: false,
         echo_applied: false,
         echo_killer_id: None,
+        wager_escrowed: true,
     };
 
     let response = super::paused_boss_response(&paused, USER as i64, GUILD as i64);
@@ -2435,9 +2471,10 @@ fn fixture_with_discord_and_config(
         .map(|ancestor| ancestor.join("assets/dig"))
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
-    let media = Arc::new(DigMediaRuntime::production(
-        &DigRuntimeConfig::with_asset_root(root),
-    ));
+    let media = Arc::new(DigMediaRuntime::production(&DigRuntimeConfig {
+        asset_root: root,
+        ..DigRuntimeConfig::default()
+    }));
     let provider =
         DigRegistrationProvider::with_media(database.path(), &config, discord.clone(), None, media);
     (database, provider, discord)
@@ -6636,7 +6673,10 @@ fn rendered_media_keeps_stats_and_event_ui_separate_with_exact_attachments() {
         .map(|ancestor| ancestor.join("assets/dig"))
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
-    let media = DigMediaRuntime::production(&DigRuntimeConfig::with_asset_root(root));
+    let media = DigMediaRuntime::production(&DigRuntimeConfig {
+        asset_root: root,
+        ..DigRuntimeConfig::default()
+    });
     let result = DigRuntimeOutcome {
         success: true,
         error: None,
@@ -6764,7 +6804,10 @@ fn event_prompt_applies_durable_darkness_and_reading_the_stone_policy() {
         .map(|ancestor| ancestor.join("assets/dig"))
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
-    let media = DigMediaRuntime::production(&DigRuntimeConfig::with_asset_root(root));
+    let media = DigMediaRuntime::production(&DigRuntimeConfig {
+        asset_root: root,
+        ..DigRuntimeConfig::default()
+    });
     let result = DigRuntimeOutcome {
         success: true,
         error: None,
@@ -8643,7 +8686,7 @@ async fn assert_stale_boss_delivery_posted_as_plain_result(
         let public = discord.public.lock().expect("public posts");
         assert_eq!(public.len(), 1, "exactly one replayed post");
         let embed = public[0].embeds.first().expect("result embed");
-        assert_eq!(embed.title.as_deref(), Some("Miner 77001 — Depth 24"));
+        assert_eq!(embed.title.as_deref(), Some("Unnamed Tunnel — Depth 24"));
         assert!(
             embed
                 .fields
@@ -8750,7 +8793,7 @@ async fn pending_boss_delivery_for_the_current_boss_still_opens_the_encounter() 
     let public = discord.public.lock().expect("public posts");
     assert_eq!(public.len(), 1);
     let embed = public[0].embeds.first().expect("encounter embed");
-    assert_ne!(embed.title.as_deref(), Some("Miner 77001 — Depth 24"));
+    assert_ne!(embed.title.as_deref(), Some("Unnamed Tunnel — Depth 24"));
     assert!(
         discord
             .reactions

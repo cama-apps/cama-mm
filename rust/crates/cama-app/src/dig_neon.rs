@@ -10,18 +10,15 @@ use std::sync::Arc;
 
 use crate::dig_assets::{LAYER_PALETTES, LayerPalette};
 use crate::dig_flavor::LlmMessage;
-use crate::neon_bigwin_media::render_big_win;
 use crate::neon_degen::{
     COLOR_BLACK, COLOR_CYAN, COLOR_DARK_RED, COLOR_DIM_CYAN, COLOR_DIM_GREEN, COLOR_GREEN,
     COLOR_RED, COLOR_YELLOW, GifAsset, NEON_GIF_HEIGHT, NEON_GIF_WIDTH, NeonCanvas, NeonResult,
-    ansi_block, render_don_win, render_neon_animation, render_sized_neon_animation,
+    render_neon_animation, render_sized_neon_animation,
 };
 
 pub const NEON_DIG_CHANCE: f64 = 0.12;
-pub const NEON_BIGWIN_FLOOR: f64 = 0.05;
-pub const NEON_BIGWIN_FULL_PAYOUT: i64 = 5_000;
-pub const NEON_BIGWIN_MIN_PAYOUT: i64 = 500;
 pub const NEON_LLM_CHANCE: f64 = 0.60;
+#[cfg(test)]
 pub const DISCORD_GIF_LIMIT: usize = 4 * 1_024 * 1_024;
 
 pub const DIG_NARRATOR_SYSTEM_PROMPT: &str = concat!(
@@ -831,17 +828,6 @@ pub fn animate_pinnacle(prestige: bool) -> GifAsset {
     )
 }
 
-#[must_use]
-pub fn create_bigwin_gif(
-    name: &str,
-    payout: i64,
-    source: BigWinSource,
-    flavor: BigWinFlavor,
-) -> GifAsset {
-    render_big_win(name, payout, source, flavor)
-        .expect("the in-memory native Neon GIF encoder writes to Vec without I/O")
-}
-
 pub trait DigNeonRenderPort: Send + Sync {
     fn reveal(
         &self,
@@ -859,13 +845,6 @@ pub trait DigNeonRenderPort: Send + Sync {
         depth_after: i64,
     ) -> Result<GifAsset, String>;
     fn pinnacle(&self, prestige: bool) -> Result<GifAsset, String>;
-    fn big_win(
-        &self,
-        name: &str,
-        payout: i64,
-        source: BigWinSource,
-        flavor: BigWinFlavor,
-    ) -> Result<GifAsset, String>;
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -900,16 +879,6 @@ impl DigNeonRenderPort for ContractDigNeonRenderer {
 
     fn pinnacle(&self, prestige: bool) -> Result<GifAsset, String> {
         Ok(animate_pinnacle(prestige))
-    }
-
-    fn big_win(
-        &self,
-        name: &str,
-        payout: i64,
-        source: BigWinSource,
-        flavor: BigWinFlavor,
-    ) -> Result<GifAsset, String> {
-        Ok(create_bigwin_gif(name, payout, source, flavor))
     }
 }
 
@@ -1018,12 +987,7 @@ where
         }
     }
 
-    #[must_use]
-    pub fn with_renderer(mut self, renderer: Arc<dyn DigNeonRenderPort>) -> Self {
-        self.renderer = renderer;
-        self
-    }
-
+    #[cfg(test)]
     #[must_use]
     pub fn with_caption(mut self, caption: Arc<dyn DigCaptionPort>) -> Self {
         self.caption = Some(caption);
@@ -1069,10 +1033,6 @@ where
     #[must_use]
     pub const fn cooldown(&self) -> &C {
         &self.cooldown
-    }
-
-    pub fn cooldown_mut(&mut self) -> &mut C {
-        &mut self.cooldown
     }
 
     pub fn dig_caption(
@@ -1264,92 +1224,6 @@ where
         );
         self.cooldown.mark_fired(discord_id, guild_id);
         Some(neon_with_gif(Some(text), gif))
-    }
-
-    pub fn on_big_win(
-        &mut self,
-        discord_id: u64,
-        guild_id: Option<u64>,
-        source: BigWinSource,
-        payout: i64,
-        flavor: BigWinFlavor,
-    ) -> Option<NeonResult> {
-        if !self.enabled
-            || payout < NEON_BIGWIN_MIN_PAYOUT
-            || !self.cooldown.is_ready(discord_id, guild_id)
-        {
-            return None;
-        }
-        let chance = scaled_chance(
-            payout as f64,
-            NEON_BIGWIN_FLOOR,
-            0.95,
-            NEON_BIGWIN_FULL_PAYOUT as f64,
-        );
-        if !self.random.roll(chance) {
-            return None;
-        }
-        let name = format!("Client {discord_id}");
-        let gif = self.renderer.big_win(&name, payout, source, flavor).ok()?;
-        let text = ansi_block(&format!(
-            "[LEDGER] +{payout} JC settled. The house keeps receipts on winners too."
-        ));
-        self.cooldown.mark_fired(discord_id, guild_id);
-        Some(neon_with_gif(Some(text), gif))
-    }
-
-    pub fn on_wheel_result(
-        &mut self,
-        discord_id: u64,
-        guild_id: Option<u64>,
-        result_value: i64,
-        _new_balance: i64,
-    ) -> Option<NeonResult> {
-        if result_value > 0 {
-            return self.on_big_win(
-                discord_id,
-                guild_id,
-                BigWinSource::Gamba,
-                result_value,
-                BigWinFlavor::BigWin,
-            );
-        }
-        None
-    }
-
-    pub fn on_double_or_nothing(
-        &mut self,
-        discord_id: u64,
-        guild_id: Option<u64>,
-        won: bool,
-        balance_at_risk: i64,
-        final_balance: i64,
-    ) -> Option<NeonResult> {
-        if !self.enabled {
-            return None;
-        }
-        if won {
-            if let Some(result) = self.on_big_win(
-                discord_id,
-                guild_id,
-                BigWinSource::Gamba,
-                balance_at_risk,
-                BigWinFlavor::BigWin,
-            ) {
-                return Some(result);
-            }
-            self.cooldown.mark_fired(discord_id, guild_id);
-            return Some(NeonResult {
-                layer: 1,
-                text_block: Some(render_don_win(
-                    &format!("Client {discord_id}"),
-                    final_balance,
-                )),
-                gif_file: None,
-                footer_text: None,
-            });
-        }
-        None
     }
 }
 

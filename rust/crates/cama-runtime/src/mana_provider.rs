@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use cama_app::mana_service::{
     BankruptcyState, BetOutcome, BoardRow, DegenScore, GuardianProtection, Land, ManaDataSource,
     ManaDetails, ManaService, ManaServiceError, PlayerProfile, TipStats, XorShift64Entropy,
-    mana_day_label, mana_day_start_timestamp,
 };
 use cama_app::wheel::{next_wheel_reset_at, wheel_spin_is_available};
 use cama_db::bankruptcy_repository::BankruptcyRepository;
@@ -29,7 +28,7 @@ use cama_db::loan_repository::LoanRepository;
 use cama_db::mana_protection::ManaProtectionRepository;
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::tip_repository::TipRepository;
-use chrono::{DateTime, FixedOffset, Utc};
+use cama_domain::mana::{mana_day_label_at, mana_day_start_at};
 
 use crate::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
@@ -169,7 +168,6 @@ impl RegistrationProvider for ManaRegistrationProvider {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ManaMoment {
     pub now: i64,
-    pub la_offset_seconds: i32,
 }
 
 pub(crate) trait ManaClock: Send + Sync {
@@ -181,29 +179,21 @@ pub(crate) struct SystemManaClock;
 
 impl ManaClock for SystemManaClock {
     fn moment(&self) -> Result<ManaMoment, String> {
-        let now = unix_timestamp()?;
         Ok(ManaMoment {
-            now,
-            la_offset_seconds: pacific_offset_seconds(now)?,
+            now: unix_timestamp()?,
         })
     }
 }
 
 impl ManaMoment {
-    fn local(self) -> Result<DateTime<FixedOffset>, String> {
-        let offset = FixedOffset::east_opt(self.la_offset_seconds)
-            .ok_or_else(|| "invalid Pacific time-zone offset".to_owned())?;
-        DateTime::<Utc>::from_timestamp(self.now, 0)
-            .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())
-            .map(|time| time.with_timezone(&offset))
-    }
-
     pub(crate) fn today(self) -> Result<String, String> {
-        self.local().map(mana_day_label)
+        mana_day_label_at(self.now)
+            .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())
     }
 
     pub(crate) fn day_start(self) -> Result<i64, String> {
-        self.local().map(mana_day_start_timestamp)
+        mana_day_start_at(self.now)
+            .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())
     }
 }
 
@@ -987,60 +977,6 @@ fn unix_timestamp() -> Result<i64, String> {
         .map_err(|_| "system clock is before the Unix epoch".to_owned())?
         .as_secs();
     i64::try_from(seconds).map_err(|_| "system clock exceeds SQLite range".to_owned())
-}
-
-/// Resolve America's DST rule without adding a time-zone database dependency.
-/// Post-2007 US rules are valid for every supported production timestamp.
-fn pacific_offset_seconds(timestamp: i64) -> Result<i32, String> {
-    use chrono::{Datelike, NaiveDate, TimeZone, Weekday};
-
-    let utc = DateTime::<Utc>::from_timestamp(timestamp, 0)
-        .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())?;
-    let year = utc.year();
-    let march =
-        NaiveDate::from_ymd_opt(year, 3, 1).ok_or_else(|| "invalid March date".to_owned())?;
-    let november =
-        NaiveDate::from_ymd_opt(year, 11, 1).ok_or_else(|| "invalid November date".to_owned())?;
-    let to_sunday = |date: NaiveDate| -> i64 {
-        match date.weekday() {
-            Weekday::Sun => 0,
-            Weekday::Mon => 6,
-            Weekday::Tue => 5,
-            Weekday::Wed => 4,
-            Weekday::Thu => 3,
-            Weekday::Fri => 2,
-            Weekday::Sat => 1,
-        }
-    };
-    let second_sunday_march = march + chrono::Duration::days(to_sunday(march) + 7);
-    let first_sunday_november = november + chrono::Duration::days(to_sunday(november));
-    let standard = FixedOffset::west_opt(8 * 3_600)
-        .ok_or_else(|| "invalid Pacific standard offset".to_owned())?;
-    let daylight = FixedOffset::west_opt(7 * 3_600)
-        .ok_or_else(|| "invalid Pacific daylight offset".to_owned())?;
-    let starts = standard
-        .from_local_datetime(
-            &second_sunday_march
-                .and_hms_opt(2, 0, 0)
-                .ok_or_else(|| "invalid DST start time".to_owned())?,
-        )
-        .single()
-        .ok_or_else(|| "ambiguous DST start".to_owned())?
-        .timestamp();
-    let ends = daylight
-        .from_local_datetime(
-            &first_sunday_november
-                .and_hms_opt(2, 0, 0)
-                .ok_or_else(|| "invalid DST end time".to_owned())?,
-        )
-        .single()
-        .ok_or_else(|| "ambiguous DST end".to_owned())?
-        .timestamp();
-    Ok(if (starts..ends).contains(&timestamp) {
-        -7 * 3_600
-    } else {
-        -8 * 3_600
-    })
 }
 
 async fn respond_ephemeral(

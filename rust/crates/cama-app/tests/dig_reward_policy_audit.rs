@@ -27,7 +27,7 @@ use tempfile::NamedTempFile;
 
 pub use cama_app::{
     dig_bosses, dig_loot, dig_runtime, dig_service, dig_tunnels, economy_event_service,
-    economy_event_sqlite,
+    economy_event_sqlite, mana_effects_service,
 };
 
 // The event/abandon/prestige/social application paths are deliberately not
@@ -46,6 +46,13 @@ pub mod dig_event_runtime {
 }
 pub mod dig_abandon_runtime {
     pub use crate::dig_abandon_runtime_repository::*;
+}
+// The abandon source settles a paused duel or carried pinnacle wager, so it
+// reads both the boss repository and the carry policy under these paths.
+pub use cama_db_external::dig_boss_runtime;
+pub mod dig_carry_wager {
+    pub use cama_app::dig_carry_wager::{PINNACLE_BOUNDARY, active_pinnacle_carry};
+    pub use cama_db_external::dig_carry_wager::*;
 }
 
 /// The mounted repositories name the runtime connection type at the crate root.
@@ -575,46 +582,6 @@ fn audit_event_positive_reward_scales_once_and_is_auditable() {
 }
 
 #[test]
-fn audit_legacy_event_shape_adapter_settles_migrated_sqlite() {
-    let fixture = Fixture::new();
-    fixture.seed_player(ACTOR, 100);
-    fixture.seed_tunnel(ACTOR, 10);
-    let result = fixture
-        .service()
-        .resolve_legacy_event(dig_event_runtime_reward_under_test::DigLegacyEventRequest {
-            discord_id: ACTOR,
-            guild_id: GUILD,
-            event_id: "legacy_reward_policy_event",
-            event_name: "Legacy Reward Policy Event",
-            choice: "inspect",
-            message: "A compact reward.",
-            advance: 0,
-            jc: 15,
-            event_key: "legacy-reward-policy:audit",
-            now: NOW,
-        })
-        .expect("legacy event adapter");
-    let resolution = result.resolution.expect("legacy resolution");
-    assert!(result.success && result.applied_now);
-    assert_eq!(resolution.economy_gross_jc, 15);
-    assert_eq!(resolution.jc, scale_positive_dig_jc(15));
-    assert_eq!(fixture.balance(ACTOR), 100 + resolution.jc);
-    let detail: Value = fixture
-        .connection()
-        .query_row(
-            "SELECT detail FROM dig_actions
-              WHERE actor_id=?1 AND guild_id=?2 AND action_type='event'
-              ORDER BY id DESC LIMIT 1",
-            params![ACTOR, GUILD],
-            |row| row.get::<_, String>(0),
-        )
-        .map(|raw| serde_json::from_str(&raw).expect("legacy detail JSON"))
-        .expect("legacy audit");
-    assert_eq!(detail["gross_jc"], 15);
-    assert_eq!(detail["reward_multiplier"], 0.65);
-}
-
-#[test]
 fn audit_slow_drip_has_catalog_metadata_but_no_crediting_service() {
     let relic = cama_app::dig_relic_rework::relic_content("slow_drip").expect("slow drip relic");
     assert_eq!(relic.definition.id, "slow_drip");
@@ -721,24 +688,6 @@ fn audit_abandon_refund_is_scaled_and_audited() {
         .expect("abandon audit");
     assert_eq!(detail["gross_jc"], 10);
     assert_eq!(detail["reward_multiplier"], 0.65);
-}
-
-#[test]
-fn audit_pinnacle_payout_scales_base_before_wager_profit() {
-    let payout = cama_app::dig_carry_wager::pinnacle_payout(
-        200,
-        cama_app::boss_duel::RiskTier::Cautious,
-        0.5,
-        0,
-    )
-    .expect("pinnacle payout");
-    assert_eq!(payout.scaled_base_reward, 325);
-    assert_eq!(
-        payout.payout,
-        payout.scaled_base_reward + payout.wager_payout
-    );
-    // Daily economy adjustment of both base and wager profit is not wired to
-    // this pure carry policy, unlike Python's _net_boss_payout adapter.
 }
 
 #[test]

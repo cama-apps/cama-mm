@@ -430,10 +430,6 @@ where
         &self.evolution
     }
 
-    pub const fn evolution_mut(&mut self) -> &mut E {
-        &mut self.evolution
-    }
-
     #[must_use]
     pub const fn decay_per_day(&self) -> i64 {
         self.decay_per_day

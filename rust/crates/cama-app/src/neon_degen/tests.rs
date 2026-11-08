@@ -1293,3 +1293,114 @@ fn test_different_triggers_independent() {
     assert!(service.on_registration(123, Some(456), "Player").is_some());
     assert!(service.on_degen_milestone(123, Some(456), 95).is_none());
 }
+
+struct FixedNeonNames;
+
+impl NeonPlayerNames for FixedNeonNames {
+    fn cached_display_name(&self, guild_id: Option<u64>, discord_id: u64) -> Option<String> {
+        match (guild_id, discord_id) {
+            (Some(456), 987_654_321) => Some("Ledger Larry".to_owned()),
+            (Some(456), 987_650_000) => Some("<@987650000>".to_owned()),
+            _ => None,
+        }
+    }
+}
+
+const NAMED_PLAYER: u64 = 987_654_321;
+const MENTION_NAMED_PLAYER: u64 = 987_650_000;
+const UNNAMED_PLAYER: u64 = 987_651_234;
+
+fn assert_no_id_digits(copy: &str) {
+    for id in [NAMED_PLAYER, MENTION_NAMED_PLAYER, UNNAMED_PLAYER] {
+        let digits = id.to_string();
+        assert!(!copy.contains(&digits[digits.len() - 4..]), "{copy}");
+    }
+}
+
+#[test]
+fn test_neon_copy_names_players_by_resolved_display_name() {
+    let mut service = service();
+    service.set_player_names(Arc::new(FixedNeonNames));
+    service.queue_rolls([0.0]);
+    let copy = text(
+        &service
+            .on_balance_check(NAMED_PLAYER, Some(456), 100)
+            .expect("forced trigger"),
+    )
+    .to_owned();
+    assert!(copy.contains("Ledger Larry"), "{copy}");
+    assert_no_id_digits(&copy);
+}
+
+#[test]
+fn test_neon_copy_never_falls_back_to_id_digits_or_mentions() {
+    let mut unnamed = service();
+    unnamed.queue_rolls([0.0]);
+    let copy = text(
+        &unnamed
+            .on_balance_check(UNNAMED_PLAYER, Some(456), 100)
+            .expect("forced trigger"),
+    )
+    .to_owned();
+    assert!(copy.contains("Unknown player"), "{copy}");
+    assert_no_id_digits(&copy);
+
+    let mut service = service();
+    service.set_player_names(Arc::new(FixedNeonNames));
+    service.queue_rolls([0.0]);
+    let rivalry = text(
+        &service
+            .on_rivalry_detected(Some(456), MENTION_NAMED_PLAYER, UNNAMED_PLAYER, 10, 80.0)
+            .expect("forced rivalry hook"),
+    )
+    .to_owned();
+    assert!(!rivalry.contains("<@"), "{rivalry}");
+    assert!(rivalry.contains("Unknown player"), "{rivalry}");
+    assert_no_id_digits(&rivalry);
+}
+
+#[test]
+fn test_neon_big_win_gif_is_rendered_for_the_resolved_name() {
+    let mut named = service();
+    named.set_player_names(Arc::new(FixedNeonNames));
+    named.queue_rolls([0.0]);
+    let named_gif = named
+        .on_big_win(
+            NAMED_PLAYER,
+            Some(456),
+            BigWinSource::Gamba,
+            5_000,
+            BigWinFlavor::BigWin,
+        )
+        .and_then(|result| result.gif_file)
+        .expect("forced big win");
+    let expected = render_big_win(
+        "Ledger Larry",
+        5_000,
+        BigWinSource::Gamba,
+        BigWinFlavor::BigWin,
+    )
+    .expect("reference GIF");
+    assert_eq!(named_gif.bytes, expected.bytes);
+
+    let mut unnamed = service();
+    unnamed.queue_rolls([0.0]);
+    let unnamed_gif = unnamed
+        .on_big_win(
+            UNNAMED_PLAYER,
+            Some(456),
+            BigWinSource::Gamba,
+            5_000,
+            BigWinFlavor::BigWin,
+        )
+        .and_then(|result| result.gif_file)
+        .expect("forced big win");
+    let neutral = render_big_win(
+        "Unknown player",
+        5_000,
+        BigWinSource::Gamba,
+        BigWinFlavor::BigWin,
+    )
+    .expect("reference GIF");
+    assert_eq!(unnamed_gif.bytes, neutral.bytes);
+}

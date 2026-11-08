@@ -33,10 +33,7 @@ struct FixedClock {
 impl ManaClock for FixedClock {
     fn moment(&self) -> Result<crate::mana_provider::ManaMoment, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(crate::mana_provider::ManaMoment {
-            now: self.now,
-            la_offset_seconds: -7 * 3_600,
-        })
+        Ok(crate::mana_provider::ManaMoment { now: self.now })
     }
 }
 

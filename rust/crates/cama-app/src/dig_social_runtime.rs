@@ -18,8 +18,7 @@ use cama_db::profit_deductions::{
 };
 use cama_db::shop_runtime::ShopRuntimeRepository;
 use cama_domain::dig_economy::{DIG_POSITIVE_JC_MULTIPLIER, scale_positive_dig_jc};
-use cama_domain::game_date::game_date_for_timestamp;
-use cama_domain::mana::{ManaEffects, apply_sabotage_modifiers};
+use cama_domain::mana::{ManaEffects, apply_sabotage_modifiers, mana_day_label_at};
 use thiserror::Error;
 
 use crate::dig_loot::artifact_catalog;
@@ -31,6 +30,7 @@ use crate::dig_service::{cooldown_remaining, effective_dig_cooldown, layer_at};
 use crate::dig_sweep_fixes::{ProtectionSource, funded_protection};
 use crate::dig_tunnel_naming::{DigTunnelNamingService, TunnelNameEntropy};
 use crate::economy_event_sqlite::{SqliteEconomyEventError, SqliteEconomyEventService};
+use crate::mana_effects_service::color_for_land;
 
 pub trait DigSocialEntropy: TunnelNameEntropy {
     fn inclusive_i64(&mut self, low: i64, high: i64) -> i64;
@@ -997,7 +997,7 @@ fn active_pickaxe_tier(tunnel: &DigSabotageTunnelSnapshot) -> i64 {
 }
 
 fn active_mana_effects(path: &Path, discord_id: i64, guild_id: i64, now: i64) -> ManaEffects {
-    let Ok(today) = game_date_for_timestamp(now as f64) else {
+    let Some(today) = mana_day_label_at(now) else {
         return ManaEffects::default();
     };
     let Ok(row) = ManaRepository::new(path).get_mana(discord_id, Some(guild_id)) else {
@@ -1012,14 +1012,7 @@ fn active_mana_effects(path: &Path, discord_id: i64, guild_id: i64, now: i64) ->
 }
 
 fn mana_effects_for_land(land: &str) -> ManaEffects {
-    let color = match land {
-        "Mountain" => Some("Red"),
-        "Island" => Some("Blue"),
-        "Forest" => Some("Green"),
-        "Plains" => Some("White"),
-        "Swamp" => Some("Black"),
-        _ => None,
-    };
+    let color = color_for_land(land);
     ManaEffects::for_color(color, color.map(|_| land))
 }
 

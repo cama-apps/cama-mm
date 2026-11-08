@@ -179,6 +179,7 @@ where
         &self.evolution_store
     }
 
+    #[cfg(test)]
     pub const fn evolution_store_mut(&mut self) -> &mut R {
         &mut self.evolution_store
     }
@@ -186,10 +187,6 @@ where
     #[must_use]
     pub const fn pet_store(&self) -> &P {
         &self.pet_store
-    }
-
-    pub const fn pet_store_mut(&mut self) -> &mut P {
-        &mut self.pet_store
     }
 
     #[must_use]

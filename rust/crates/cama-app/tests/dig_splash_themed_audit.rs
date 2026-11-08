@@ -18,6 +18,7 @@ use tempfile::NamedTempFile;
 
 pub use cama_app::{
     dig_loot, dig_runtime, dig_service, dig_tunnels, economy_event_service, economy_event_sqlite,
+    mana_effects_service,
 };
 
 // The in-progress application runtime deliberately is not admitted through

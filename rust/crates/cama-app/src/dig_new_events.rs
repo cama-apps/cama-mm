@@ -17,6 +17,7 @@ use crate::dig_service::layer_at;
 pub const HOSTILE_LOSS_MIN_BALANCE: i64 = 50;
 pub const EVENT_CHAIN_CHANCE: f64 = 0.25;
 
+#[cfg(test)]
 pub const NEW_EVENT_IDS: [&str; 10] = [
     "aegis_whisper",
     "echoing_mime",
@@ -30,6 +31,7 @@ pub const NEW_EVENT_IDS: [&str; 10] = [
     "wilderness_stalker",
 ];
 
+#[cfg(test)]
 pub const ROGUELIKE_EVENT_IDS: [&str; 6] = [
     "collapsed_armory",
     "dead_prospectors_pack",
@@ -39,6 +41,7 @@ pub const ROGUELIKE_EVENT_IDS: [&str; 6] = [
     "hungry_beacon",
 ];
 
+#[cfg(test)]
 pub const RUMOR_PASS_IDS: [&str; 8] = [
     "wisps_tether",
     "tunnel_echoes",
@@ -50,6 +53,7 @@ pub const RUMOR_PASS_IDS: [&str; 8] = [
     "the_eye_opens",
 ];
 
+#[cfg(test)]
 pub const HOLLOW_CHAIN_IDS: [&str; 3] = [
     "hollow_court_overture",
     "hollow_court_audience",
@@ -258,6 +262,7 @@ pub fn event_catalog() -> Vec<EventDefinition> {
     events
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn serialized_event_pool() -> Vec<SerializedEvent> {
     event_catalog()
@@ -1424,13 +1429,6 @@ impl InMemorySplashState {
                     active_digger,
                 },
             );
-    }
-
-    pub fn fail_next_settlement(&self) {
-        self.state
-            .lock()
-            .expect("splash-state mutex poisoned")
-            .fail_next = true;
     }
 
     #[must_use]

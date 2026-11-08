@@ -189,36 +189,6 @@ fn test_dig_animation_parameters_change_native_seekable_frames() {
 }
 
 #[test]
-fn test_bigwin_gif_match_bigwin() {
-    assert_valid_gif(&create_bigwin_gif(
-        "pf",
-        3_200,
-        BigWinSource::Match,
-        BigWinFlavor::BigWin,
-    ));
-}
-
-#[test]
-fn test_bigwin_gif_prediction_top_dog() {
-    assert_valid_gif(&create_bigwin_gif(
-        "pf",
-        3_200,
-        BigWinSource::Prediction,
-        BigWinFlavor::TopDog,
-    ));
-}
-
-#[test]
-fn test_bigwin_gif_gamba_underdog() {
-    assert_valid_gif(&create_bigwin_gif(
-        "pf",
-        3_200,
-        BigWinSource::Gamba,
-        BigWinFlavor::Underdog,
-    ));
-}
-
-#[test]
 fn test_affinity_bias() {
     let mut random = SeededDigNeonRandom::new(0);
     let affinity = ["the_damp", "a_drowned_map"];
@@ -509,73 +479,6 @@ fn test_prestige_fires() {
         .on_dig_prestige(1, Some(0))
         .expect("forced roll fires");
     assert_valid_gif_with_size(result.gif_file.as_ref().expect("prestige GIF"), (320, 180));
-}
-
-#[test]
-fn test_big_win_below_floor_returns_none() {
-    let mut service = service(true);
-    assert!(
-        service
-            .on_big_win(1, Some(0), BigWinSource::Match, 100, BigWinFlavor::BigWin,)
-            .is_none()
-    );
-}
-
-#[test]
-fn test_big_win_fires_above_floor() {
-    let mut service = service(true);
-    let result = service
-        .on_big_win(1, Some(0), BigWinSource::Match, 3_000, BigWinFlavor::TopDog)
-        .expect("forced roll fires");
-    assert_valid_gif(result.gif_file.as_ref().expect("big-win GIF"));
-}
-
-#[test]
-fn test_big_win_chance_scales_with_payout() {
-    let mut service = service(false);
-    assert!(
-        service
-            .on_big_win(
-                1,
-                Some(0),
-                BigWinSource::Gamba,
-                NEON_BIGWIN_MIN_PAYOUT,
-                BigWinFlavor::BigWin,
-            )
-            .is_none()
-    );
-    assert!(
-        service
-            .on_big_win(
-                1,
-                Some(0),
-                BigWinSource::Gamba,
-                NEON_BIGWIN_FULL_PAYOUT * 3,
-                BigWinFlavor::BigWin,
-            )
-            .is_none()
-    );
-    let chances = service.random().observed_chances();
-    assert!(chances[1] > chances[0]);
-    assert!(chances[1] <= 0.95 + f64::EPSILON);
-}
-
-#[test]
-fn test_wheel_win_routes_to_big_win() {
-    let mut service = service(true);
-    let result = service
-        .on_wheel_result(1, Some(0), 4_000, 5_000)
-        .expect("wheel routes to big win");
-    assert_valid_gif(result.gif_file.as_ref().expect("wheel big-win GIF"));
-}
-
-#[test]
-fn test_don_big_win_routes_to_big_win() {
-    let mut service = service(true);
-    let result = service
-        .on_double_or_nothing(1, Some(0), true, 3_000, 6_000)
-        .expect("DoN routes to big win");
-    assert_valid_gif(result.gif_file.as_ref().expect("DoN big-win GIF"));
 }
 
 #[test]

@@ -21,7 +21,8 @@ impl DeadlockHandler {
     }
 
     pub(super) async fn lobby_channel(&self, guild: i64) -> Result<u64, String> {
-        let _guard = self.lobby_lock.lock().await;
+        let lobby_lock = self.lobby_lock(guild);
+        let _guard = lobby_lock.lock().await;
         let repo = DeadlockRepository::new(&self.path);
         let previous =
             blocking(move || repo.lobby_publication(guild).map_err(|e| e.to_string())).await?;
@@ -74,7 +75,8 @@ impl DeadlockHandler {
         guild: i64,
         format: Option<DeadlockFormat>,
     ) -> Result<DiscordMessageReceipt, String> {
-        let _guard = self.lobby_lock.lock().await;
+        let lobby_lock = self.lobby_lock(guild);
+        let _guard = lobby_lock.lock().await;
         let repo = DeadlockRepository::new(&self.path);
         let lookup = repo.clone();
         let previous =
@@ -232,9 +234,16 @@ impl GatewayEventObserver for DeadlockLobbyObserver {
         }
         report
     }
+    /// The panel shows only queued members, so other members' profile
+    /// changes cannot alter it.
     async fn member_update(&self, member: GatewayMember) -> Result<(), String> {
         let guild = positive_id(member.guild_id)?;
-        if self.handler.config.allows(guild) {
+        if !self.handler.config.allows(guild) {
+            return Ok(());
+        }
+        let user = positive_id(member.user_id)?;
+        let repo = DeadlockRepository::new(&self.handler.path);
+        if blocking(move || repo.is_queued(guild, user).map_err(|e| e.to_string())).await? {
             self.handler.publish_lobby(guild, None).await?;
         }
         Ok(())
@@ -244,8 +253,9 @@ impl GatewayEventObserver for DeadlockLobbyObserver {
         if self.handler.config.allows(guild) {
             let user = positive_id(user_id)?;
             let repo = DeadlockRepository::new(&self.handler.path);
-            blocking(move || repo.queue_leave(guild, user).map_err(|e| e.to_string())).await?;
-            self.handler.publish_lobby(guild, None).await?;
+            if blocking(move || repo.queue_leave(guild, user).map_err(|e| e.to_string())).await? {
+                self.handler.publish_lobby(guild, None).await?;
+            }
         }
         Ok(())
     }

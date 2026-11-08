@@ -403,6 +403,7 @@ pub const LAYER_ROUTE_POOLS: [LayerRoutePool; 7] = [
     },
 ];
 
+#[cfg(test)]
 pub const ROUTE_EFFECT_KEYS: [&str; 9] = [
     "advance_bonus",
     "advance_max_penalty",
@@ -738,17 +739,6 @@ impl DigRouteService {
     #[must_use]
     pub const fn new(repository: DigRouteRepository) -> Self {
         Self { repository }
-    }
-
-    pub fn get_route_status(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Option<RouteStatus>, DigRouteAppError> {
-        Ok(self
-            .repository
-            .tunnel(discord_id, guild_id)?
-            .map(|tunnel| route_status(tunnel.route_state.as_deref())))
     }
 
     pub fn choose_route(

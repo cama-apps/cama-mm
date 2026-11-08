@@ -80,6 +80,8 @@ fn victory_commit<'a>(
         vanity_tax: 0,
         low_priority_tax: 0,
         consume_lantern_id: None,
+        save_duel: None,
+        abandon_duel: None,
     }
 }
 
@@ -638,7 +640,7 @@ fn paused_duel() -> DigBossPausedDuelRow {
 fn paused_duel_survives_repository_recreation_and_is_claimed_once() {
     let database = fixture();
     DigBossRuntimeRepository::new(database.path())
-        .save_active_duel(&paused_duel())
+        .restore_claimed_duel(&paused_duel())
         .expect("save duel");
     let recovered = DigBossRuntimeRepository::new(database.path())
         .active_duel(KEY)
@@ -656,21 +658,146 @@ fn paused_duel_survives_repository_recreation_and_is_claimed_once() {
     );
 }
 
+fn stake_commit<'a>(
+    snapshot: &'a DigBossRuntimeSnapshot,
+    state: &'a DigBossRuntimeState,
+    save_duel: Option<&'a DigBossPausedDuelRow>,
+    abandon_duel: Option<&'a DigBossPausedDuelRow>,
+) -> DigBossRuntimeCommit<'a> {
+    DigBossRuntimeCommit {
+        expected: snapshot,
+        proposed: state,
+        audit: (state.balance != snapshot.balance).then_some(DigBossRuntimeAudit {
+            action_type: "boss_wager_escrow",
+            target_id: None,
+            detail_json: r#"{"boss_id":"grothak","wager":40}"#,
+            created_at: 1_700_000_000,
+        }),
+        echo: None,
+        artifact: None,
+        bankruptcy_penalty: 0,
+        vanity_tax: 0,
+        low_priority_tax: 0,
+        consume_lantern_id: None,
+        save_duel,
+        abandon_duel,
+    }
+}
+
+fn balance(database: &NamedTempFile) -> i64 {
+    Connection::open(database.path())
+        .expect("balance DB")
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("balance")
+}
+
+#[test]
+fn escrowed_stake_and_its_paused_duel_commit_together() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let mut state = DigBossRuntimeState::from(&snapshot);
+    state.balance -= 40;
+    let mut duel = paused_duel();
+    duel.wager = 40;
+    let outcome = repository
+        .commit(stake_commit(&snapshot, &state, Some(&duel), None))
+        .expect("escrow");
+    assert!(matches!(outcome, DigBossRuntimeCommitOutcome::Applied(_)));
+    assert_eq!(balance(&database), 60);
+    assert_eq!(repository.active_duel(KEY).expect("read"), Some(duel));
+    let ledger: i64 = Connection::open(database.path())
+        .expect("ledger DB")
+        .query_row(
+            "SELECT COUNT(*) FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='boss_wager_escrow'
+                AND jc_delta=-40",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("escrow audit");
+    assert_eq!(ledger, 1);
+}
+
+#[test]
+fn escrow_never_replaces_an_active_duel_and_rolls_its_stake_back() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    assert!(
+        repository
+            .restore_claimed_duel(&paused_duel())
+            .expect("existing duel")
+    );
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let mut state = DigBossRuntimeState::from(&snapshot);
+    state.balance -= 40;
+    let mut newer = paused_duel();
+    newer.wager = 40;
+    assert!(matches!(
+        repository.commit(stake_commit(&snapshot, &state, Some(&newer), None)),
+        Err(DigBossRuntimeRepositoryError::DuelAlreadyActive)
+    ));
+    assert_eq!(balance(&database), 100);
+    assert_eq!(
+        repository.active_duel(KEY).expect("read"),
+        Some(paused_duel())
+    );
+}
+
+#[test]
+fn abandoning_a_duel_deletes_exactly_that_row_in_the_settlement() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let state = DigBossRuntimeState::from(&snapshot);
+    assert!(matches!(
+        repository
+            .commit(stake_commit(&snapshot, &state, None, Some(&paused_duel())))
+            .expect("missing duel"),
+        DigBossRuntimeCommitOutcome::Conflict
+    ));
+    assert!(
+        repository
+            .restore_claimed_duel(&paused_duel())
+            .expect("paused duel")
+    );
+    assert!(matches!(
+        repository
+            .commit(stake_commit(&snapshot, &state, None, Some(&paused_duel())))
+            .expect("abandon"),
+        DigBossRuntimeCommitOutcome::Applied(_)
+    ));
+    assert_eq!(repository.active_duel(KEY).expect("read"), None);
+}
+
 #[test]
 fn restoring_a_claimed_duel_never_overwrites_a_newer_pause() {
     let database = fixture();
     let repository = DigBossRuntimeRepository::new(database.path());
-    repository.save_active_duel(&paused_duel()).expect("save");
+    assert!(
+        repository
+            .restore_claimed_duel(&paused_duel())
+            .expect("save")
+    );
     let claimed = repository
         .claim_active_duel(KEY)
         .expect("claim")
         .expect("claimed duel");
     assert!(repository.restore_claimed_duel(&claimed).expect("restore"));
     assert_eq!(repository.active_duel(KEY).expect("read"), Some(claimed));
+    repository.claim_active_duel(KEY).expect("claim again");
 
     let mut newer = paused_duel();
     newer.wager = 55;
-    repository.save_active_duel(&newer).expect("newer pause");
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let state = DigBossRuntimeState::from(&snapshot);
+    repository
+        .commit(stake_commit(&snapshot, &state, Some(&newer), None))
+        .expect("newer pause");
     assert!(
         !repository
             .restore_claimed_duel(&paused_duel())

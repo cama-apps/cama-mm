@@ -69,6 +69,7 @@ fn request<'a>(
         boss_progress_json,
         detail_json,
         created_at: now,
+        boss_stake: AbandonedBossStake::default(),
     }
 }
 
@@ -381,4 +382,94 @@ fn injected_reset_failure_rolls_back_wallet_ledger_and_audit() {
         ledger_delta, 100,
         "only the fixture player-insert entry remains"
     );
+}
+
+fn seed_paused_duel(database: &NamedTempFile, wager: i64) {
+    Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO dig_active_duels
+             (discord_id,guild_id,boss_id,tier,mechanic_id,risk_tier,wager,
+              player_hp,boss_hp,round_num,round_log,pending_prompt,rng_state,
+              status_effects,echo_applied,echo_killer_id,player_hit,player_dmg,
+              boss_hit,boss_dmg,crit_chance,crit_bonus,created_at,last_interaction_at)
+             VALUES (?1,?2,'grothak',25,'grothak_earthquake','bold',?3,3,4,2,'[]',NULL,
+                     '','{}',0,NULL,0.4,2,0.4,1,0.1,1,500,500)",
+            params![USER, GUILD, wager],
+        )
+        .unwrap();
+}
+
+fn abandon_snapshot(database: &NamedTempFile) -> DigAbandonSnapshot {
+    DigAbandonRuntimeRepository::new(database.path())
+        .snapshot(DigAbandonKey {
+            discord_id: USER,
+            guild_id: GUILD,
+        })
+        .unwrap()
+        .unwrap()
+}
+
+fn paused_duel_count(database: &NamedTempFile) -> i64 {
+    Connection::open(database.path())
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM dig_active_duels WHERE discord_id=?1 AND guild_id=?2",
+            params![USER, GUILD],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+const PAUSED_DUEL: AbandonedBossDuel<'static> = AbandonedBossDuel {
+    boss_id: "grothak",
+    boundary: 25,
+    created_at: 500,
+};
+
+#[test]
+fn abandonment_settles_the_paused_duel_in_the_same_transaction() {
+    let database = fixture(100);
+    seed_paused_duel(&database, 400);
+    let snapshot = abandon_snapshot(&database);
+    let mut settlement = request(snapshot, r#"{"25":"active"}"#, "{}", 200_000);
+    // A legacy paused wager forfeits what the balance holds, never more.
+    settlement.boss_stake = AbandonedBossStake {
+        paused_duel: Some(PAUSED_DUEL),
+        expected_boss_progress: None,
+        balance_delta: -400,
+    };
+    let outcome = DigAbandonRuntimeRepository::new(database.path())
+        .atomic_settle(settlement)
+        .unwrap();
+    let DigAbandonSettlementOutcome::Applied(receipt) = outcome else {
+        panic!("expected applied settlement: {outcome:?}");
+    };
+    assert_eq!((receipt.balance_before, receipt.balance_after), (100, 13));
+    assert_eq!(paused_duel_count(&database), 0);
+}
+
+#[test]
+fn abandonment_conflicts_when_the_paused_duel_changed() {
+    let database = fixture(100);
+    seed_paused_duel(&database, 40);
+    let snapshot = abandon_snapshot(&database);
+    let repository = DigAbandonRuntimeRepository::new(database.path());
+    // Settling as if nothing were paused must not silently drop the duel.
+    assert_eq!(
+        repository
+            .atomic_settle(request(snapshot, r#"{"25":"active"}"#, "{}", 200_000))
+            .unwrap(),
+        DigAbandonSettlementOutcome::Conflict
+    );
+    assert_eq!(paused_duel_count(&database), 1);
+    let mut settlement = request(snapshot, r#"{"25":"active"}"#, "{}", 200_000);
+    settlement.boss_stake.expected_boss_progress = Some("{\"stale\":true}");
+    settlement.boss_stake.paused_duel = Some(PAUSED_DUEL);
+    assert_eq!(
+        repository.atomic_settle(settlement).unwrap(),
+        DigAbandonSettlementOutcome::Conflict
+    );
+    assert_eq!(paused_duel_count(&database), 1);
+    assert_eq!(abandon_snapshot(&database).balance, 100);
 }

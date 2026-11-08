@@ -282,6 +282,7 @@ impl Default for InteractionRecorder {
 }
 
 impl InteractionRecorder {
+    #[cfg(test)]
     #[must_use]
     pub fn last_payload(&self) -> Option<&ResponsePayload> {
         self.events.iter().rev().find_map(|event| match event {
@@ -625,10 +626,7 @@ where
         self.reminders.as_ref()
     }
 
-    pub const fn reminders_mut(&mut self) -> Option<&mut M> {
-        self.reminders.as_mut()
-    }
-
+    #[cfg(test)]
     pub fn set_direct_death_delivery(&mut self, pet_id: i64, count: usize) {
         if count == 0 {
             self.direct_death_deliveries.remove(&pet_id);
@@ -1319,6 +1317,7 @@ impl NotificationPreferences {
         self.pet_enabled.contains(&(discord_id, guild_id))
     }
 
+    #[cfg(test)]
     pub fn set_pet_enabled(&mut self, discord_id: i64, guild_id: i64, enabled: bool) {
         if enabled {
             self.pet_enabled.insert((discord_id, guild_id));
@@ -1359,10 +1358,6 @@ impl ReminderCoordinator {
         }
     }
 
-    pub fn set_now(&mut self, now: i64) {
-        self.now = now;
-    }
-
     pub fn schedule_pet_reminder(
         &mut self,
         discord_id: i64,
@@ -1384,6 +1379,7 @@ impl ReminderCoordinator {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn has_pet_task(&self, discord_id: i64, guild_id: i64) -> bool {
         self.tasks.contains_key(&(discord_id, guild_id, "pet"))

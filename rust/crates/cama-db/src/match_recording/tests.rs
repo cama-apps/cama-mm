@@ -929,6 +929,129 @@ fn test_complete_enrichment_marks_replay_pending_in_same_transaction() {
     assert_eq!(reason, format!("match_enrichment:{match_id}"));
 }
 
+#[test]
+fn test_enrichment_replay_reason_names_a_match_only_when_it_is_the_sole_change() {
+    let fixture = Fixture::new();
+    let (radiant, dire) = teams(38_101);
+    let participants = [radiant.clone(), dire.clone()].concat();
+    fixture.seed(&participants);
+    let first = insert_recorded_match(&fixture, &radiant, &dire);
+    let second = insert_recorded_match(&fixture, &radiant, &dire);
+    let updates = participants
+        .iter()
+        .enumerate()
+        .map(|(index, discord_id)| fantasy_update(*discord_id, 10.0 + index as f64))
+        .collect::<Vec<_>>();
+    let enrich = |match_id: i64| {
+        fixture
+            .repository
+            .apply_enrichment_atomic(MatchEnrichmentRequest {
+                match_id,
+                guild_id: Some(GUILD),
+                valve_match_id: 7_000 + match_id,
+                duration_seconds: 2_400,
+                radiant_score: 30,
+                dire_score: 20,
+                game_mode: 22,
+                enrichment_data: None,
+                enrichment_source: Some("test"),
+                enrichment_confidence: Some(1.0),
+                participant_updates: &updates,
+                wrapped_facts: &[],
+            })
+            .expect("commit complete enrichment");
+    };
+    let reason = || -> String {
+        fixture
+            .connection()
+            .query_row(
+                "SELECT reason FROM openskill_replay_jobs WHERE guild_id=?1",
+                [GUILD],
+                |row| row.get(0),
+            )
+            .expect("durable replay marker")
+    };
+
+    enrich(first);
+    enrich(first);
+    assert_eq!(reason(), format!("match_enrichment:{first}"));
+    enrich(second);
+    assert_eq!(reason(), "match_enrichment:multiple");
+    enrich(first);
+    assert_eq!(reason(), "match_enrichment:multiple");
+
+    fixture
+        .connection()
+        .execute(
+            "UPDATE openskill_replay_jobs SET reason='match_correction:7' WHERE guild_id=?1",
+            [GUILD],
+        )
+        .expect("simulate a pending correction replay");
+    enrich(second);
+    assert_eq!(reason(), "match_correction:7");
+
+    // Wiping a fantasy-weighted match changes the replay input too, so it
+    // requests a (full) replay of its own, still deferring to a correction.
+    let discovery =
+        crate::match_discovery_repository::MatchDiscoveryRepository::new(fixture.file.path());
+    assert!(
+        discovery
+            .wipe_match_enrichment(second, Some(GUILD))
+            .expect("wipe beside a pending correction")
+    );
+    assert_eq!(reason(), "match_correction:7");
+    fixture
+        .connection()
+        .execute(
+            "DELETE FROM openskill_replay_jobs WHERE guild_id=?1",
+            [GUILD],
+        )
+        .expect("simulate the replay completing");
+    assert!(
+        discovery
+            .wipe_match_enrichment(first, Some(GUILD))
+            .expect("wipe complete enrichment")
+    );
+    assert_eq!(reason(), format!("enrichment_wipe:{first}"));
+    fixture
+        .connection()
+        .execute(
+            "DELETE FROM openskill_replay_jobs WHERE guild_id=?1",
+            [GUILD],
+        )
+        .expect("simulate the replay completing");
+    assert!(
+        discovery
+            .wipe_match_enrichment(first, Some(GUILD))
+            .expect("wipe an already-cleared match")
+    );
+    let pending: i64 = fixture
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM openskill_replay_jobs WHERE guild_id=?1",
+            [GUILD],
+            |row| row.get(0),
+        )
+        .expect("count replay jobs");
+    assert_eq!(pending, 0, "no fantasy weights were cleared");
+
+    enrich(second);
+    fixture
+        .connection()
+        .execute(
+            "DELETE FROM openskill_replay_jobs WHERE guild_id=?1",
+            [GUILD],
+        )
+        .expect("simulate the replay completing");
+    assert_eq!(
+        discovery
+            .wipe_all_enrichments(Some(GUILD))
+            .expect("wipe every enrichment"),
+        1
+    );
+    assert_eq!(reason(), "enrichment_wipe:all");
+}
+
 fn migrated_award_database() -> NamedTempFile {
     let database = NamedTempFile::new().expect("temporary migrated award database");
     initialize_or_migrate(database.path()).expect("initialize Python-compatible schema");

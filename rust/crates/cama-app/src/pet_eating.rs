@@ -411,6 +411,7 @@ where
         &self.reminders
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn active_direct_deliveries(&self) -> &BTreeMap<i64, usize> {
         &self.direct_death_deliveries

@@ -8,9 +8,7 @@
 //! parity policy can run locally without starting a second bot or DB writer.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -32,7 +30,6 @@ pub const BONUS_CAP_SMALL_PCT: f64 = 5.0;
 pub const BONUS_CAP_BIG_CHANCE: f64 = 0.10;
 pub const NARRATE_DIG_TOOL_NAME: &str = "narrate_dig";
 pub const NARRATE_SPLASH_TOOL_NAME: &str = "narrate_splash";
-pub const CATASTROPHIC_PREFIX: &str = "💥";
 
 pub const CATASTROPHIC_LINES: [&str; 8] = [
     "Far below, a tunnel folds shut. Stone settles for a long time.",
@@ -44,78 +41,6 @@ pub const CATASTROPHIC_LINES: [&str; 8] = [
     "The hill shifts. Birds lift from leagues away.",
     "Below the bones of the world, a chamber that was now isn't.",
 ];
-
-/// Narrow entropy seam for canonical catastrophic-line selection.
-pub trait FlameEntropy {
-    /// Return an index in `0..upper_exclusive`.
-    fn index(&mut self, upper_exclusive: usize) -> usize;
-}
-
-#[must_use]
-pub fn pick_catastrophic_line<E: FlameEntropy + ?Sized>(entropy: &mut E) -> &'static str {
-    CATASTROPHIC_LINES[entropy.index(CATASTROPHIC_LINES.len())]
-}
-
-/// Failure returned when a channel cannot create its detached send future.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FlameSendError;
-
-/// Failure returned when no runtime task can be detached.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FlameTaskError;
-
-pub type FlameSendFuture =
-    Pin<Box<dyn Future<Output = Result<(), FlameSendError>> + Send + 'static>>;
-
-/// Discord-neutral channel seam. `Ok(None)` represents a channel-like value
-/// without a usable `send` method; `Err` represents a synchronous send error.
-pub trait AtmosphericChannel {
-    fn send(&self, content: String) -> Result<Option<FlameSendFuture>, FlameSendError>;
-}
-
-/// Runtime-neutral fire-and-forget task seam. A caller without a running
-/// event loop passes `None`, causing the already-created future to be dropped.
-pub trait AtmosphericTaskSpawner {
-    fn spawn(&self, task: FlameSendFuture) -> Result<(), FlameTaskError>;
-}
-
-/// Format and detach one atmospheric channel post without letting transport
-/// or scheduler failure escape into the committed Dig flow.
-pub fn post_atmospheric<C, S>(channel: Option<&C>, spawner: Option<&S>, prefix: &str, line: &str)
-where
-    C: AtmosphericChannel,
-    S: AtmosphericTaskSpawner,
-{
-    if channel.is_none() || line.is_empty() {
-        return;
-    }
-    let formatted = format!("{prefix} *{}*", line.trim());
-    let Some(channel) = channel else {
-        return;
-    };
-    let Ok(Some(task)) = channel.send(formatted) else {
-        return;
-    };
-    let Some(spawner) = spawner else {
-        return;
-    };
-    let _ = spawner.spawn(task);
-}
-
-/// Pick and detach one canonical catastrophic cave-in post.
-pub fn post_catastrophic<C, S, E>(channel: Option<&C>, spawner: Option<&S>, entropy: &mut E)
-where
-    C: AtmosphericChannel,
-    S: AtmosphericTaskSpawner,
-    E: FlameEntropy + ?Sized,
-{
-    post_atmospheric(
-        channel,
-        spawner,
-        CATASTROPHIC_PREFIX,
-        pick_catastrophic_line(entropy),
-    );
-}
 
 /// Immutable canonical NPC entry used in Dig DM prompt context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,6 +148,7 @@ pub const NPCS: &[DigNpc] = &[
     },
 ];
 
+#[cfg(test)]
 pub const VALID_VOICES: [&str; 3] = ["cosmic_dread", "industrial_grim", "cryptic_folkloric"];
 
 #[must_use]
@@ -1698,13 +1624,6 @@ impl DigFlavorRng for SeededDigFlavorRng {
     }
 }
 
-impl FlameEntropy for SeededDigFlavorRng {
-    fn index(&mut self, upper_exclusive: usize) -> usize {
-        assert!(upper_exclusive > 0, "cannot pick from an empty flame pool");
-        self.choose_tone(upper_exclusive)
-    }
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GatheredFlavorData {
     pub tunnel: Option<TunnelFlavorState>,
@@ -2729,6 +2648,7 @@ fn extract_notable_moment(details: &BTreeMap<String, bool>) -> Option<&'static s
     })
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct MemoryRepositoryState {
     balances: BTreeMap<(i64, i64), i64>,
@@ -2739,14 +2659,14 @@ struct MemoryRepositoryState {
     actions: Vec<DigAction>,
 }
 
-/// Reference in-memory adapter used by parity tests and local prompt previews.
-/// Production cutover still requires a `rusqlite` adapter over the Python
-/// schema; this type intentionally never opens the shared database.
+/// Reference in-memory adapter for the parity tests.
+#[cfg(test)]
 #[derive(Default)]
 pub struct MemoryDigFlavorRepository {
     state: Mutex<MemoryRepositoryState>,
 }
 
+#[cfg(test)]
 impl MemoryDigFlavorRepository {
     pub fn register_player(&self, discord_id: i64, guild_id: i64, name: &str, balance: i64) {
         let mut state = self
@@ -2846,6 +2766,7 @@ impl MemoryDigFlavorRepository {
     }
 }
 
+#[cfg(test)]
 impl DigFlavorDataPort for MemoryDigFlavorRepository {
     fn gather(&self, discord_id: i64, guild_id: i64) -> Result<GatheredFlavorData, String> {
         let state = self.state.lock().map_err(|error| error.to_string())?;

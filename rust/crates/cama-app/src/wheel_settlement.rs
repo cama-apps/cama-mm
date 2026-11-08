@@ -26,16 +26,15 @@ use cama_db::shop_runtime::{
 use cama_db::wheel_spin_repository::{NewWheelSpin, WheelSpinRepository};
 use cama_domain::discord_content::UNKNOWN_PLAYER;
 use cama_domain::formatting::JOPACOIN_EMOTE;
-use cama_domain::mana::ManaEffects;
+use cama_domain::mana::{ManaEffects, mana_day_label_at};
 use cama_domain::pet_evolution::PetActivity;
 use cama_domain::player::Player;
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::types::Value as SqlValue;
 use serde_json::json;
 
 use crate::economy_actions::apply_gamba_event_multiplier;
 use crate::golden_wheel::{LiveGoldenEconomy, compute_live_golden_wedges};
-use crate::mana_service::mana_day_label;
 use crate::wheel::{
     CooldownOutcome, LossRoll, WHEEL_BANANA_PEEL_LOSS_MAX, WHEEL_BANANA_PEEL_LOSS_MIN,
     WHEEL_BOMB_OMB_VICTIM_COUNT, WHEEL_BOMB_OMB_VICTIM_LOSS_MAX, WHEEL_BOMB_OMB_VICTIM_LOSS_MIN,
@@ -215,78 +214,13 @@ pub fn active_mana_effects(
     else {
         return Ok(ManaEffects::default());
     };
-    let offset = pacific_offset_seconds(now)?;
-    let local = DateTime::<Utc>::from_timestamp(now, 0)
-        .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())?
-        .with_timezone(
-            &FixedOffset::east_opt(offset)
-                .ok_or_else(|| "invalid Pacific time-zone offset".to_owned())?,
-        );
-    if row.assigned_date != mana_day_label(local) || row.consumed_today {
+    if row.assigned_date != wheel_mana_date(now)? || row.consumed_today {
         return Ok(ManaEffects::default());
     }
-    let color = match row.current_land.as_str() {
-        "Island" => "Blue",
-        "Mountain" => "Red",
-        "Forest" => "Green",
-        "Plains" => "White",
-        "Swamp" => "Black",
-        _ => return Ok(ManaEffects::default()),
+    let Some(color) = crate::mana_effects_service::color_for_land(&row.current_land) else {
+        return Ok(ManaEffects::default());
     };
     Ok(ManaEffects::for_color(Some(color), Some(&row.current_land)))
-}
-
-/// Resolve the same Pacific 4AM day boundary used by the mana provider.
-fn pacific_offset_seconds(timestamp: i64) -> Result<i32, String> {
-    use chrono::{Datelike, NaiveDate, TimeZone, Weekday};
-
-    let utc = DateTime::<Utc>::from_timestamp(timestamp, 0)
-        .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())?;
-    let year = utc.year();
-    let march =
-        NaiveDate::from_ymd_opt(year, 3, 1).ok_or_else(|| "invalid March date".to_owned())?;
-    let november =
-        NaiveDate::from_ymd_opt(year, 11, 1).ok_or_else(|| "invalid November date".to_owned())?;
-    let to_sunday = |date: NaiveDate| -> i64 {
-        match date.weekday() {
-            Weekday::Sun => 0,
-            Weekday::Mon => 6,
-            Weekday::Tue => 5,
-            Weekday::Wed => 4,
-            Weekday::Thu => 3,
-            Weekday::Fri => 2,
-            Weekday::Sat => 1,
-        }
-    };
-    let second_sunday_march = march + chrono::Duration::days(to_sunday(march) + 7);
-    let first_sunday_november = november + chrono::Duration::days(to_sunday(november));
-    let standard = FixedOffset::west_opt(8 * 3_600)
-        .ok_or_else(|| "invalid Pacific standard offset".to_owned())?;
-    let daylight = FixedOffset::west_opt(7 * 3_600)
-        .ok_or_else(|| "invalid Pacific daylight offset".to_owned())?;
-    let starts = standard
-        .from_local_datetime(
-            &second_sunday_march
-                .and_hms_opt(2, 0, 0)
-                .ok_or_else(|| "invalid DST start time".to_owned())?,
-        )
-        .single()
-        .ok_or_else(|| "ambiguous DST start".to_owned())?
-        .timestamp();
-    let ends = daylight
-        .from_local_datetime(
-            &first_sunday_november
-                .and_hms_opt(2, 0, 0)
-                .ok_or_else(|| "invalid DST end time".to_owned())?,
-        )
-        .single()
-        .ok_or_else(|| "ambiguous DST end".to_owned())?
-        .timestamp();
-    Ok(if (starts..ends).contains(&timestamp) {
-        -7 * 3_600
-    } else {
-        -8 * 3_600
-    })
 }
 
 fn apply_mana_wheel_modifiers(
@@ -501,16 +435,7 @@ pub fn apply_wheel_blood_pact_skim(
     {
         return Ok((existing.applied, current));
     }
-    let mana_date = {
-        let offset = pacific_offset_seconds(now)?;
-        let local = DateTime::<Utc>::from_timestamp(now, 0)
-            .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())?
-            .with_timezone(
-                &FixedOffset::east_opt(offset)
-                    .ok_or_else(|| "invalid Pacific time-zone offset".to_owned())?,
-            );
-        mana_day_label(local)
-    };
+    let mana_date = wheel_mana_date(now)?;
     // Reserve, protect, transfer, and account the skim in one transaction.
     let skimmed = DigBloodPactRepository::new(path)
         .settle(&DigBloodPactSettlementRequest {
@@ -576,14 +501,7 @@ pub fn apply_hostile_wheel_loss(
 }
 
 fn wheel_mana_date(now: i64) -> Result<String, String> {
-    let offset = pacific_offset_seconds(now)?;
-    let local = DateTime::<Utc>::from_timestamp(now, 0)
-        .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())?
-        .with_timezone(
-            &FixedOffset::east_opt(offset)
-                .ok_or_else(|| "invalid Pacific time-zone offset".to_owned())?,
-        );
-    Ok(mana_day_label(local))
+    mana_day_label_at(now).ok_or_else(|| "system timestamp is outside chrono's range".to_owned())
 }
 
 /// One victim a wheel outcome charges.

@@ -459,6 +459,7 @@ impl PetEatingRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub fn find_unannounced_evolution_refs(
         &self,
         limit: i64,
