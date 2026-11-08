@@ -306,7 +306,7 @@ impl LobbyRecord {
             return None;
         }
         let kind = if state.lobby_id
-            == LobbyScope::new(GuildId::DEFAULT, LobbyKind::LowSkill).lobby_id()
+            == LobbyScope::new(GuildId::DIRECT_MESSAGE, LobbyKind::LowSkill).lobby_id()
         {
             LobbyKind::LowSkill
         } else {

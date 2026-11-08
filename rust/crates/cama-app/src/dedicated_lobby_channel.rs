@@ -5,20 +5,7 @@ use std::cmp::Ordering;
 
 use crate::embeds::LobbyKind;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct GuildId(pub i64);
-
-impl GuildId {
-    pub const DEFAULT: Self = Self(0);
-
-    #[must_use]
-    pub const fn normalize(value: Option<Self>) -> Self {
-        match value {
-            Some(value) => value,
-            None => Self::DEFAULT,
-        }
-    }
-}
+pub use cama_domain::guild::GuildId;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ChannelId(pub i64);

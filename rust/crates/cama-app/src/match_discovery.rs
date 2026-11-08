@@ -848,7 +848,7 @@ where
         guild_id: Option<GuildId>,
         dry_run: bool,
     ) -> DiscoveryResult {
-        let guild_id = guild_id.unwrap_or(GuildId::DEFAULT);
+        let guild_id = guild_id.unwrap_or(GuildId::DIRECT_MESSAGE);
         let key = DiscoveryKey { guild_id, match_id };
         if !dry_run {
             let mut runs = self.lock_runs();
@@ -936,7 +936,7 @@ where
         guild_id: Option<GuildId>,
         dry_run: bool,
     ) -> BatchDiscoveryResult {
-        let guild_id = guild_id.unwrap_or(GuildId::DEFAULT);
+        let guild_id = guild_id.unwrap_or(GuildId::DIRECT_MESSAGE);
         let matches = match self
             .match_repository
             .get_matches_without_enrichment(guild_id, self.config.batch_limit)
