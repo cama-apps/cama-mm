@@ -22,8 +22,12 @@ use cama_app::mana_service::Land;
 use cama_app::manashop_rework::BuffService;
 use cama_app::neon_degen::{NeonDegenService, NeonResult};
 use cama_app::shop_commands::{
-    ManaItemSpec, ManaTier, PairingRecord, calculate_soft_avoid_cost, mana_item,
-    soft_avoid_choice_name,
+    DARK_BARGAIN_AMOUNT_DUE, DARK_BARGAIN_PRINCIPAL, HostileEffectContext, ManaItemSpec,
+    ManaShopEffectConfig, ManaTier, PYROCLASM_ROLL_RANGE, PYROCLASM_TARGETS, PairingRecord,
+    REPRIEVE_LOOKBACK_SECONDS, SOUL_HARVEST_BONUS_DRAIN_CHANCE, WILDFIRE_ROLL_RANGE,
+    calculate_soft_avoid_cost, hostile_totals, mana_item, mana_recovery_base, pyroclasm_bounty,
+    pyroclasm_requests, soft_avoid_choice_name, soul_harvest_requests, wildfire_harvest,
+    wildfire_requests,
 };
 use cama_db::gambling_stats_repository::{
     GamblingStatsPort, GamblingStatsRepository, GamblingStatsService,
@@ -45,11 +49,10 @@ use cama_db::rating_history_repository::{
     RecalibrationService, RecalibrationServiceConfig,
 };
 use cama_db::shop_runtime::{
-    DoubleOrNothingRequest, HostileDestination, HostileLossRequest, PaidPingKind,
-    PurchaseFailureReason, ShopPlayer, ShopRuntimeRepository,
+    DoubleOrNothingRequest, PaidPingKind, PurchaseFailureReason, ShopPlayer, ShopRuntimeRepository,
 };
 use cama_db::soft_avoid_repository::{SoftAvoidPurchaseFailureReason, SoftAvoidRepository};
-use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
+use cama_domain::economy_scaling::scale_minigame_jc_delta;
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::guild_config::GuildConfigStore;
 use chrono::{DateTime, Utc};
@@ -79,8 +82,6 @@ const RECALIBRATION_MIN_GAMES: i64 = 5;
 const SOFT_AVOID_GAMES: i64 = 10;
 const PACKAGE_DEAL_MAX_GAMES: i64 = 10;
 const PACKAGE_DEAL_NO_ACTIVE_COST: i64 = 1;
-const SOUL_HARVEST_DRAIN_PER_TARGET: i64 = 2;
-const SOUL_HARVEST_BONUS_DRAIN_CHANCE: f64 = 0.20;
 const BOUNTY_HUNTER_ANNOUNCE_COLOR: u32 = 0xDD_C9_3F;
 const JOPA_COIN_COLOR: u32 = 0xD4_AF_37;
 const BOUNTY_HUNTER_IMAGE_URL: &str =
@@ -1319,6 +1320,17 @@ impl ShopInteractionHandler {
         let user_id = context.user_id;
         let guild_id = context.guild_id;
         let new_balance = balance_after_purchase.saturating_add(ult_refund);
+        let hostile = HostileEffectContext {
+            buyer_id: user_id,
+            guild_id,
+            purchase_id,
+            occurred_at: now,
+            mana_date: today,
+            config: ManaShopEffectConfig {
+                minigame_scale: self.config.minigame_scale,
+                hostile_min_balance: self.config.hostile_min_balance,
+            },
+        };
         match spec.key {
             "pyroclasm" => {
                 let eligible = self.eligible_hostile_players(user_id, guild_id).await?;
@@ -1329,7 +1341,7 @@ impl ShopInteractionHandler {
                     .entropy
                     .lock()
                     .map_err(|_| "shop entropy lock is poisoned".to_owned())?
-                    .sample_indices(eligible.len(), 3);
+                    .sample_indices(eligible.len(), PYROCLASM_TARGETS);
                 let selected = indices
                     .into_iter()
                     .map(|index| eligible[index].clone())
@@ -1340,36 +1352,12 @@ impl ShopInteractionHandler {
                         .lock()
                         .map_err(|_| "shop entropy lock is poisoned".to_owned())?;
                     (0..selected.len())
-                        .map(|_| entropy.i64_inclusive(12, 28))
+                        .map(|_| {
+                            entropy.i64_inclusive(PYROCLASM_ROLL_RANGE.0, PYROCLASM_ROLL_RANGE.1)
+                        })
                         .collect::<Vec<_>>()
                 };
-                let requests = selected
-                    .iter()
-                    .zip(rolls)
-                    .filter_map(|(victim, roll)| {
-                        let amount = scale_deflationary_minigame_jc_delta(
-                            roll as f64,
-                            self.config.minigame_scale,
-                        )
-                        .min(victim.balance)
-                        .max(0);
-                        (amount > 0).then(|| {
-                            hostile_request(
-                                victim.discord_id,
-                                guild_id,
-                                amount,
-                                "pyroclasm",
-                                user_id,
-                                format!("pyroclasm:{purchase_id}:{}", victim.discord_id),
-                                HostileDestination::Burn,
-                                None,
-                                self.config.hostile_min_balance,
-                                now,
-                                today,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>();
+                let requests = pyroclasm_requests(&hostile, &selected, &rolls);
                 let victim_ids = requests
                     .iter()
                     .map(|request| request.victim_id)
@@ -1378,7 +1366,7 @@ impl ShopInteractionHandler {
                 let outcomes = self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
                     let outcomes = effects.apply_hostile_losses(&requests)?;
                     let (total_destroyed, total_absorbed) = hostile_totals(&outcomes);
-                    let bounty = 35.min(total_destroyed / 2);
+                    let bounty = pyroclasm_bounty(total_destroyed);
                     if bounty > 0 {
                         effects.adjust_balance(user_id, guild_id, bounty, Some("manashop"), Some(user_id),
                             Some("hostile_loss_reward"), Some(&reward_id), Some("manashop pyroclasm bounty"),
@@ -1416,7 +1404,7 @@ impl ShopInteractionHandler {
                         outcome.applied
                     ));
                 }
-                let bounty = 35.min(total_destroyed / 2);
+                let bounty = pyroclasm_bounty(total_destroyed);
                 let victims = if lines.is_empty() {
                     "  No eligible targets.".to_owned()
                 } else {
@@ -1502,7 +1490,7 @@ impl ShopInteractionHandler {
                             user_id,
                             guild_id,
                             buff_id,
-                            now.saturating_sub(24 * 3_600),
+                            now.saturating_sub(REPRIEVE_LOOKBACK_SECONDS),
                             now,
                         )
                     })
@@ -1518,38 +1506,16 @@ impl ShopInteractionHandler {
                 if eligible.is_empty() {
                     return Err("No living souls to drain; refunded.".to_owned());
                 }
-                let base = scale_minigame_jc_delta(
-                    SOUL_HARVEST_DRAIN_PER_TARGET as f64,
-                    self.config.minigame_scale,
-                );
                 let bonuses = {
                     let mut entropy = self
                         .entropy
                         .lock()
                         .map_err(|_| "shop entropy lock is poisoned".to_owned())?;
                     (0..eligible.len())
-                        .map(|_| i64::from(entropy.chance(SOUL_HARVEST_BONUS_DRAIN_CHANCE)))
+                        .map(|_| entropy.chance(SOUL_HARVEST_BONUS_DRAIN_CHANCE))
                         .collect::<Vec<_>>()
                 };
-                let requests: Vec<HostileLossRequest> = eligible
-                    .iter()
-                    .zip(bonuses)
-                    .map(|(victim, bonus)| {
-                        hostile_request(
-                            victim.discord_id,
-                            guild_id,
-                            (base + bonus).min(victim.balance),
-                            "soul_harvest",
-                            user_id,
-                            format!("soul_harvest:{purchase_id}:{}", victim.discord_id),
-                            HostileDestination::Player,
-                            Some(user_id),
-                            self.config.hostile_min_balance,
-                            now,
-                            today,
-                        )
-                    })
-                    .collect();
+                let requests = soul_harvest_requests(&hostile, &eligible, &bonuses);
                 let outcomes = self
                     .settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
                         effects.apply_hostile_losses(&requests)
@@ -1601,7 +1567,8 @@ impl ShopInteractionHandler {
                 .map_err(|error| error.to_string())?;
                 let (base, percent, title, emoji, relation, reason) = if spec.key == "mana_shield" {
                     (
-                        ((losses.largest as f64 * 0.60) as i64).min(120),
+                        mana_recovery_base(spec.key, losses.largest, losses.total)
+                            .unwrap_or_default(),
                         "60% of your largest loss",
                         "MANA SHIELD",
                         "🏝️🛡️",
@@ -1610,7 +1577,8 @@ impl ShopInteractionHandler {
                     )
                 } else {
                     (
-                        ((losses.total as f64 * 0.35) as i64).min(120),
+                        mana_recovery_base(spec.key, losses.largest, losses.total)
+                            .unwrap_or_default(),
                         "35% of your last 24h losses",
                         "REGROWTH",
                         "🌲💚",
@@ -1676,41 +1644,17 @@ impl ShopInteractionHandler {
                         .lock()
                         .map_err(|_| "shop entropy lock is poisoned".to_owned())?;
                     (0..eligible.len())
-                        .map(|_| entropy.i64_inclusive(4, 14))
+                        .map(|_| {
+                            entropy.i64_inclusive(WILDFIRE_ROLL_RANGE.0, WILDFIRE_ROLL_RANGE.1)
+                        })
                         .collect::<Vec<_>>()
                 };
-                let requests: Vec<HostileLossRequest> = eligible
-                    .iter()
-                    .zip(rolls)
-                    .filter_map(|(victim, roll)| {
-                        let amount = scale_deflationary_minigame_jc_delta(
-                            roll as f64,
-                            self.config.minigame_scale,
-                        )
-                        .min(victim.balance)
-                        .max(0);
-                        (amount > 0).then(|| {
-                            hostile_request(
-                                victim.discord_id,
-                                guild_id,
-                                amount,
-                                "wildfire",
-                                user_id,
-                                format!("wildfire:{purchase_id}:{}", victim.discord_id),
-                                HostileDestination::Burn,
-                                None,
-                                self.config.hostile_min_balance,
-                                now,
-                                today,
-                            )
-                        })
-                    })
-                    .collect();
+                let requests = wildfire_requests(&hostile, &eligible, &rolls);
                 let reward_id = format!("wildfire:{purchase_id}");
                 let outcomes = self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
                     let outcomes = effects.apply_hostile_losses(&requests)?;
                     let (total, absorbed) = hostile_totals(&outcomes);
-                    let gain = (total as f64 * 0.45) as i64;
+                    let gain = wildfire_harvest(total);
                     if gain > 0 {
                         effects.adjust_balance(user_id, guild_id, gain, Some("manashop"), Some(user_id),
                             Some("hostile_loss_reward"), Some(&reward_id), Some("manashop wildfire harvest"),
@@ -1719,7 +1663,7 @@ impl ShopInteractionHandler {
                     Ok(outcomes)
                 }).await?;
                 let (total, absorbed) = hostile_totals(&outcomes);
-                let gain = (total as f64 * 0.45) as i64;
+                let gain = wildfire_harvest(total);
                 let shield = if absorbed > 0 {
                     format!(" Shields absorbed **{absorbed} {JOPACOIN_EMOTE}**.")
                 } else {
@@ -1780,14 +1724,19 @@ impl ShopInteractionHandler {
                 // The debt and its principal commit together: a player must
                 // never owe the bargain without having been paid it.
                 self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
-                    BuffService::new(effects, now).grant_dark_bargain(user_id, guild_id, 700, 800)
+                    BuffService::new(effects, now).grant_dark_bargain(
+                        user_id,
+                        guild_id,
+                        DARK_BARGAIN_AMOUNT_DUE,
+                        DARK_BARGAIN_PRINCIPAL,
+                    )
                 })
                 .await
                 .map_err(|_| "Could not strike the bargain; refunded.".to_owned())?;
                 Ok(format!(
                     "🌿💀 **DARK BARGAIN** — <@{user_id}> signs in red ink.\n+800 {JOPACOIN_EMOTE} now. 700 due in 7 days. Default: -1600 + bankruptcy +5 matches.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {})",
                     spec.cost,
-                    new_balance + 800
+                    new_balance + DARK_BARGAIN_PRINCIPAL
                 ))
             }
             _ => Err("Unknown item.".to_owned()),
@@ -3228,61 +3177,6 @@ fn land_for_color(color: &str) -> &'static str {
         "Black" => "Swamp",
         _ => "?",
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn hostile_request(
-    victim_id: i64,
-    guild_id: i64,
-    requested: i64,
-    kind: &str,
-    actor_id: i64,
-    event_key: String,
-    destination: HostileDestination,
-    recipient_id: Option<i64>,
-    min_balance: i64,
-    occurred_at: i64,
-    mana_date: &str,
-) -> HostileLossRequest {
-    HostileLossRequest {
-        victim_id,
-        guild_id,
-        requested,
-        kind: kind.to_owned(),
-        actor_id: Some(actor_id),
-        event_key,
-        destination,
-        recipient_id,
-        clamp_to_balance: true,
-        min_balance: Some(min_balance),
-        protect_self: false,
-        metadata: json!({
-            "kind": kind,
-            "attempted_loss": requested,
-            "destination": match destination {
-                HostileDestination::Burn => "burn",
-                HostileDestination::Player => "player",
-                HostileDestination::Reserve => "reserve",
-            },
-            "recipient_id": recipient_id,
-        }),
-        occurred_at,
-        mana_date: mana_date.to_owned(),
-    }
-}
-
-fn hostile_totals(
-    outcomes: &[Result<cama_db::shop_runtime::HostileLossSettlement, String>],
-) -> (i64, i64) {
-    outcomes
-        .iter()
-        .filter_map(|outcome| outcome.as_ref().ok())
-        .fold((0, 0), |(applied, absorbed), outcome| {
-            (
-                applied.saturating_add(outcome.applied),
-                absorbed.saturating_add(outcome.absorbed),
-            )
-        })
 }
 
 fn pacific_mana_day(timestamp: i64) -> Result<String, String> {

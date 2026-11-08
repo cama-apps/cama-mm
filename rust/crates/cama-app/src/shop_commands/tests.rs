@@ -1158,3 +1158,161 @@ fn test_handle_announce_shortfall_tolerates_lapsed_interaction() {
     assert!(!outcome.delivered);
     assert_eq!(outcome.response.phase, ResponsePhase::Initial);
 }
+
+fn shop_player(discord_id: i64, balance: i64) -> ShopPlayer {
+    ShopPlayer {
+        discord_id,
+        name: format!("player {discord_id}"),
+        wins: 0,
+        losses: 0,
+        glicko_rating: None,
+        glicko_rd: None,
+        glicko_volatility: None,
+        os_mu: None,
+        os_sigma: None,
+        balance,
+        lowest_balance: None,
+        last_double_or_nothing: None,
+    }
+}
+
+fn hostile_context(minigame_scale: f64) -> HostileEffectContext<'static> {
+    HostileEffectContext {
+        buyer_id: 4242,
+        guild_id: 9001,
+        purchase_id: "purchase-1",
+        occurred_at: 1_700_000_000,
+        mana_date: "2023-11-14",
+        config: ManaShopEffectConfig {
+            minigame_scale,
+            hostile_min_balance: 60,
+        },
+    }
+}
+
+#[test]
+fn pyroclasm_burns_deflationary_scaled_rolls_clamped_to_each_balance() {
+    let context = hostile_context(1.0);
+    let victims = [
+        shop_player(5000, 100),
+        shop_player(5001, 3),
+        shop_player(5002, 0),
+    ];
+    let requests = pyroclasm_requests(&context, &victims, &[20, 20, 20]);
+    let expected = scale_deflationary_minigame_jc_delta(20.0, 1.0);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| (request.victim_id, request.requested))
+            .collect::<Vec<_>>(),
+        // The broke victim scales to nothing and is skipped.
+        vec![(5000, expected.min(100)), (5001, 3)]
+    );
+    let first = &requests[0];
+    assert_eq!(first.kind, "pyroclasm");
+    assert_eq!(first.event_key, "pyroclasm:purchase-1:5000");
+    assert_eq!(first.destination, HostileDestination::Burn);
+    assert_eq!(first.recipient_id, None);
+    assert_eq!(first.actor_id, Some(4242));
+    assert_eq!(first.min_balance, Some(60));
+    assert!(first.clamp_to_balance);
+    assert_eq!(first.mana_date, "2023-11-14");
+    assert_eq!(first.metadata["destination"], "burn");
+    // The deployment's minigame scale changes every burn.
+    let doubled = pyroclasm_requests(&hostile_context(2.0), &victims[..1], &[20]);
+    assert_eq!(
+        doubled[0].requested,
+        scale_deflationary_minigame_jc_delta(20.0, 2.0)
+    );
+}
+
+#[test]
+fn pyroclasm_bounty_is_half_the_burn_capped_and_wildfire_keeps_45_percent() {
+    assert_eq!(pyroclasm_bounty(0), 0);
+    assert_eq!(pyroclasm_bounty(41), 20);
+    assert_eq!(pyroclasm_bounty(200), PYROCLASM_MAX_BOUNTY);
+    assert_eq!(wildfire_harvest(100), 45);
+    assert_eq!(wildfire_harvest(3), 1);
+}
+
+#[test]
+fn soul_harvest_drains_the_scaled_base_and_bonus_into_the_buyer() {
+    let context = hostile_context(1.0);
+    let victims = [
+        shop_player(5001, 100),
+        shop_player(5002, 100),
+        shop_player(5003, 2),
+    ];
+    let requests = soul_harvest_requests(&context, &victims, &[false, true, true]);
+    let base = scale_minigame_jc_delta(SOUL_HARVEST_DRAIN_PER_TARGET as f64, 1.0);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| (request.victim_id, request.requested))
+            .collect::<Vec<_>>(),
+        vec![(5001, base), (5002, base + 1), (5003, (base + 1).min(2))]
+    );
+    assert!(requests.iter().all(|request| {
+        request.destination == HostileDestination::Player
+            && request.recipient_id == Some(4242)
+            && request.event_key.starts_with("soul_harvest:purchase-1:")
+    }));
+}
+
+#[test]
+fn wildfire_burns_every_eligible_player_once() {
+    let context = hostile_context(1.0);
+    let victims = [shop_player(5001, 100), shop_player(5002, 100)];
+    let requests = wildfire_requests(&context, &victims, &[4, 14]);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| (request.event_key.as_str(), request.requested))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "wildfire:purchase-1:5001",
+                scale_deflationary_minigame_jc_delta(4.0, 1.0)
+            ),
+            (
+                "wildfire:purchase-1:5002",
+                scale_deflationary_minigame_jc_delta(14.0, 1.0)
+            ),
+        ]
+    );
+}
+
+#[test]
+fn hostile_totals_sum_only_settled_losses() {
+    let settled = |applied, absorbed| HostileLossSettlement {
+        event_id: 1,
+        event_key: "key".to_owned(),
+        requested: applied + absorbed,
+        attempted: applied + absorbed,
+        absorbed,
+        applied,
+        victim_balance_before: 100,
+        victim_balance_after: 100 - applied,
+        destination_balance_before: None,
+        destination_balance_after: None,
+        duplicate: false,
+        details: Vec::new(),
+    };
+    assert_eq!(
+        hostile_totals(&[
+            Ok(settled(10, 2)),
+            Err("rejected".to_owned()),
+            Ok(settled(5, 0)),
+        ]),
+        (15, 2)
+    );
+}
+
+#[test]
+fn mana_recovery_reads_the_right_loss_and_caps_at_120() {
+    assert_eq!(mana_recovery_base("mana_shield", 100, 1_000), Some(60));
+    assert_eq!(mana_recovery_base("mana_shield", 1_000, 1_000), Some(120));
+    assert_eq!(mana_recovery_base("regrowth", 1_000, 100), Some(35));
+    assert_eq!(mana_recovery_base("regrowth", 0, 10_000), Some(120));
+    assert_eq!(mana_recovery_base("aegis", 100, 100), None);
+}

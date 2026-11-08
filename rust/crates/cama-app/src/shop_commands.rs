@@ -9,7 +9,14 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use cama_db::package_deal_repository::calculate_package_deal_cost;
-use cama_domain::economy_scaling::{DailyRewardPolicy, adjust_generated_jc_reward};
+use cama_db::shop_runtime::{
+    HostileDestination, HostileLossRequest, HostileLossSettlement, ShopPlayer,
+};
+use cama_domain::economy_scaling::{
+    DailyRewardPolicy, adjust_generated_jc_reward, scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+};
+use serde_json::json;
 
 pub const SHOP_ANNOUNCE_COST: i64 = 10;
 pub const SHOP_ANNOUNCE_TARGET_COST: i64 = 100;
@@ -1176,31 +1183,205 @@ pub fn generated_recovery(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HostileLossRequest {
-    pub victim_id: i64,
+/// Settings the hostile mana-shop effects read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ManaShopEffectConfig {
+    pub minigame_scale: f64,
+    /// Victims below this balance are never charged.
+    pub hostile_min_balance: i64,
+}
+
+/// The purchase a hostile mana-shop effect settles for.
+#[derive(Clone, Copy, Debug)]
+pub struct HostileEffectContext<'a> {
+    pub buyer_id: i64,
     pub guild_id: i64,
-    pub amount: i64,
-    pub kind: &'static str,
-    pub event_key: String,
-    pub destination: &'static str,
-    pub recipient_id: Option<i64>,
-    pub clamp_to_balance: bool,
+    pub purchase_id: &'a str,
+    pub occurred_at: i64,
+    /// The Pacific mana day the protection pools are read for.
+    pub mana_date: &'a str,
+    pub config: ManaShopEffectConfig,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostilePurchaseDisposition {
-    Apply,
-    RefundAndReleaseDailySlot,
-}
+/// Pyroclasm scorches up to this many randomly sampled players.
+pub const PYROCLASM_TARGETS: usize = 3;
+/// Inclusive range of each Pyroclasm burn roll, before deflationary scaling.
+pub const PYROCLASM_ROLL_RANGE: (i64, i64) = (12, 28);
+/// The buyer keeps half the burned total, up to this many JopaCoin.
+pub const PYROCLASM_MAX_BOUNTY: i64 = 35;
+/// Inclusive range of each Wildfire burn roll, before deflationary scaling.
+pub const WILDFIRE_ROLL_RANGE: (i64, i64) = (4, 14);
+/// Soul Harvest drains this much from every eligible player, before scaling.
+pub const SOUL_HARVEST_DRAIN_PER_TARGET: i64 = 2;
+/// Chance that Soul Harvest drains one extra JopaCoin from a player.
+pub const SOUL_HARVEST_BONUS_DRAIN_CHANCE: f64 = 0.20;
+/// Reprieve reconciles hostile losses from this far back.
+pub const REPRIEVE_LOOKBACK_SECONDS: i64 = 24 * 3_600;
+/// Mana Shield and Regrowth recover at most this much.
+pub const MANA_RECOVERY_CAP: i64 = 120;
+/// Dark Bargain pays this principal now...
+pub const DARK_BARGAIN_PRINCIPAL: i64 = 800;
+/// ...and owes this much in seven days.
+pub const DARK_BARGAIN_AMOUNT_DUE: i64 = 700;
 
+/// One hostile mana-shop loss against `victim_id`, keyed to the purchase so a
+/// retried settlement reuses it.
 #[must_use]
-pub fn hostile_purchase_disposition(requests: &[HostileLossRequest]) -> HostilePurchaseDisposition {
-    if requests.is_empty() {
-        HostilePurchaseDisposition::RefundAndReleaseDailySlot
-    } else {
-        HostilePurchaseDisposition::Apply
+pub fn hostile_effect_request(
+    context: &HostileEffectContext<'_>,
+    victim_id: i64,
+    requested: i64,
+    kind: &str,
+    destination: HostileDestination,
+    recipient_id: Option<i64>,
+) -> HostileLossRequest {
+    HostileLossRequest {
+        victim_id,
+        guild_id: context.guild_id,
+        requested,
+        kind: kind.to_owned(),
+        actor_id: Some(context.buyer_id),
+        event_key: format!("{kind}:{}:{victim_id}", context.purchase_id),
+        destination,
+        recipient_id,
+        clamp_to_balance: true,
+        min_balance: Some(context.config.hostile_min_balance),
+        protect_self: false,
+        metadata: json!({
+            "kind": kind,
+            "attempted_loss": requested,
+            "destination": match destination {
+                HostileDestination::Burn => "burn",
+                HostileDestination::Player => "player",
+                HostileDestination::Reserve => "reserve",
+            },
+            "recipient_id": recipient_id,
+        }),
+        occurred_at: context.occurred_at,
+        mana_date: context.mana_date.to_owned(),
     }
+}
+
+/// Burn requests for one roll per sampled victim. A roll that scales to
+/// nothing, or a victim with nothing left, is skipped.
+fn burn_requests(
+    context: &HostileEffectContext<'_>,
+    victims: &[ShopPlayer],
+    rolls: &[i64],
+    kind: &str,
+) -> Vec<HostileLossRequest> {
+    victims
+        .iter()
+        .zip(rolls)
+        .filter_map(|(victim, roll)| {
+            let amount =
+                scale_deflationary_minigame_jc_delta(*roll as f64, context.config.minigame_scale)
+                    .min(victim.balance)
+                    .max(0);
+            (amount > 0).then(|| {
+                hostile_effect_request(
+                    context,
+                    victim.discord_id,
+                    amount,
+                    kind,
+                    HostileDestination::Burn,
+                    None,
+                )
+            })
+        })
+        .collect()
+}
+
+/// Pyroclasm: burn one [`PYROCLASM_ROLL_RANGE`] roll from each of the sampled
+/// victims.
+#[must_use]
+pub fn pyroclasm_requests(
+    context: &HostileEffectContext<'_>,
+    victims: &[ShopPlayer],
+    rolls: &[i64],
+) -> Vec<HostileLossRequest> {
+    burn_requests(context, victims, rolls, "pyroclasm")
+}
+
+/// The buyer's share of what Pyroclasm actually burned.
+#[must_use]
+pub const fn pyroclasm_bounty(burned: i64) -> i64 {
+    let half = burned / 2;
+    if half < PYROCLASM_MAX_BOUNTY {
+        half
+    } else {
+        PYROCLASM_MAX_BOUNTY
+    }
+}
+
+/// Wildfire: burn one [`WILDFIRE_ROLL_RANGE`] roll from every eligible player.
+#[must_use]
+pub fn wildfire_requests(
+    context: &HostileEffectContext<'_>,
+    victims: &[ShopPlayer],
+    rolls: &[i64],
+) -> Vec<HostileLossRequest> {
+    burn_requests(context, victims, rolls, "wildfire")
+}
+
+/// The buyer's 45% share of what Wildfire actually burned.
+#[must_use]
+pub fn wildfire_harvest(burned: i64) -> i64 {
+    (burned as f64 * 0.45) as i64
+}
+
+/// Soul Harvest: drain the scaled base, plus one when that player's bonus
+/// draw hit, from every eligible player into the buyer.
+#[must_use]
+pub fn soul_harvest_requests(
+    context: &HostileEffectContext<'_>,
+    victims: &[ShopPlayer],
+    bonus_drains: &[bool],
+) -> Vec<HostileLossRequest> {
+    let base = scale_minigame_jc_delta(
+        SOUL_HARVEST_DRAIN_PER_TARGET as f64,
+        context.config.minigame_scale,
+    );
+    victims
+        .iter()
+        .zip(bonus_drains)
+        .map(|(victim, bonus)| {
+            hostile_effect_request(
+                context,
+                victim.discord_id,
+                (base + i64::from(*bonus)).min(victim.balance),
+                "soul_harvest",
+                HostileDestination::Player,
+                Some(context.buyer_id),
+            )
+        })
+        .collect()
+}
+
+/// Applied and shield-absorbed totals across one batch of settlements.
+#[must_use]
+pub fn hostile_totals(outcomes: &[Result<HostileLossSettlement, String>]) -> (i64, i64) {
+    outcomes
+        .iter()
+        .filter_map(|outcome| outcome.as_ref().ok())
+        .fold((0, 0), |(applied, absorbed), outcome| {
+            (
+                applied.saturating_add(outcome.applied),
+                absorbed.saturating_add(outcome.absorbed),
+            )
+        })
+}
+
+/// What Mana Shield (60% of the largest loss) or Regrowth (35% of all losses)
+/// recovers from the last day, before the daily generated-reward adjustment.
+#[must_use]
+pub fn mana_recovery_base(item_key: &str, largest_loss: i64, total_loss: i64) -> Option<i64> {
+    let base = match item_key {
+        "mana_shield" => (largest_loss as f64 * 0.60) as i64,
+        "regrowth" => (total_loss as f64 * 0.35) as i64,
+        _ => return None,
+    };
+    Some(base.min(MANA_RECOVERY_CAP))
 }
 
 #[cfg(test)]
