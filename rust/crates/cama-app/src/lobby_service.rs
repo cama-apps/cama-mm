@@ -244,14 +244,6 @@ pub struct LobbySnapshot {
     pub message_ids: LobbyMessageIds,
 }
 
-#[derive(Clone, Debug, Default)]
-struct ReadycheckRecord {
-    message_id: Option<MessageId>,
-    channel_id: Option<ChannelId>,
-    lobby_ids: BTreeSet<UserId>,
-    reacted: BTreeMap<UserId, String>,
-}
-
 #[derive(Clone, Debug)]
 struct LobbyRecord {
     scope: LobbyScope,
@@ -260,7 +252,6 @@ struct LobbyRecord {
     players: BTreeSet<UserId>,
     player_join_times: BTreeMap<UserId, f64>,
     message_ids: LobbyMessageIds,
-    readycheck: ReadycheckRecord,
 }
 
 impl LobbyRecord {
@@ -272,7 +263,6 @@ impl LobbyRecord {
             players: BTreeSet::new(),
             player_join_times: BTreeMap::new(),
             message_ids: LobbyMessageIds::default(),
-            readycheck: ReadycheckRecord::default(),
         }
     }
 
@@ -285,20 +275,6 @@ impl LobbyRecord {
             player_join_times: self.player_join_times.clone(),
             message_ids: self.message_ids.clone(),
         }
-    }
-
-    /// Replace only the fields a durable write republishes.
-    ///
-    /// `readycheck` is in-memory only and is never carried by a durable write,
-    /// so a ready-check mutation that landed while the persist was running is
-    /// preserved instead of being rolled back by the publish.
-    fn adopt_durable(&mut self, persisted: Self) {
-        self.scope = persisted.scope;
-        self.created_by = persisted.created_by;
-        self.created_at_ns = persisted.created_at_ns;
-        self.players = persisted.players;
-        self.player_join_times = persisted.player_join_times;
-        self.message_ids = persisted.message_ids;
     }
 
     fn from_persisted(state: PersistedLobbyState) -> Option<Self> {
@@ -342,7 +318,6 @@ impl LobbyRecord {
                 embed_message_id: state.embed_message_id.map(MessageId),
                 origin_channel_id: state.origin_channel_id.map(ChannelId),
             },
-            readycheck: ReadycheckRecord::default(),
         })
     }
 
@@ -477,13 +452,7 @@ where
     /// Publish a record whose durable write already succeeded. Callers hold
     /// [`Self::lock_writes`].
     fn publish_record(&self, state: &mut LobbyState, record: LobbyRecord) {
-        let scope = record.scope;
-        match state.lobbies.get_mut(&scope) {
-            Some(live) => live.adopt_durable(record),
-            None => {
-                state.lobbies.insert(scope, record);
-            }
-        }
+        state.lobbies.insert(record.scope, record);
     }
 
     fn is_low_skill_eligible(&self, player_id: UserId, guild_id: GuildId) -> bool {
@@ -953,29 +922,6 @@ where
         Ok(removed)
     }
 
-    /// Reconcile one ready-check generation with the lobby's current roster.
-    ///
-    /// Cross-lobby match eviction mutates membership before any best-effort
-    /// Discord repaint.  Keeping this reconciliation inside the same typed
-    /// service means a failed display edit cannot leave departed players
-    /// counted toward the ready quorum.
-    pub fn prune_readycheck_to_lobby_members(&self, scope: LobbyScope) -> usize {
-        let mut state = self.lock_state();
-        let Some(lobby) = state.lobbies.get_mut(&scope) else {
-            return 0;
-        };
-        let players = lobby.players.clone();
-        lobby
-            .readycheck
-            .lobby_ids
-            .retain(|player_id| players.contains(player_id));
-        lobby
-            .readycheck
-            .reacted
-            .retain(|player_id, _| players.contains(player_id));
-        lobby.readycheck.reacted.len()
-    }
-
     #[must_use]
     pub const fn ready_threshold(&self) -> usize {
         self.ready_threshold
@@ -998,64 +944,6 @@ where
         let mut state = self.lock_state();
         self.publish_record(&mut state, candidate);
         Ok(true)
-    }
-
-    pub fn set_readycheck_state(
-        &self,
-        scope: LobbyScope,
-        message_id: MessageId,
-        channel_id: ChannelId,
-        lobby_ids: BTreeSet<UserId>,
-        initial_reacted: BTreeMap<UserId, String>,
-    ) -> bool {
-        let mut state = self.lock_state();
-        let Some(lobby) = state.lobbies.get_mut(&scope) else {
-            return false;
-        };
-        lobby.readycheck = ReadycheckRecord {
-            message_id: Some(message_id),
-            channel_id: Some(channel_id),
-            lobby_ids,
-            reacted: initial_reacted,
-        };
-        true
-    }
-
-    #[must_use]
-    pub fn get_readycheck_message_id(&self, scope: LobbyScope) -> Option<MessageId> {
-        self.lock_state()
-            .lobbies
-            .get(&scope)
-            .and_then(|lobby| lobby.readycheck.message_id)
-    }
-
-    #[must_use]
-    pub fn get_readycheck_channel_id(&self, scope: LobbyScope) -> Option<ChannelId> {
-        self.lock_state()
-            .lobbies
-            .get(&scope)
-            .and_then(|lobby| lobby.readycheck.channel_id)
-    }
-
-    pub fn add_readycheck_reaction(
-        &self,
-        scope: LobbyScope,
-        player_id: UserId,
-        tag: impl Into<String>,
-    ) -> bool {
-        let mut state = self.lock_state();
-        let Some(lobby) = state.lobbies.get_mut(&scope) else {
-            return false;
-        };
-        if lobby.readycheck.message_id.is_none() || !lobby.readycheck.lobby_ids.contains(&player_id)
-        {
-            return false;
-        }
-        lobby
-            .readycheck
-            .reacted
-            .insert(player_id, tag.into())
-            .is_none()
     }
 
     pub fn reset_lobby(&self, scope: LobbyScope) -> bool {

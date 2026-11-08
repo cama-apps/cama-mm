@@ -738,7 +738,7 @@ fn test_high_rated_player_can_view_but_not_create_lowskill_lobby() {
 }
 
 #[test]
-fn test_lobby_metadata_and_readychecks_are_isolated_by_kind() {
+fn test_lobby_metadata_is_isolated_by_kind() {
     let service = service(FakePlayers::default(), 12);
     let open = scope(LobbyKind::Open);
     let low_skill = scope(LobbyKind::LowSkill);
@@ -766,20 +766,6 @@ fn test_lobby_metadata_and_readychecks_are_isolated_by_kind() {
             }
         ) == Ok(true)
     );
-    assert!(service.set_readycheck_state(
-        open,
-        MessageId(301),
-        ChannelId(401),
-        users(&[1]),
-        BTreeMap::new(),
-    ));
-    assert!(service.set_readycheck_state(
-        low_skill,
-        MessageId(302),
-        ChannelId(402),
-        users(&[2]),
-        BTreeMap::new(),
-    ));
     assert_eq!(
         service
             .get_lobby(open)
@@ -793,16 +779,10 @@ fn test_lobby_metadata_and_readychecks_are_isolated_by_kind() {
         Some(MessageId(102))
     );
     assert_eq!(
-        service.get_readycheck_message_id(open),
-        Some(MessageId(301))
-    );
-    assert_eq!(
-        service.get_readycheck_message_id(low_skill),
-        Some(MessageId(302))
-    );
-    assert_eq!(
-        service.get_readycheck_channel_id(low_skill),
-        Some(ChannelId(402))
+        service
+            .get_lobby(low_skill)
+            .and_then(|lobby| lobby.message_ids.channel_id),
+        Some(ChannelId(202))
     );
 }
 
@@ -1389,55 +1369,6 @@ fn test_a_join_survives_a_concurrent_removal_that_cloned_before_it() {
         .expect("saved lobby row");
     assert_eq!(saved.players, vec![10, 12]);
     assert!(saved.player_join_times.contains_key(&12));
-}
-
-#[test]
-fn test_a_concurrent_readycheck_survives_a_durable_write() {
-    let persistence = Arc::new(HookPersistence::default());
-    let service = Arc::new(
-        service(FakePlayers::default(), 12)
-            .with_persistence(persistence.clone())
-            .expect("hydrate hook persistence"),
-    );
-    assert_joined(&service.join_lobby(UserId(10), scope(LobbyKind::Open)));
-    let weak_service = Arc::downgrade(&service);
-    persistence.set_hook(move || {
-        // Stand in for a ready-check mutation landing while the durable write
-        // is in flight: it touches only in-memory state, so publishing the
-        // persisted record must not roll it back.
-        let service = weak_service.upgrade().expect("service remains alive");
-        // try_lock, not lock: a durable write that still held the state lock
-        // would deadlock here instead of failing the assertion.
-        let mut state = service
-            .state
-            .try_lock()
-            .expect("the state lock is free during a durable write");
-        if let Some(lobby) = state.lobbies.get_mut(&scope(LobbyKind::Open)) {
-            lobby
-                .readycheck
-                .reacted
-                .insert(UserId(10), "yes".to_owned());
-        }
-    });
-
-    assert!(
-        service
-            .try_set_lobby_message_ids(scope(LobbyKind::Open), LobbyMessageIds::default())
-            .expect("set message ids")
-    );
-
-    assert_eq!(
-        service
-            .lock_state()
-            .lobbies
-            .get(&scope(LobbyKind::Open))
-            .expect("lobby remains")
-            .readycheck
-            .reacted
-            .len(),
-        1,
-        "the publish preserved the in-memory ready-check reaction"
-    );
 }
 
 #[test]
