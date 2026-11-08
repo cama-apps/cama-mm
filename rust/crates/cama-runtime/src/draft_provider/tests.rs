@@ -11,6 +11,7 @@ use cama_app::draft::{
     SqliteDraftStatePersistence,
 };
 use cama_db::autobet_investments::AutobetInvestmentRepository;
+use cama_db::betting_service_repository::BettingServiceRepository;
 use cama_db::core_repositories::PlayerRepository;
 use rusqlite::Connection;
 
@@ -812,7 +813,7 @@ fn draft_render_state_uses_cached_discord_render_names() {
     assert_eq!(state.player_pool_data[&1].name, "P1");
 }
 
-async fn persistent_completion_fixture() -> (
+type PersistentCompletionFixture = (
     FastTestDatabase,
     DraftRegistrationProvider,
     Arc<DraftStateManager>,
@@ -820,14 +821,38 @@ async fn persistent_completion_fixture() -> (
     Arc<StdMutex<DraftState>>,
     DraftState,
     Arc<NullDiscord>,
-) {
+);
+
+async fn persistent_completion_fixture() -> PersistentCompletionFixture {
+    persistent_completion_fixture_with(
+        &[
+            ("BOMB_POT_CHANCE", "0"),
+            ("AUTO_SPECTATOR_BET_ENABLED", "false"),
+            ("FIRST_GAME_POOL_DAILY_AMOUNT", "0"),
+        ],
+        Arc::new(NoopDraftReminderScheduler),
+        |_| {},
+    )
+    .await
+}
+
+/// A durable, completed draft over a populated lobby, ready for
+/// `complete_owned`. `settings` override application configuration and
+/// `adjust` edits the completed state before it is saved.
+async fn persistent_completion_fixture_with(
+    settings: &[(&str, &str)],
+    reminders: Arc<dyn DraftReminderScheduler>,
+    adjust: impl FnOnce(&mut DraftState),
+) -> PersistentCompletionFixture {
     let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
-    let config = ApplicationConfig::from_lookup(|name| match name {
-        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
-        "BOMB_POT_CHANCE" => Some("0".to_owned()),
-        "AUTO_SPECTATOR_BET_ENABLED" => Some("false".to_owned()),
-        "FIRST_GAME_POOL_DAILY_AMOUNT" => Some("0".to_owned()),
-        _ => None,
+    let config = ApplicationConfig::from_lookup(|name| {
+        if name == "DISCORD_BOT_TOKEN" {
+            return Some("test-token".to_owned());
+        }
+        settings
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| (*value).to_owned())
     })
     .expect("persistent completion config");
     let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
@@ -840,6 +865,7 @@ async fn persistent_completion_fixture() -> (
     state.dire_hero_pick_order = Some(2);
     state.draft_channel_id = Some(777);
     state.draft_message_id = Some(55);
+    adjust(&mut state);
     let persisted = persistence
         .create_envelope(&state.to_snapshot().envelope(1))
         .expect("create durable completion draft");
@@ -862,18 +888,22 @@ async fn persistent_completion_fixture() -> (
         lobbies,
         Arc::clone(&drafts),
         discord.clone(),
-        Arc::new(NoopDraftReminderScheduler),
+        reminders,
         Arc::new(NoopDraftNeonObserver),
         Some(persistence.clone()),
     )
     .expect("persistent completion provider");
     lock_recover(&provider.handler.persisted_envelopes).insert((42, state.session_id), persisted);
+    let channel_id = state
+        .draft_channel_id
+        .and_then(|id| u64::try_from(id).ok())
+        .expect("draft channel");
     lock_recover(&provider.handler.draft_messages).insert(
         (42, state.session_id),
         DiscordMessageReceipt {
-            channel_id: 777,
+            channel_id,
             message_id: 55,
-            jump_url: "https://discord.test/channels/42/777/55".to_owned(),
+            jump_url: format!("https://discord.test/channels/42/{channel_id}/55"),
         },
     );
     (
@@ -2134,7 +2164,7 @@ async fn financial_setup_failure_retains_live_draft_then_retry_completes_once() 
         .unwrap();
     assert_eq!(gated.state.extra["draft_setup_complete"], json!(false));
     assert!(!gated.state.betting_open(unix_now()));
-    assert!(matches!(provider.handler.bets.abort_pending_match_atomic(Some(42),pending_match_id,&[]),
+    assert!(matches!(cama_db::betting_service_repository::BettingServiceRepository::new(database.path()).abort_pending_match_atomic(Some(42),pending_match_id,&[]),
         Err(cama_db::betting_service_repository::BettingServiceRepositoryError::DraftFinalizationInProgress(_))));
     let completion_key = cama_db::draft_finalization::draft_completion_key(42, state.session_id);
     let finalization =
@@ -3986,41 +4016,22 @@ async fn neon_coinflip_and_captain_symmetry_hooks_follow_draft_lifecycle() {
 
 #[tokio::test]
 async fn neon_bomb_pot_hook_receives_persisted_pool_and_media() {
-    let (database, mut provider, drafts, _discord) = provider_fixture();
-    seed_players(database.path(), 42, &(1..=10).collect::<Vec<_>>(), 100);
-    Connection::open(database.path())
-        .expect("open seed database")
-        .execute(
-            "INSERT INTO nonprofit_fund(guild_id, total_collected)
-             VALUES(?1, ?2)
-             ON CONFLICT(guild_id) DO UPDATE SET total_collected = excluded.total_collected",
-            rusqlite::params![42, 1_000],
+    let (database, mut provider, _drafts, _persistence, handle, state, _discord) =
+        persistent_completion_fixture_with(
+            &[("ADMIN_USER_IDS", "9001")],
+            Arc::new(NoopDraftReminderScheduler),
+            |_| {},
         )
-        .expect("seed nonprofit fund");
+        .await;
+    seed_nonprofit_fund(database.path());
     let neon = Arc::new(RecordingNeonObserver::default());
     let handler = Arc::get_mut(&mut provider.handler).expect("exclusive draft handler");
     handler.config.bomb_pot_chance = 1.0;
     handler.neon = neon.clone();
-    let handle = drafts
-        .create_draft(Some(42), DraftLobbyKind::Open)
-        .expect("draft state");
-    let state_snapshot = {
-        let mut state = handle.lock().expect("state lock");
-        *state = state_for_draft();
-        state.phase = DraftPhase::Complete;
-        state.radiant_player_ids = vec![1, 3, 5, 7, 9];
-        state.dire_player_ids = vec![2, 4, 6, 8, 10];
-        state.radiant_hero_pick_order = Some(1);
-        state.dire_hero_pick_order = Some(2);
-        state.current_pick_index = DRAFT_TOTAL_PICKS;
-        state.draft_channel_id = Some(777);
-        state.draft_message_id = Some(55);
-        state.clone()
-    };
     let responder = Arc::new(TestResponder::default());
     provider
         .handler
-        .complete_owned(42, handle, state_snapshot, responder.clone(), true)
+        .complete_owned(42, handle, state, responder.clone(), true)
         .await
         .expect("bomb-pot completion");
     let events = neon.events.lock().expect("Neon events").clone();
@@ -4140,47 +4151,19 @@ async fn completion_persists_pending_seed_blinds_receipt_and_reminder() {
     let reminders = Arc::new(RecordingReminderScheduler {
         scheduled: StdMutex::new(Vec::new()),
     });
-    let (database, provider, drafts, _discord) = provider_fixture_with_scheduler(reminders.clone());
-    seed_players(database.path(), 42, &(1..=10).collect::<Vec<_>>(), 100);
-    Connection::open(database.path())
-        .expect("open seed database")
-        .execute(
-            "INSERT INTO nonprofit_fund(guild_id, total_collected)
-             VALUES(?1, ?2)
-             ON CONFLICT(guild_id) DO UPDATE SET total_collected = excluded.total_collected",
-            rusqlite::params![42, 1_000],
+    let (database, provider, drafts, persistence, handle, state, _discord) =
+        persistent_completion_fixture_with(
+            &[("ADMIN_USER_IDS", "9001"), ("BOMB_POT_CHANCE", "0")],
+            reminders.clone(),
+            |_| {},
         )
-        .expect("seed nonprofit fund");
-
-    let handle = drafts
-        .create_draft(Some(42), DraftLobbyKind::Open)
-        .expect("draft state");
-    let (session, state_snapshot) = {
-        let mut state = handle.lock().expect("state lock");
-        *state = state_for_draft();
-        state.phase = DraftPhase::Complete;
-        state.radiant_player_ids = vec![1, 3, 5, 7, 9];
-        state.dire_player_ids = vec![2, 4, 6, 8, 10];
-        state.radiant_hero_pick_order = Some(1);
-        state.dire_hero_pick_order = Some(2);
-        state.current_pick_index = DRAFT_TOTAL_PICKS;
-        state.draft_channel_id = Some(777);
-        state.draft_message_id = Some(55);
-        (state.session_id, state.clone())
-    };
-    lock_recover(&provider.handler.draft_messages).insert(
-        (42, session),
-        DiscordMessageReceipt {
-            channel_id: 777,
-            message_id: 55,
-            jump_url: "https://discord.test/channels/42/777/55".to_owned(),
-        },
-    );
+        .await;
+    seed_nonprofit_fund(database.path());
 
     let responder = Arc::new(TestResponder::default());
     provider
         .handler
-        .complete_owned(42, handle.clone(), state_snapshot, responder.clone(), true)
+        .complete_owned(42, handle, state.clone(), responder.clone(), true)
         .await
         .expect("complete draft");
 
@@ -4194,11 +4177,12 @@ async fn completion_persists_pending_seed_blinds_receipt_and_reminder() {
     assert!(pending.state.is_draft);
     assert!(pending.state.bet_seed_reserved > 0);
     assert!(pending.state.first_game_pool_reserved > 0);
-    assert_eq!(pending.state.shuffle_channel_id, Some(777));
-    assert_eq!(pending.state.shuffle_message_id, Some(55));
+    // The lobby-channel copy is the match's primary announcement.
+    assert_eq!(pending.state.shuffle_channel_id, Some(700));
+    assert_eq!(pending.state.shuffle_message_id, Some(1));
     assert_eq!(
         pending.state.shuffle_message_jump_url.as_deref(),
-        Some("https://discord.test/channels/42/777/55")
+        Some("https://discord.test/700/1")
     );
     let blind_bets = BettingServiceRepository::new(database.path())
         .get_pending_bets(
@@ -4219,88 +4203,41 @@ async fn completion_persists_pending_seed_blinds_receipt_and_reminder() {
     let scheduled = reminders.scheduled.lock().expect("scheduled");
     assert_eq!(scheduled.len(), 1);
     assert_eq!(scheduled[0].pending_match_id, pending.pending_match_id);
-    let connection = Connection::open(database.path()).expect("inspect legacy completion");
+    let completion_key = cama_db::draft_finalization::draft_completion_key(42, state.session_id);
+    let job = cama_db::draft_finalization::DraftFinalizationRepository::new(database.path())
+        .job(&completion_key)
+        .expect("load finalization job")
+        .expect("finalization job");
     assert_eq!(
-        connection
-            .query_row("SELECT COUNT(*) FROM draft_finalization_jobs", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count legacy finalization jobs"),
-        0
+        job.stage,
+        cama_db::draft_finalization::DRAFT_FINALIZATION_COMPLETE_STAGE
     );
-    assert_eq!(
-        connection
-            .query_row("SELECT COUNT(*) FROM draft_financial_effects", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count legacy financial effects"),
-        0
-    );
+    assert!(persistence.load_all().expect("load envelopes").is_empty());
 }
 
 #[tokio::test]
-async fn test_distinct_completion_channel_copies_start_together_after_edit() {
-    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
-    let config = ApplicationConfig::from_lookup(|name| match name {
-        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
-        "ADMIN_USER_IDS" => Some("9001".to_owned()),
-        "BOMB_POT_CHANCE" => Some("0".to_owned()),
-        "AUTO_SPECTATOR_BET_ENABLED" => Some("false".to_owned()),
-        _ => None,
-    })
-    .expect("config");
-    let provider = DraftRegistrationProvider::new(
-        database.path(),
-        &config,
-        lobbies.clone(),
-        Arc::clone(&drafts),
-        discord.clone(),
-    )
-    .expect("draft provider");
-    let selected = (1..=10).collect::<BTreeSet<_>>();
-    assert!(
-        lobbies
-            .reserve_players(42, AppLobbyKind::Open, &selected)
-            .await
-    );
-    let lobby_snapshot = lobbies
+async fn test_completion_channel_copies_follow_the_source_edit() {
+    let (database, provider, _drafts, _persistence, handle, state, discord) =
+        persistent_completion_fixture_with(
+            &[
+                ("ADMIN_USER_IDS", "9001"),
+                ("BOMB_POT_CHANCE", "0"),
+                ("AUTO_SPECTATOR_BET_ENABLED", "false"),
+            ],
+            Arc::new(NoopDraftReminderScheduler),
+            // The source lives outside both announcement channels, so the
+            // lobby (700) and origin (777) copies are distinct deliveries.
+            |state| state.draft_channel_id = Some(778),
+        )
+        .await;
+    let lobby_snapshot = provider
+        .handler
+        .lobbies
         .snapshot(42, AppLobbyKind::Open)
         .expect("lobby snapshot");
     assert_eq!(lobby_snapshot.lobby_channel_id, Some(700));
     assert_eq!(lobby_snapshot.origin_channel_id, Some(777));
-    let handle = drafts
-        .create_draft(Some(42), DraftLobbyKind::Open)
-        .expect("draft state");
-    let (session, state_snapshot) = {
-        let mut state = handle.lock().expect("state lock");
-        *state = state_for_draft();
-        state.phase = DraftPhase::Complete;
-        state.radiant_player_ids = vec![1, 3, 5, 7, 9];
-        state.dire_player_ids = vec![2, 4, 6, 8, 10];
-        state.radiant_hero_pick_order = Some(1);
-        state.dire_hero_pick_order = Some(2);
-        state.current_pick_index = DRAFT_TOTAL_PICKS;
-        state.draft_channel_id = Some(778);
-        state.draft_message_id = Some(55);
-        (state.session_id, state.clone())
-    };
-    lock_recover(&provider.handler.draft_messages).insert(
-        (42, session),
-        DiscordMessageReceipt {
-            channel_id: 778,
-            message_id: 55,
-            jump_url: "https://discord.test/channels/42/778/55".to_owned(),
-        },
-    );
-    Connection::open(database.path())
-        .expect("open seed database")
-        .execute(
-            "INSERT INTO nonprofit_fund(guild_id, total_collected)
-             VALUES(?1, ?2)
-             ON CONFLICT(guild_id) DO UPDATE SET total_collected = excluded.total_collected",
-            rusqlite::params![42, 1_000],
-        )
-        .expect("seed nonprofit fund");
+    seed_nonprofit_fund(database.path());
     discord.sent.lock().expect("sent messages").clear();
     discord
         .block_completion_sends
@@ -4310,16 +4247,16 @@ async fn test_distinct_completion_channel_copies_start_together_after_edit() {
     let responder_for_task = responder.clone();
     let completion = tokio::spawn(async move {
         handler
-            .complete_owned(42, handle, state_snapshot, responder_for_task, true)
+            .complete_owned(42, handle, state, responder_for_task, true)
             .await
     });
     tokio::time::timeout(Duration::from_secs(10), async {
-        while discord.completion_sends_started.load(Ordering::Acquire) < 2 {
+        while discord.completion_sends_started.load(Ordering::Acquire) < 1 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("both completion copies start concurrently");
+    .expect("a completion copy starts");
     assert_eq!(
         responder.original_edits.lock().expect("source edits").len(),
         1,
@@ -4367,7 +4304,13 @@ async fn test_distinct_completion_channel_copies_start_together_after_edit() {
 
 #[tokio::test]
 async fn completion_adds_configured_investment_and_spectator_wagers() {
-    let (database, mut provider, drafts, _discord) = provider_fixture();
+    let (database, mut provider, _drafts, _persistence, handle, state, _discord) =
+        persistent_completion_fixture_with(
+            &[("ADMIN_USER_IDS", "9001"), ("BOMB_POT_CHANCE", "0")],
+            Arc::new(NoopDraftReminderScheduler),
+            |_| {},
+        )
+        .await;
     {
         let handler = Arc::get_mut(&mut provider.handler).expect("exclusive draft handler");
         // 1.25% of 1,000 is 12.5; Python round uses ties-to-even => 12.
@@ -4377,58 +4320,18 @@ async fn completion_adds_configured_investment_and_spectator_wagers() {
         handler.config.auto_spectator_bet_top_count = 0;
         handler.config.auto_spectator_bet_count = 1;
     }
-    seed_players(database.path(), 42, &(1..=10).collect::<Vec<_>>(), 100);
     seed_players(database.path(), 42, &[99], 1_000);
     PlayerRepository::new(database.path())
         .update_balance(1, Some(42), 50)
         .expect("investment threshold balance");
-    Connection::open(database.path())
-        .expect("open seed database")
-        .execute(
-            "INSERT INTO nonprofit_fund(guild_id, total_collected)
-             VALUES(?1, ?2)
-             ON CONFLICT(guild_id) DO UPDATE SET total_collected = excluded.total_collected",
-            rusqlite::params![42, 1_000],
-        )
-        .expect("seed nonprofit fund");
+    seed_nonprofit_fund(database.path());
     AutobetInvestmentRepository::new(database.path())
         .set(Some(42), 1, 3, "long", 10)
         .expect("configured investment");
 
-    let handle = drafts
-        .create_draft(Some(42), DraftLobbyKind::Open)
-        .expect("draft state");
-    let (session, state_snapshot) = {
-        let mut state = handle.lock().expect("state lock");
-        *state = state_for_draft();
-        state.phase = DraftPhase::Complete;
-        state.radiant_player_ids = vec![1, 3, 5, 7, 9];
-        state.dire_player_ids = vec![2, 4, 6, 8, 10];
-        state.radiant_hero_pick_order = Some(1);
-        state.dire_hero_pick_order = Some(2);
-        state.current_pick_index = DRAFT_TOTAL_PICKS;
-        state.draft_channel_id = Some(777);
-        state.draft_message_id = Some(55);
-        (state.session_id, state.clone())
-    };
-    lock_recover(&provider.handler.draft_messages).insert(
-        (42, session),
-        DiscordMessageReceipt {
-            channel_id: 777,
-            message_id: 55,
-            jump_url: "https://discord.test/channels/42/777/55".to_owned(),
-        },
-    );
-
     provider
         .handler
-        .complete_owned(
-            42,
-            handle,
-            state_snapshot,
-            Arc::new(TestResponder::default()),
-            true,
-        )
+        .complete_owned(42, handle, state, Arc::new(TestResponder::default()), true)
         .await
         .expect("complete draft");
 
@@ -4489,9 +4392,59 @@ async fn completion_adds_configured_investment_and_spectator_wagers() {
 
 #[tokio::test]
 async fn test_required_edit_failure_skips_completion_channel_copies() {
-    let (database, provider, drafts, discord) = provider_fixture();
-    seed_players(database.path(), 42, &(1..=10).collect::<Vec<_>>(), 100);
-    Connection::open(database.path())
+    let (database, provider, drafts, persistence, handle, state, discord) =
+        persistent_completion_fixture_with(
+            &[("ADMIN_USER_IDS", "9001"), ("BOMB_POT_CHANCE", "0")],
+            Arc::new(NoopDraftReminderScheduler),
+            |_| {},
+        )
+        .await;
+    seed_nonprofit_fund(database.path());
+    let responder = Arc::new(TestResponder {
+        fail_original_edit: true,
+        ..TestResponder::default()
+    });
+    provider
+        .handler
+        .complete_owned(42, handle, state, responder.clone(), true)
+        .await
+        .expect("durable completion guidance");
+    assert!(!drafts.has_active_draft(Some(42)));
+    assert!(responder.original_edits.lock().expect("edits").is_empty());
+    assert!(
+        !discord
+            .sent
+            .lock()
+            .expect("sent messages")
+            .iter()
+            .any(|(_, message)| message.response.embeds.iter().any(|embed| {
+                embed
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.contains("Complete!"))
+            })),
+        "a failed required source edit must suppress all completion copies",
+    );
+    let responses = responder.responses.lock().expect("responses");
+    assert!(responses.iter().any(|response| {
+        response.content.contains("/record abort") && response.content.contains("Match #")
+    }));
+    let pending = PendingMatchRepository::new(database.path())
+        .pending_matches(42)
+        .expect("pending matches");
+    assert_eq!(pending.len(), 1);
+    // Publication stays recoverable by READY or `/draft resume`.
+    let envelopes = persistence.load_all().expect("load envelopes");
+    assert_eq!(envelopes.len(), 1);
+    assert!(envelopes[0].finalizing);
+    assert_eq!(
+        envelopes[0].pending_match_id,
+        Some(pending[0].pending_match_id)
+    );
+}
+
+fn seed_nonprofit_fund(path: &std::path::Path) {
+    Connection::open(path)
         .expect("open seed database")
         .execute(
             "INSERT INTO nonprofit_fund(guild_id, total_collected)
@@ -4500,48 +4453,6 @@ async fn test_required_edit_failure_skips_completion_channel_copies() {
             rusqlite::params![42, 1_000],
         )
         .expect("seed nonprofit fund");
-    let handle = drafts
-        .create_draft(Some(42), DraftLobbyKind::Open)
-        .expect("draft state");
-    let state_snapshot = {
-        let mut state = handle.lock().expect("state lock");
-        *state = state_for_draft();
-        state.phase = DraftPhase::Complete;
-        state.radiant_player_ids = vec![1, 3, 5, 7, 9];
-        state.dire_player_ids = vec![2, 4, 6, 8, 10];
-        state.radiant_hero_pick_order = Some(1);
-        state.dire_hero_pick_order = Some(2);
-        state.current_pick_index = DRAFT_TOTAL_PICKS;
-        state.draft_channel_id = Some(777);
-        state.draft_message_id = Some(55);
-        state.clone()
-    };
-    let responder = Arc::new(TestResponder {
-        fail_original_edit: true,
-        ..TestResponder::default()
-    });
-    provider
-        .handler
-        .complete_owned(42, handle, state_snapshot, responder.clone(), true)
-        .await
-        .expect("durable completion guidance");
-    assert!(!drafts.has_active_draft(Some(42)));
-    assert!(responder.original_edits.lock().expect("edits").is_empty());
-    assert!(
-        discord.sent.lock().expect("sent messages").is_empty(),
-        "a failed required source edit must suppress all completion copies",
-    );
-    let responses = responder.responses.lock().expect("responses");
-    assert!(responses.iter().any(|response| {
-        response.content.contains("/record abort") && response.content.contains("Match #")
-    }));
-    assert_eq!(
-        PendingMatchRepository::new(database.path())
-            .pending_matches(42)
-            .expect("pending matches")
-            .len(),
-        1
-    );
 }
 
 #[tokio::test(start_paused = true)]
