@@ -22,7 +22,7 @@ pub use cama_app_match::{
 };
 pub use cama_app_platform::{
     admin_low_priority, blame_luke_media, embeds, font_assets, moderation, player_mmr_fallback,
-    player_trivia_service, playtime_service, python_random, referrals, registration, reminders,
+    player_trivia_service, playtime_service, python_random, registration, reminders,
     survey_commands, timezone_service, trivia_questions, unified_leaderboard, wrapped_story,
 };
 

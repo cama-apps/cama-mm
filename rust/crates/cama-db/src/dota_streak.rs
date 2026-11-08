@@ -149,97 +149,12 @@ impl DotaStreakRepository {
             .collect())
     }
 
-    pub fn get_streak(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<DotaStreakState, DotaStreakRepositoryError> {
-        let connection = self.connection()?;
-        connection
-            .query_row(
-                "SELECT COALESCE(dota_streak_days, 0), dota_last_played_date
-                 FROM players WHERE discord_id = ?1 AND guild_id = ?2",
-                params![discord_id, Self::normalize_guild_id(guild_id)],
-                |row| {
-                    Ok(DotaStreakState {
-                        days: row.get(0)?,
-                        last_played_date: row.get(1)?,
-                    })
-                },
-            )
-            .optional()
-            .map(Option::unwrap_or_default)
-            .map_err(Into::into)
-    }
-
-    /// Credit ordered awards with one trigger context and ledger row per item,
-    /// then withhold each bonus's profit deductions.
-    pub fn credit_awards_ordered_atomic(
-        &self,
-        credits: &[DotaStreakCredit],
-        guild_id: Option<i64>,
-        policy: &ProfitDeductionPolicy<'_>,
-    ) -> Result<Vec<CreditedDotaStreak>, DotaStreakRepositoryError> {
-        if credits.is_empty() {
-            return Ok(Vec::new());
-        }
-        if credits.iter().any(|credit| credit.bonus < 0) {
-            return Err(DotaStreakRepositoryError::NegativeBonus);
-        }
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut outcomes = Vec::with_capacity(credits.len());
-        for credit in credits {
-            set_ledger_context(&transaction, *credit)?;
-            let balance_after = transaction
-                .query_row(
-                    "UPDATE players
-                     SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?1,
-                         updated_at = CURRENT_TIMESTAMP
-                     WHERE discord_id = ?2 AND guild_id = ?3
-                     RETURNING jopacoin_balance",
-                    params![credit.bonus, credit.discord_id, guild_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-                .ok_or(DotaStreakRepositoryError::MissingPlayer {
-                    discord_id: credit.discord_id,
-                    guild_id,
-                })?;
-            clear_ledger_context(&transaction)?;
-            let deductions = withhold_streak_deductions(
-                &transaction,
-                guild_id,
-                credit.discord_id,
-                credit.bonus,
-                policy,
-                &DeductionLedgerContext {
-                    source: "match_streak",
-                    related_type: Some("dota_streak"),
-                    related_id: None,
-                    reason: "Dota streak match bonus",
-                },
-            )?;
-            outcomes.push(CreditedDotaStreak {
-                discord_id: credit.discord_id,
-                bonus: credit.bonus,
-                withheld: deductions.total(),
-                balance_after: balance_after - deductions.total(),
-                applied: true,
-            });
-        }
-        transaction.commit()?;
-        Ok(outcomes)
-    }
-
     /// Credit one streak component per player and match exactly once.
     ///
     /// Match recovery may re-enter after the daily streak was advanced and
-    /// credited but before the public result or pending-row cleanup.  The
-    /// ordinary ordered primitive intentionally permits duplicate credits;
-    /// this production variant uses the durable economy ledger tuple as its
-    /// completion marker and reconstructs already-applied rows.
+    /// credited but before the public result or pending-row cleanup, so the
+    /// durable economy ledger tuple is the completion marker and
+    /// already-applied rows are reconstructed.
     pub fn credit_match_awards_ordered_atomic(
         &self,
         credits: &[DotaStreakCredit],
@@ -390,25 +305,6 @@ fn recover_match_streak_withholding(
         params![guild_id, discord_id, related_id, bonus],
         |row| row.get(0),
     )
-}
-
-fn set_ledger_context(
-    transaction: &Transaction<'_>,
-    credit: DotaStreakCredit,
-) -> Result<(), rusqlite::Error> {
-    transaction.execute("DELETE FROM economy_ledger_context", [])?;
-    let metadata = format!(
-        "{{\"streak_days\":{},\"bonus\":{}}}",
-        credit.streak_days, credit.bonus
-    );
-    transaction.execute(
-        "INSERT INTO economy_ledger_context
-             (id, source, actor_id, related_type, related_id, reason, metadata)
-         VALUES (1, 'match_streak', NULL, 'dota_streak', NULL,
-                 'Dota streak match bonus', ?1)",
-        [metadata],
-    )?;
-    Ok(())
 }
 
 fn clear_ledger_context(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {

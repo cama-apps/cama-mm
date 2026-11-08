@@ -58,13 +58,6 @@ impl PermissionContext {
         self.guild_member_permissions = Some(permissions);
         self
     }
-
-    /// Attach fallback permissions exposed directly by the interaction user.
-    #[must_use]
-    pub const fn with_user_permissions(mut self, permissions: DiscordPermissions) -> Self {
-        self.user_permissions = Some(permissions);
-        self
-    }
 }
 
 /// Check whether the user is explicitly listed in the admin allowlist.
@@ -150,7 +143,8 @@ mod tests {
 
     #[test]
     fn test_has_admin_permission_user_permissions_fallback() {
-        let interaction = PermissionContext::new(404).with_user_permissions(DiscordPermissions {
+        let mut interaction = PermissionContext::new(404);
+        interaction.user_permissions = Some(DiscordPermissions {
             administrator: false,
             manage_guild: true,
         });
@@ -195,12 +189,12 @@ mod tests {
 
     #[test]
     fn guild_member_permissions_are_authoritative_over_user_fallback() {
-        let interaction = PermissionContext::new(1)
-            .with_guild_member_permissions(DiscordPermissions::default())
-            .with_user_permissions(DiscordPermissions {
-                administrator: true,
-                manage_guild: true,
-            });
+        let mut interaction =
+            PermissionContext::new(1).with_guild_member_permissions(DiscordPermissions::default());
+        interaction.user_permissions = Some(DiscordPermissions {
+            administrator: true,
+            manage_guild: true,
+        });
 
         assert!(!has_admin_permission(&interaction, &[]));
     }

@@ -159,6 +159,7 @@ pub struct MigrationReport {
     pub historical_extra_migrations: Vec<String>,
 }
 
+#[cfg(test)]
 impl MigrationReport {
     /// Whether the database was already at the current logical migration head.
     #[must_use]

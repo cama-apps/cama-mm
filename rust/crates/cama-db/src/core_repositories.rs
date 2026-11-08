@@ -209,21 +209,12 @@ pub enum WheelSpinClaim {
     Cooldown { last_spin: i64 },
 }
 
-/// Python tuple order: `(rating, rating_deviation, volatility)`.
-pub type GlickoRating = (f64, Option<f64>, Option<f64>);
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShuffleInputs {
     pub players: Vec<Player>,
     /// Last recorded match per player; `None` when absent or unparseable.
     pub last_match_dates: OrderedMap<i64, Option<DateTime<Utc>>>,
     pub exclusion_counts: OrderedMap<i64, i64>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UsernameMatch {
-    pub discord_id: i64,
-    pub discord_username: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -424,129 +415,6 @@ impl PlayerRepository {
             .is_some())
     }
 
-    pub fn update_roles(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        roles: &[String],
-    ) -> Result<(), CoreRepositoryError> {
-        let connection = self.connection()?;
-        connection.execute(
-            "UPDATE players
-             SET preferred_roles = ?1, updated_at = CURRENT_TIMESTAMP
-             WHERE discord_id = ?2 AND guild_id = ?3",
-            params![
-                encode_string_array(roles),
-                discord_id,
-                Self::normalize_guild_id(guild_id)
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_glicko_rating(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        rating: f64,
-        rd: f64,
-        volatility: f64,
-    ) -> Result<(), CoreRepositoryError> {
-        let connection = self.connection()?;
-        connection.execute(
-            "UPDATE players
-             SET glicko_rating = ?1, glicko_rd = ?2, glicko_volatility = ?3,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE discord_id = ?4 AND guild_id = ?5",
-            params![
-                rating,
-                cap_glicko_rd(rd),
-                volatility,
-                discord_id,
-                Self::normalize_guild_id(guild_id)
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_glicko_rating(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Option<GlickoRating>, CoreRepositoryError> {
-        let connection = self.connection()?;
-        let row = connection
-            .query_row(
-                "SELECT glicko_rating, glicko_rd, glicko_volatility
-                 FROM players WHERE discord_id = ?1 AND guild_id = ?2",
-                params![discord_id, Self::normalize_guild_id(guild_id)],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<f64>>(0)?,
-                        row.get::<_, Option<f64>>(1)?,
-                        row.get::<_, Option<f64>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        Ok(row.and_then(|(rating, rd, volatility)| {
-            rating.map(|rating| (rating, rd.map(cap_glicko_rd), volatility))
-        }))
-    }
-
-    pub fn get_match_rating_inputs(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-    ) -> Result<OrderedMap<i64, MatchRatingInput>, CoreRepositoryError> {
-        let unique_ids = unique_i64(discord_ids);
-        let mut result = OrderedMap::new();
-        if unique_ids.is_empty() {
-            return Ok(result);
-        }
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let connection = self.connection()?;
-        let mut found = HashMap::new();
-        for chunk in unique_ids.chunks(BULK_CHUNK_SIZE) {
-            let sql = format!(
-                "SELECT discord_id, current_mmr, glicko_rating, glicko_rd,
-                        glicko_volatility, os_mu, os_sigma, last_match_date,
-                        created_at, first_calibrated_at
-                 FROM players
-                 WHERE guild_id = ? AND discord_id IN ({})",
-                placeholders(chunk.len())
-            );
-            let mut statement = connection.prepare(&sql)?;
-            let parameters = std::iter::once(guild_id).chain(chunk.iter().copied());
-            let rows = statement.query_map(params_from_iter(parameters), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    MatchRatingInput {
-                        current_mmr: row.get(1)?,
-                        glicko_rating: row.get(2)?,
-                        glicko_rd: row.get(3)?,
-                        glicko_volatility: row.get(4)?,
-                        os_mu: row.get(5)?,
-                        os_sigma: row.get(6)?,
-                        last_match_date: row.get(7)?,
-                        created_at: row.get(8)?,
-                        first_calibrated_at: row.get(9)?,
-                    },
-                ))
-            })?;
-            for row in rows {
-                let (discord_id, input) = row?;
-                found.insert(discord_id, input);
-            }
-        }
-        for discord_id in unique_ids {
-            if let Some(input) = found.remove(&discord_id) {
-                result.insert(discord_id, input);
-            }
-        }
-        Ok(result)
-    }
-
     /// Snapshot every rating input and the guild OpenSkill revision from one
     /// read transaction so callers can reject stale pre-computed updates at
     /// commit time.
@@ -745,32 +613,6 @@ impl PlayerRepository {
         })
     }
 
-    pub fn get_by_username(
-        &self,
-        username: &str,
-        guild_id: Option<i64>,
-    ) -> Result<Vec<UsernameMatch>, CoreRepositoryError> {
-        if username.is_empty() {
-            return Ok(Vec::new());
-        }
-        let connection = self.connection()?;
-        let search = format!("%{}%", username.to_lowercase());
-        let mut statement = connection.prepare(
-            "SELECT discord_id, discord_username
-             FROM players
-             WHERE LOWER(discord_username) LIKE ?1 AND guild_id = ?2",
-        )?;
-        statement
-            .query_map(params![search, Self::normalize_guild_id(guild_id)], |row| {
-                Ok(UsernameMatch {
-                    discord_id: row.get(0)?,
-                    discord_username: row.get(1)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
-
     pub fn get_exclusion_counts(
         &self,
         discord_ids: &[i64],
@@ -809,30 +651,7 @@ impl PlayerRepository {
         Ok(ordered)
     }
 
-    pub fn increment_exclusion_count(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<(), CoreRepositoryError> {
-        self.update_counter(
-            "exclusion_count = COALESCE(exclusion_count, 0) + 5",
-            discord_id,
-            guild_id,
-        )
-    }
-
-    pub fn decay_exclusion_count(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<(), CoreRepositoryError> {
-        self.update_counter(
-            "exclusion_count = MAX(COALESCE(exclusion_count, 0) - 1, 0)",
-            discord_id,
-            guild_id,
-        )
-    }
-
+    #[cfg(test)]
     pub fn increment_wins(
         &self,
         discord_id: i64,
@@ -841,6 +660,7 @@ impl PlayerRepository {
         self.update_counter("wins = wins + 1", discord_id, guild_id)
     }
 
+    #[cfg(test)]
     fn update_counter(
         &self,
         assignment: &str,
@@ -911,6 +731,7 @@ impl PlayerRepository {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn update_personal_best_win_streak(
         &self,
         discord_id: i64,
@@ -1067,44 +888,6 @@ impl PlayerRepository {
         increment_openskill_revision(&transaction, guild_id)?;
         transaction.commit()?;
         Ok(true)
-    }
-
-    /// Delete every synthetic player (`discord_id < 0`) and its dependent
-    /// records in one guild, matching the retained Python maintenance path.
-    ///
-    /// Foreign keys remain disabled in production, so the dependent deletes
-    /// are explicit and share the same immediate transaction as the player
-    /// rows and OpenSkill revision bump.
-    pub fn delete_fake_users(&self, guild_id: Option<i64>) -> Result<usize, CoreRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let count: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM players WHERE discord_id < 0 AND guild_id = ?1",
-            [guild_id],
-            |row| row.get(0),
-        )?;
-        if count == 0 {
-            transaction.commit()?;
-            return Ok(0);
-        }
-        for table in [
-            "match_participants",
-            "rating_history",
-            "bets",
-            "openskill_rating_events",
-        ] {
-            let sql = format!("DELETE FROM {table} WHERE discord_id < 0 AND guild_id = ?1");
-            transaction.execute(&sql, [guild_id])?;
-        }
-        transaction.execute(
-            "DELETE FROM players WHERE discord_id < 0 AND guild_id = ?1",
-            [guild_id],
-        )?;
-        increment_openskill_revision(&transaction, guild_id)?;
-        transaction.commit()?;
-        usize::try_from(count)
-            .map_err(|_| CoreRepositoryError::InvalidInput("negative fake user count".to_owned()))
     }
 
     pub fn get_leaderboard(
@@ -1284,16 +1067,6 @@ impl PlayerRepository {
             .map_err(Into::into)
     }
 
-    pub fn steal_atomic(
-        &self,
-        thief_discord_id: i64,
-        victim_discord_id: i64,
-        guild_id: Option<i64>,
-        amount: i64,
-    ) -> Result<StealResult, CoreRepositoryError> {
-        self.steal_atomic_with_context(thief_discord_id, victim_discord_id, guild_id, amount, None)
-    }
-
     /// Transfer JC atomically and annotate the victim debit and thief credit
     /// separately in the central economy ledger.
     pub fn steal_atomic_with_context(
@@ -1468,24 +1241,6 @@ impl PlayerRepository {
             )));
         }
         Ok(())
-    }
-
-    /// Read the one-shot Comeback pardon carried by the existing players row.
-    pub fn get_wheel_pardon(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<bool, CoreRepositoryError> {
-        let connection = self.connection()?;
-        Ok(connection
-            .query_row(
-                "SELECT COALESCE(has_wheel_pardon, 0) FROM players
-                 WHERE discord_id = ?1 AND guild_id = ?2",
-                params![discord_id, Self::normalize_guild_id(guild_id)],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .is_some_and(|value| value != 0))
     }
 
     /// Set or clear the one-shot Comeback pardon.
@@ -2646,14 +2401,6 @@ pub struct HeroVersusHeroStat {
     pub wins: i64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct HeroPairwiseStats {
-    pub nemesis: Vec<EnemyHeroStat>,
-    pub easy: Vec<EnemyHeroStat>,
-    pub synergies: Vec<AllyHeroStat>,
-    pub hero_vs_hero: Vec<HeroVersusHeroStat>,
-}
-
 #[derive(Clone, Debug)]
 pub struct MatchRepository {
     path: PathBuf,
@@ -3680,18 +3427,6 @@ impl MatchRepository {
         Ok(result)
     }
 
-    pub fn get_os_ratings_for_match(
-        &self,
-        match_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<TeamOpenSkillRatings, CoreRepositoryError> {
-        Ok(self
-            .get_os_ratings_for_matches(&[match_id], guild_id)?
-            .get(&match_id)
-            .cloned()
-            .unwrap_or_default())
-    }
-
     pub fn get_most_recent_match(
         &self,
         guild_id: Option<i64>,
@@ -3959,138 +3694,7 @@ impl MatchRepository {
             .map_err(Into::into)
     }
 
-    pub fn get_player_hero_pairwise_stats(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-    ) -> Result<HeroPairwiseStats, CoreRepositoryError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT subject.team_number = other.team_number AS is_ally,
-                    subject.hero_id, other.hero_id, COUNT(*),
-                    SUM(CASE WHEN subject.won = 1 THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN subject.won = 0 THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN subject.won THEN 1 ELSE 0 END)
-             FROM match_participants AS subject
-             JOIN match_participants AS other
-               ON other.match_id = subject.match_id
-              AND other.discord_id != subject.discord_id
-              AND other.guild_id = subject.guild_id
-             WHERE subject.discord_id = ?1 AND subject.guild_id = ?2
-               AND subject.team_number IS NOT NULL AND other.team_number IS NOT NULL
-               AND other.hero_id IS NOT NULL AND other.hero_id > 0
-             GROUP BY is_ally, subject.hero_id, other.hero_id",
-        )?;
-        let rows = statement.query_map(
-            params![discord_id, Self::normalize_guild_id(guild_id)],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)? != 0,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                ))
-            },
-        )?;
-        let mut enemy_totals: BTreeMap<i64, (i64, i64, i64)> = BTreeMap::new();
-        let mut ally_totals: BTreeMap<i64, (i64, i64)> = BTreeMap::new();
-        let mut hero_vs_hero = Vec::new();
-        for row in rows {
-            let (is_ally, my_hero, other_hero, games, wins, losses, truthy_wins) = row?;
-            if is_ally {
-                let totals = ally_totals.entry(other_hero).or_default();
-                totals.0 += games;
-                totals.1 += wins;
-            } else {
-                let totals = enemy_totals.entry(other_hero).or_default();
-                totals.0 += games;
-                totals.1 += wins;
-                totals.2 += losses;
-                if let Some(my_hero) = my_hero.filter(|hero| *hero > 0)
-                    && games >= min_games
-                {
-                    hero_vs_hero.push(HeroVersusHeroStat {
-                        my_hero,
-                        opponent_hero: other_hero,
-                        games,
-                        wins: truthy_wins,
-                    });
-                }
-            }
-        }
-        let enemies = enemy_totals
-            .into_iter()
-            .filter(|(_, (games, _, _))| *games >= min_games)
-            .map(|(enemy_hero, (games, wins, losses))| EnemyHeroStat {
-                enemy_hero,
-                games,
-                wins,
-                losses,
-                rate: 0.0,
-            })
-            .collect::<Vec<_>>();
-        let mut nemesis = enemies.clone();
-        for stat in &mut nemesis {
-            stat.rate = stat.losses as f64 / stat.games as f64;
-        }
-        nemesis.sort_by(|left, right| {
-            right
-                .rate
-                .total_cmp(&left.rate)
-                .then_with(|| right.games.cmp(&left.games))
-                .then_with(|| left.enemy_hero.cmp(&right.enemy_hero))
-        });
-        nemesis.truncate(10);
-        let mut easy = enemies;
-        for stat in &mut easy {
-            stat.rate = stat.wins as f64 / stat.games as f64;
-        }
-        easy.sort_by(|left, right| {
-            right
-                .rate
-                .total_cmp(&left.rate)
-                .then_with(|| right.games.cmp(&left.games))
-                .then_with(|| left.enemy_hero.cmp(&right.enemy_hero))
-        });
-        easy.truncate(10);
-        let mut synergies = ally_totals
-            .into_iter()
-            .filter(|(_, (games, _))| *games >= min_games)
-            .map(|(ally_hero, (games, wins))| AllyHeroStat {
-                ally_hero,
-                games,
-                wins,
-                win_rate: wins as f64 / games as f64,
-            })
-            .collect::<Vec<_>>();
-        synergies.sort_by(|left, right| {
-            right
-                .win_rate
-                .total_cmp(&left.win_rate)
-                .then_with(|| right.games.cmp(&left.games))
-                .then_with(|| left.ally_hero.cmp(&right.ally_hero))
-        });
-        synergies.truncate(10);
-        hero_vs_hero.sort_by(|left, right| {
-            right
-                .games
-                .cmp(&left.games)
-                .then_with(|| left.my_hero.cmp(&right.my_hero))
-                .then_with(|| left.opponent_hero.cmp(&right.opponent_hero))
-        });
-        hero_vs_hero.truncate(30);
-        Ok(HeroPairwiseStats {
-            nemesis,
-            easy,
-            synergies,
-            hero_vs_hero,
-        })
-    }
-
+    #[cfg(test)]
     pub fn save_pending_match(
         &self,
         guild_id: Option<i64>,
@@ -5484,91 +5088,6 @@ mod tests {
     }
 
     #[test]
-    fn test_update_roles() {
-        let fixture = Fixture::new();
-        fixture.add_player(12_345, TEST_GUILD_ID);
-        fixture
-            .players
-            .update_roles(
-                12_345,
-                Some(TEST_GUILD_ID),
-                &["3".to_owned(), "4".to_owned(), "5".to_owned()],
-            )
-            .unwrap();
-        assert_eq!(
-            fixture
-                .players
-                .get_by_id(12_345, Some(TEST_GUILD_ID))
-                .unwrap()
-                .unwrap()
-                .preferred_roles,
-            Some(vec!["3".to_owned(), "4".to_owned(), "5".to_owned()])
-        );
-    }
-
-    #[test]
-    fn test_update_glicko_rating() {
-        let fixture = Fixture::new();
-        fixture.add_player(12_345, TEST_GUILD_ID);
-        fixture
-            .players
-            .update_glicko_rating(12_345, Some(TEST_GUILD_ID), 1_600.0, 300.0, 0.05)
-            .unwrap();
-        assert_eq!(
-            fixture
-                .players
-                .get_glicko_rating(12_345, Some(TEST_GUILD_ID))
-                .unwrap(),
-            Some((1_600.0, Some(250.0), Some(0.05)))
-        );
-    }
-
-    #[test]
-    fn test_get_match_rating_inputs_bulk() {
-        let fixture = Fixture::new();
-        let mut player = configured_player(12_345, "MatchPlayer", TEST_GUILD_ID);
-        player.initial_mmr = Some(3_200);
-        player.glicko_rating = Some(1_550.0);
-        player.glicko_rd = Some(120.0);
-        player.glicko_volatility = Some(0.05);
-        player.os_mu = Some(27.5);
-        player.os_sigma = Some(7.25);
-        fixture.players.add(&player).unwrap();
-        fixture
-            .connection()
-            .execute(
-                "UPDATE players SET last_match_date=?1, first_calibrated_at=?2
-             WHERE discord_id=?3 AND guild_id=?4",
-                params![
-                    "2026-07-20T12:00:00+00:00",
-                    1_750_000_000_i64,
-                    12_345,
-                    TEST_GUILD_ID
-                ],
-            )
-            .unwrap();
-        let inputs = fixture
-            .players
-            .get_match_rating_inputs(&[12_345, 99_999, 12_345], Some(TEST_GUILD_ID))
-            .unwrap();
-        assert_eq!(inputs.keys().copied().collect::<Vec<_>>(), [12_345]);
-        let input = inputs.get(&12_345).unwrap();
-        assert_eq!(input.current_mmr, Value::Real(3_200.0));
-        assert_eq!(input.os_mu, Value::Real(27.5));
-        assert_eq!(
-            input.last_match_date,
-            Value::Text("2026-07-20T12:00:00+00:00".to_owned())
-        );
-        assert!(
-            fixture
-                .players
-                .get_match_rating_inputs(&[], None)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn test_get_balances_bulk_is_single_query_and_guild_scoped() {
         let fixture = Fixture::new();
         for (discord_id, balance) in [(12_346, 75), (12_347, -25)] {
@@ -5794,84 +5313,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_by_username_partial_case_insensitive() {
-        let fixture = Fixture::new();
-        for (discord_id, name) in [
-            (2_001, "AlphaUser"),
-            (2_002, "betaUser"),
-            (2_003, "GammaTester"),
-        ] {
-            fixture
-                .players
-                .add(&NewPlayer::new(discord_id, name, Some(TEST_GUILD_ID)))
-                .unwrap();
-        }
-        assert_eq!(
-            fixture
-                .players
-                .get_by_username("alpha", Some(TEST_GUILD_ID))
-                .unwrap()[0]
-                .discord_id,
-            2_001
-        );
-        let matches = fixture
-            .players
-            .get_by_username("USER", Some(TEST_GUILD_ID))
-            .unwrap();
-        assert_eq!(
-            matches
-                .into_iter()
-                .map(|row| row.discord_id)
-                .collect::<HashSet<_>>(),
-            HashSet::from([2_001, 2_002])
-        );
-    }
-
-    #[test]
-    fn test_exclusion_counts() {
-        let fixture = Fixture::new();
-        fixture.add_player(12_345, TEST_GUILD_ID);
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[12_345], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&12_345),
-            Some(&4)
-        );
-        fixture
-            .players
-            .increment_exclusion_count(12_345, Some(TEST_GUILD_ID))
-            .unwrap();
-        fixture
-            .players
-            .increment_exclusion_count(12_345, Some(TEST_GUILD_ID))
-            .unwrap();
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[12_345], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&12_345),
-            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 10))
-        );
-        for _ in 0..20 {
-            fixture
-                .players
-                .decay_exclusion_count(12_345, Some(TEST_GUILD_ID))
-                .unwrap();
-        }
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[12_345], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&12_345),
-            Some(&0)
-        );
-    }
-
-    #[test]
     fn test_delete_player_preserves_deadlock_enrollment_wallet_and_other_guilds() {
         let fixture = Fixture::new();
         fixture.add_player(12345, TEST_GUILD_ID);
@@ -6021,11 +5462,6 @@ mod tests {
     #[test]
     fn test_get_player_not_found() {
         test_player_not_found();
-    }
-
-    #[test]
-    fn test_update_player_glicko_rating() {
-        test_update_glicko_rating();
     }
 
     #[test]
@@ -6873,11 +6309,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_exclusion_counts() {
-        test_exclusion_counts();
-    }
-
-    #[test]
     fn test_get_by_ids_skips_missing_players() {
         let fixture = Fixture::new();
         for (discord_id, name) in [(7_001, "Player1"), (7_002, "Player2")] {
@@ -6949,72 +6380,6 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_fake_users_cascades_related_tables() {
-        let fixture = Fixture::new();
-        fixture.add_player(100, TEST_GUILD_ID);
-        fixture.add_player(-1, TEST_GUILD_ID);
-        fixture.add_player(-2, TEST_GUILD_ID);
-        let match_id = fixture.record(&[-1, -2], &[100], 1, TEST_GUILD_ID);
-        let connection = fixture.connection();
-        connection
-            .execute(
-                "INSERT INTO rating_history(discord_id,rating,match_id,guild_id)
-                 VALUES(-1,1200,?1,?2)",
-                params![match_id, TEST_GUILD_ID],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO bets(guild_id,match_id,discord_id,team_bet_on,amount,bet_time)
-                 VALUES(?1,NULL,-2,'radiant',10,0)",
-                [TEST_GUILD_ID],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO openskill_rating_events(
-                    guild_id,discord_id,event_type,value,event_at,
-                    os_algorithm_version,os_algorithm_fingerprint
-                 ) VALUES(?1,-1,'test',1,0,5,'test')",
-                [TEST_GUILD_ID],
-            )
-            .unwrap();
-        drop(connection);
-
-        assert_eq!(
-            fixture
-                .players
-                .delete_fake_users(Some(TEST_GUILD_ID))
-                .unwrap(),
-            2
-        );
-        let connection = fixture.connection();
-        for table in [
-            "players",
-            "match_participants",
-            "rating_history",
-            "bets",
-            "openskill_rating_events",
-        ] {
-            let count: i64 = connection
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE discord_id < 0"),
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(count, 0, "fake rows remain in {table}");
-        }
-        assert!(
-            fixture
-                .players
-                .get_by_id(100, Some(TEST_GUILD_ID))
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
     fn test_clear_all_players_compatibility_operation() {
         let fixture = Fixture::new();
         for discord_id in 10_001..10_006 {
@@ -7042,118 +6407,6 @@ mod tests {
                 .get_by_id(10_001, Some(TEST_GUILD_ID))
                 .unwrap()
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn test_remove_fake_users_across_guilds() {
-        let fixture = Fixture::new();
-        fixture.add_player(-1, TEST_GUILD_ID);
-        fixture.add_player(-2, TEST_GUILD_ID_SECONDARY);
-        fixture.add_player(200, TEST_GUILD_ID);
-        let total = [TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY]
-            .into_iter()
-            .map(|guild_id| fixture.players.delete_fake_users(Some(guild_id)).unwrap())
-            .sum::<usize>();
-        assert_eq!(total, 2);
-        assert!(
-            fixture
-                .players
-                .get_by_id(-1, Some(TEST_GUILD_ID))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            fixture
-                .players
-                .get_by_id(-2, Some(TEST_GUILD_ID_SECONDARY))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            fixture
-                .players
-                .get_by_id(200, Some(TEST_GUILD_ID))
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn test_increment_exclusion_count() {
-        let fixture = Fixture::new();
-        fixture.add_player(11_101, TEST_GUILD_ID);
-        fixture
-            .players
-            .increment_exclusion_count(11_101, Some(TEST_GUILD_ID))
-            .unwrap();
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[11_101], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&11_101),
-            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 5))
-        );
-        fixture
-            .players
-            .increment_exclusion_count(11_101, Some(TEST_GUILD_ID))
-            .unwrap();
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[11_101], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&11_101),
-            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 10))
-        );
-    }
-
-    #[test]
-    fn test_decay_exclusion_count() {
-        let fixture = Fixture::new();
-        fixture.add_player(11_201, TEST_GUILD_ID);
-        for _ in 0..10 {
-            fixture
-                .players
-                .increment_exclusion_count(11_201, Some(TEST_GUILD_ID))
-                .unwrap();
-        }
-        let mut expected = NEW_PLAYER_EXCLUSION_BOOST + 50;
-        for _ in 0..6 {
-            fixture
-                .players
-                .decay_exclusion_count(11_201, Some(TEST_GUILD_ID))
-                .unwrap();
-            expected -= 1;
-            assert_eq!(
-                fixture
-                    .players
-                    .get_exclusion_counts(&[11_201], Some(TEST_GUILD_ID))
-                    .unwrap()
-                    .get(&11_201),
-                Some(&expected)
-            );
-        }
-    }
-
-    #[test]
-    fn test_exclusion_count_decay_stops_at_zero() {
-        let fixture = Fixture::new();
-        fixture.add_player(11_301, TEST_GUILD_ID);
-        for _ in 0..=NEW_PLAYER_EXCLUSION_BOOST {
-            fixture
-                .players
-                .decay_exclusion_count(11_301, Some(TEST_GUILD_ID))
-                .unwrap();
-        }
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[11_301], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&11_301),
-            Some(&0)
         );
     }
 
@@ -7480,7 +6733,7 @@ mod tests {
         assert_eq!(
             fixture
                 .players
-                .steal_atomic(5_001, 5_002, Some(TEST_GUILD_ID), 50)
+                .steal_atomic_with_context(5_001, 5_002, Some(TEST_GUILD_ID), 50, None)
                 .unwrap(),
             StealResult {
                 amount: 50,
@@ -7502,7 +6755,7 @@ mod tests {
         assert_eq!(
             fixture
                 .players
-                .steal_atomic(5_001, 5_002, Some(TEST_GUILD_ID), 120)
+                .steal_atomic_with_context(5_001, 5_002, Some(TEST_GUILD_ID), 120, None)
                 .unwrap()
                 .victim_new_balance,
             -20
@@ -8673,40 +7926,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_hero_pairwise_batch_matches_legacy_views() {
-        let fixture = Fixture::new();
-        let mut connection = fixture.connection();
-        let transaction = connection
-            .transaction()
-            .expect("seed hero pairwise fixture");
-        for index in 0..36_i64 {
-            for repeat in 0..2_i64 {
-                let match_id = 10_000 + index * 2 + repeat;
-                transaction.execute("INSERT INTO matches(match_id,team1_players,team2_players,winning_team,guild_id) VALUES(?1,'[1, 2]','[3]',1,?2)", params![match_id, TEST_GUILD_ID]).unwrap();
-                transaction.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,1,?2,1,?3,?4)", params![match_id, TEST_GUILD_ID, repeat, 10 + index / 12]).unwrap();
-                transaction.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,2,?2,1,?3,?4)", params![match_id, TEST_GUILD_ID, repeat, 200 + index % 3]).unwrap();
-                transaction.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,3,?2,2,?3,?4)", params![match_id, TEST_GUILD_ID, 1-repeat, 100 + index % 12]).unwrap();
-            }
-        }
-        transaction.commit().expect("commit hero pairwise fixture");
-        let stats = fixture
-            .matches
-            .get_player_hero_pairwise_stats(1, Some(TEST_GUILD_ID), 2)
-            .unwrap();
-        assert_eq!(stats.nemesis.len(), 10);
-        assert_eq!(stats.easy.len(), 10);
-        assert_eq!(stats.synergies.len(), 3);
-        assert_eq!(stats.hero_vs_hero.len(), 30);
-        assert_eq!(
-            fixture
-                .matches
-                .get_player_hero_pairwise_stats(1, Some(999_999), 2)
-                .unwrap(),
-            HeroPairwiseStats::default()
-        );
-    }
-
     fn insert_either_suspension(fixture: &Fixture, discord_id: i64, expires_at: i64) {
         let now = unix_now();
         fixture.connection().execute(
@@ -9438,10 +8657,14 @@ mod tests {
             .unwrap();
         let left = fixture.players.clone();
         let right = fixture.players.clone();
-        let first =
-            std::thread::spawn(move || left.steal_atomic(-1, -3, Some(TEST_GUILD_ID), 30).unwrap());
+        let first = std::thread::spawn(move || {
+            left.steal_atomic_with_context(-1, -3, Some(TEST_GUILD_ID), 30, None)
+                .unwrap()
+        });
         let second = std::thread::spawn(move || {
-            right.steal_atomic(-2, -3, Some(TEST_GUILD_ID), 40).unwrap()
+            right
+                .steal_atomic_with_context(-2, -3, Some(TEST_GUILD_ID), 40, None)
+                .unwrap()
         });
         first.join().unwrap();
         second.join().unwrap();

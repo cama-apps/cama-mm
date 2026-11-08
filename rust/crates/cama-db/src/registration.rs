@@ -248,23 +248,6 @@ impl RegistrationRepository {
         steam_identity::steam_id_owner(&connection, steam_id).map_err(Into::into)
     }
 
-    pub fn primary_steam_id(
-        &self,
-        discord_id: i64,
-    ) -> Result<Option<i64>, RegistrationRepositoryError> {
-        let connection = self.connection()?;
-        connection
-            .query_row(
-                "SELECT steam_id FROM player_steam_ids
-                 WHERE discord_id = ?1 AND is_primary = 1
-                 ORDER BY added_at, id LIMIT 1",
-                [discord_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
     pub fn player_exists(
         &self,
         discord_id: i64,
