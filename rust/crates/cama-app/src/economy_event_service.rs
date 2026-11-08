@@ -20,18 +20,7 @@ const TREND_WINDOWS: [i64; 3] = [1, 3, 7];
 const FLOW_WINDOWS: [i64; 2] = [3, 7];
 const SEVERITY_INTENSITY: [f64; 5] = [0.5, 1.0, 1.5, 2.25, 3.0];
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct GuildId(pub i64);
-
-impl GuildId {
-    #[must_use]
-    pub const fn normalize(raw: Option<i64>) -> Self {
-        Self(match raw {
-            Some(value) => value,
-            None => 0,
-        })
-    }
-}
+pub use cama_domain::guild::GuildId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {
@@ -1482,7 +1471,7 @@ where
     }
 
     pub fn ensure_policy(&self, guild_id: Option<i64>) -> Result<PolicyState, EconomyEventError> {
-        self.ensure_policy_at(GuildId::normalize(guild_id), self.clock.now())
+        self.ensure_policy_at(GuildId::from_optional(guild_id), self.clock.now())
     }
 
     fn ensure_policy_at(
@@ -1553,7 +1542,7 @@ where
         if !self.config.enabled {
             return Ok(EconomyEventEffects::default());
         }
-        let guild_id = GuildId::normalize(guild_id);
+        let guild_id = GuildId::from_optional(guild_id);
         let event_date = self.event_date_for_timestamp(self.clock.now())?;
         Ok(self
             .store
@@ -1571,7 +1560,7 @@ where
             return Ok(None);
         }
         let now = now.unwrap_or_else(|| self.clock.now());
-        let guild_id = GuildId::normalize(guild_id);
+        let guild_id = GuildId::from_optional(guild_id);
         let event_date = self.event_date_for_timestamp(now)?;
         let restriction = self
             .store
@@ -1635,7 +1624,7 @@ where
         explicit_event_date: Option<&str>,
     ) -> Result<(Option<EconomyEvent>, bool), EconomyEventError> {
         let now = now.unwrap_or_else(|| self.clock.now());
-        let guild_id = GuildId::normalize(guild_id);
+        let guild_id = GuildId::from_optional(guild_id);
         let event_date = match explicit_event_date {
             Some(date) => {
                 parse_event_date(date)?;
@@ -1774,7 +1763,7 @@ where
         now: Option<i64>,
     ) -> Result<(), EconomyEventError> {
         self.store.mark_announced(
-            GuildId::normalize(guild_id),
+            GuildId::from_optional(guild_id),
             event_id,
             now.unwrap_or_else(|| self.clock.now()),
         )
@@ -1787,7 +1776,7 @@ where
         now: Option<i64>,
     ) -> Result<(), EconomyEventError> {
         self.store.mark_reminder_announced(
-            GuildId::normalize(guild_id),
+            GuildId::from_optional(guild_id),
             event_id,
             now.unwrap_or_else(|| self.clock.now()),
         )
