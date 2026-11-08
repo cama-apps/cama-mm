@@ -1001,11 +1001,6 @@ impl Pet {
         }
     }
 
-    #[must_use]
-    pub fn art_mood(&self, now: i64, decay_per_day: i64) -> &'static str {
-        self.mood(now, decay_per_day).art_key()
-    }
-
     pub fn dig_work_units_between(
         &self,
         start: i64,
@@ -1639,9 +1634,9 @@ mod tests {
     fn test_art_mood_collapses_to_three_keys() {
         let pet = make_pet();
         let feed = pet.last_fed_at;
-        assert_eq!(pet.art_mood(feed, RATE), "happy");
-        assert_eq!(pet.art_mood(feed + 2 * DAY, RATE), "neutral");
-        assert_eq!(pet.art_mood(feed + 4 * DAY, RATE), "hungry");
+        assert_eq!(pet.mood(feed, RATE).art_key(), "happy");
+        assert_eq!(pet.mood(feed + 2 * DAY, RATE).art_key(), "neutral");
+        assert_eq!(pet.mood(feed + 4 * DAY, RATE).art_key(), "hungry");
     }
 
     #[test]

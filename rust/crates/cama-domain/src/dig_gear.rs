@@ -6,7 +6,7 @@
 //! adapters can implement the same commands around this aggregate without
 //! changing the formulas or state transitions.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub const GEAR_MAX_DURABILITY: i32 = 20;
 pub const GEAR_REPAIR_COST_PCT: f64 = 0.05;
@@ -1380,58 +1380,10 @@ impl GearStore {
         Ok(())
     }
 
-    pub fn manual_set_equipped(&mut self, gear_id: i64, equipped: bool) -> Result<(), StoreError> {
-        let Some(target) = self.gear_by_id(gear_id).cloned() else {
-            return Err(StoreError::MissingGear);
-        };
-        if equipped
-            && self.pieces.iter().any(|piece| {
-                piece.id != gear_id
-                    && piece.discord_id == target.discord_id
-                    && piece.guild_id == target.guild_id
-                    && piece.slot == target.slot
-                    && piece.equipped
-            })
-        {
-            return Err(StoreError::UniqueEquippedSlot);
-        }
-        if let Some(piece) = self.gear_by_id_mut(gear_id) {
-            piece.equipped = equipped;
-        }
-        Ok(())
-    }
-
     pub fn unequip_gear(&mut self, gear_id: i64) {
         if let Some(piece) = self.gear_by_id_mut(gear_id) {
             piece.equipped = false;
         }
-    }
-
-    pub fn tick_gear_durability(&mut self, discord_id: i64, guild_id: i64) -> Vec<i64> {
-        let mut broken = Vec::new();
-        for piece in &mut self.pieces {
-            if piece.discord_id == discord_id && piece.guild_id == guild_id && piece.equipped {
-                if piece.durability == 1 {
-                    broken.push(piece.id);
-                }
-                piece.durability = (piece.durability - 1).max(0);
-            }
-        }
-        broken
-    }
-
-    pub fn tick_gear_durability_ids(&mut self, gear_ids: &[i64]) -> Vec<i64> {
-        let selected = gear_ids.iter().copied().collect::<BTreeSet<_>>();
-        let mut broken = Vec::new();
-        for piece in &mut self.pieces {
-            if selected.contains(&piece.id) {
-                if piece.durability == 1 {
-                    broken.push(piece.id);
-                }
-                piece.durability = (piece.durability - 1).max(0);
-            }
-        }
-        broken
     }
 
     pub fn repair_gear(&mut self, gear_id: i64, to_durability: i32) {
@@ -1611,30 +1563,6 @@ impl GearService {
         Self { store }
     }
 
-    pub fn maybe_drop_gear<R: GearRng>(
-        &mut self,
-        discord_id: i64,
-        guild_id: i64,
-        at_boss: i64,
-        rng: &mut R,
-    ) -> Option<GearDrop> {
-        let tier = drop_tier_at_depth(at_boss)?;
-        if rng.random() >= GEAR_BOSS_DROP_RATE {
-            return None;
-        }
-        let slot = rng.choose_slot();
-        let definition = tier_table(slot)?[usize::from(tier)];
-        let gear_id =
-            self.store
-                .add_gear(discord_id, guild_id, slot, tier, None, "boss_drop", None);
-        Some(GearDrop {
-            gear_id,
-            slot,
-            tier,
-            name: definition.name,
-        })
-    }
-
     #[must_use]
     pub fn loadout(&self, discord_id: i64, guild_id: i64) -> GearLoadout {
         let equipped = self.store.equipped_gear(discord_id, guild_id);
@@ -1699,18 +1627,6 @@ impl GearService {
             slot: Some(row.slot),
             ..ActionResult::ok()
         }
-    }
-
-    #[must_use]
-    pub fn compute_repair_cost(
-        &self,
-        slot: GearSlot,
-        tier: u8,
-        item_id: Option<&str>,
-        durability: i32,
-        max_durability: Option<i32>,
-    ) -> i64 {
-        repair_cost(slot, tier, item_id, durability, max_durability)
     }
 
     #[must_use]
@@ -1955,31 +1871,6 @@ impl GearService {
         self.store
             .tunnel(discord_id, guild_id)
             .map_or(0, |tunnel| tunnel.pickaxe_tier)
-    }
-
-    #[must_use]
-    pub fn active_pickaxe_data(&self, discord_id: i64, guild_id: i64) -> Option<PickaxeData> {
-        let equipped = self.store.equipped_gear(discord_id, guild_id);
-        if let Some(weapon) = equipped.get(&GearSlot::Weapon) {
-            if weapon.durability <= 0 {
-                return None;
-            }
-            if let Some(unique) = weapon.item_id.as_deref().and_then(unique_gear) {
-                return Some(PickaxeData {
-                    name: unique.name,
-                    advance_bonus: unique.advance_bonus,
-                    cave_in_reduction: unique.cave_in_reduction,
-                    loot_bonus: unique.loot_bonus,
-                });
-            }
-            return WEAPON_TIERS
-                .get(usize::from(weapon.tier))
-                .map(PickaxeData::from);
-        }
-        self.store
-            .tunnel(discord_id, guild_id)
-            .and_then(|tunnel| WEAPON_TIERS.get(usize::from(tunnel.pickaxe_tier)))
-            .map(PickaxeData::from)
     }
 }
 

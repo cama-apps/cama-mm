@@ -350,34 +350,6 @@ pub fn resolve_evolution(scores: &InstinctScores, pet_id: i64) -> EvolutionDecis
     }
 }
 
-#[must_use]
-pub fn hint_key_for_scores(scores: &InstinctScores) -> Option<String> {
-    let mut ranked = PetInstinct::ALL.map(|instinct| {
-        (
-            instinct,
-            scores.get(&instinct).copied().unwrap_or_default().max(0),
-        )
-    });
-    ranked.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
-            .then(left.0.as_str().cmp(right.0.as_str()))
-    });
-    let (primary, top) = ranked[0];
-    let second = ranked[1].1;
-    let third = ranked[2].1;
-    if top < MIN_MEANINGFUL_SCORE {
-        None
-    } else if is_balanced(top, third) {
-        Some("balanced".to_owned())
-    } else if top >= 6 && top - second >= 3 {
-        Some(format!("{}_strong", primary.as_str()))
-    } else {
-        Some(primary.as_str().to_owned())
-    }
-}
-
 const fn is_balanced(top: i64, third: i64) -> bool {
     third >= MIN_MEANINGFUL_SCORE && third * 4 >= top * 3
 }
@@ -854,35 +826,6 @@ mod tests {
         2,
         false
     );
-
-    #[test]
-    fn test_hints_stay_hidden_until_activity_is_meaningful() {
-        assert_eq!(
-            hint_key_for_scores(&scores(&[(PetInstinct::Delving, 2)])),
-            None
-        );
-        assert_eq!(
-            hint_key_for_scores(&scores(&[(PetInstinct::Delving, 3)])).as_deref(),
-            Some("delving")
-        );
-        assert_eq!(
-            hint_key_for_scores(&scores(&[
-                (PetInstinct::Delving, 8),
-                (PetInstinct::Competition, 1),
-            ]))
-            .as_deref(),
-            Some("delving_strong")
-        );
-        assert_eq!(
-            hint_key_for_scores(&scores(&[
-                (PetInstinct::Delving, 8),
-                (PetInstinct::Competition, 7),
-                (PetInstinct::Wisdom, 6),
-            ]))
-            .as_deref(),
-            Some("balanced")
-        );
-    }
 
     #[test]
     fn test_every_calling_has_distinct_player_facing_identity() {

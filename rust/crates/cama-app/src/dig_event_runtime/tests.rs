@@ -1194,8 +1194,13 @@ fn unique_gear_repair_preview_matches_prorated_debit() {
         "event:collapsed_armory",
         Some("glassbreaker_pick"),
     );
-    let preview =
-        service.compute_repair_cost(GearSlot::Weapon, 3, Some("glassbreaker_pick"), 4, Some(8));
+    let preview = cama_domain::dig_gear::repair_cost(
+        GearSlot::Weapon,
+        3,
+        Some("glassbreaker_pick"),
+        4,
+        Some(8),
+    );
     assert_eq!(preview, 5);
     let result = service.repair_gear(111, 0, gear_id);
     assert!(result.success);
