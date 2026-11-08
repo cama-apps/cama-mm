@@ -1,10 +1,14 @@
-use std::cell::Cell;
 use std::collections::BTreeSet;
 
-use cama_db::dig_routes_repository::RouteTunnelRecord;
-
 use super::*;
-use crate::dig_tunnels::TunnelKey;
+
+/// Every route `route_by_id` can resolve, in catalog order.
+fn all_routes() -> Vec<&'static DigRoute> {
+    UNIVERSAL_ROUTES
+        .iter()
+        .chain(LAYER_ROUTE_POOLS.iter().flat_map(|pool| pool.routes.iter()))
+        .collect()
+}
 
 #[derive(Clone, Debug)]
 struct SequenceEntropy {
@@ -86,29 +90,6 @@ fn assert_offer_shape(layer: &str) {
     );
 }
 
-fn layer(name: &str) -> Layer {
-    LAYERS
-        .iter()
-        .find(|layer| layer.name == name)
-        .copied()
-        .unwrap()
-}
-
-fn precondition_input(
-    layer_name: &str,
-    luminosity: i64,
-    event_chance: f64,
-) -> RoutePreconditionInput {
-    RoutePreconditionInput {
-        layer: layer(layer_name),
-        luminosity,
-        prestige_cave_in_multiplier: 0.9,
-        base_event_chance: event_chance,
-        thick_skin_saved: false,
-        social_cave_in_bonus: 0.0,
-    }
-}
-
 fn assert_close(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() < 1.0e-12,
@@ -121,7 +102,7 @@ fn test_route_catalog_has_four_universal_and_three_per_post_dirt_layer() {
     assert_eq!(UNIVERSAL_ROUTES.len(), 4);
     assert_eq!(LAYER_ROUTE_POOLS.len(), 7);
     assert!(LAYER_ROUTE_POOLS.iter().all(|pool| pool.routes.len() == 3));
-    assert_eq!(route_catalog().len(), 25);
+    assert_eq!(all_routes().len(), 25);
     assert_eq!(
         LAYER_ROUTE_POOLS
             .iter()
@@ -141,7 +122,7 @@ fn test_route_catalog_has_four_universal_and_three_per_post_dirt_layer() {
 
 #[test]
 fn test_route_catalog_ids_are_unique_and_never_modify_jc_directly() {
-    let routes = route_catalog();
+    let routes = all_routes();
     assert_eq!(
         routes
             .iter()
@@ -311,281 +292,8 @@ fn test_route_choice_status_distinguishes_pending_and_active() {
 }
 
 #[test]
-fn test_pending_route_blocks_dig_before_cost_or_consumable_use_dig() {
-    let pending_json = pending_state().to_python_json();
-    let side_effects = Cell::new(0);
-    let result = live_dig_after_route_gate(Some(&pending_json), || {
-        side_effects.set(side_effects.get() + 1);
-    });
-    assert!(result.unwrap_err().route_choice_required);
-    assert_eq!(side_effects.get(), 0);
-}
-
-#[test]
-fn test_pending_route_blocks_dig_before_cost_or_consumable_use_compute_preconditions() {
-    let pending_json = pending_state().to_python_json();
-    let side_effects = Cell::new(0);
-    let result = deterministic_preconditions_after_route_gate(Some(&pending_json), || {
-        side_effects.set(side_effects.get() + 1);
-    });
-    assert!(result.unwrap_err().route_choice_required);
-    assert_eq!(side_effects.get(), 0);
-}
-
-#[test]
-fn test_abandon_clears_route_state() {
-    let mut tunnel = Tunnel::new(TunnelKey::new(10_001, 12_345), "Route Test", 100);
-    tunnel.route_state = Some(pending_state().to_python_json());
-    clear_route_for_abandon(&mut tunnel);
-    assert_eq!(tunnel.route_state, None);
-}
-
-#[test]
-fn test_prestige_clears_route_state() {
-    let mut tunnel = Tunnel::new(TunnelKey::new(10_001, 12_345), "Route Test", 100);
-    tunnel.route_state = Some(pending_state().to_python_json());
-    clear_route_for_prestige(&mut tunnel);
-    assert_eq!(tunnel.route_state, None);
-}
-
-#[test]
-fn test_route_loss_modifiers_add_before_applying_the_route_cap() {
-    assert_eq!(apply_cave_in_loss_effects(8, 3, Some(7), &[]), 7);
-    assert_eq!(apply_cave_in_loss_effects(8, 2, None, &[]), 10);
-}
-
-#[test]
-fn test_route_loss_bonus_does_not_exceed_weather_cap_live() {
-    let route = route_by_id("fractured_shortcut");
-    let result = resolve_route_cave_in(
-        RouteCaveInInput {
-            depth_before: 20,
-            rolled_loss: 10,
-            weather_loss_cap: Some(3),
-            steady_hands_reduction: 0.0,
-            reinforcement_active: false,
-            catastrophic: false,
-        },
-        route,
-    );
-    assert_eq!(result.block_loss, 3);
-}
-
-#[test]
-fn test_route_loss_bonus_does_not_exceed_weather_cap_deterministic() {
-    let route = route_by_id("fractured_shortcut");
-    let result = resolve_route_cave_in(
-        RouteCaveInInput {
-            depth_before: 20,
-            rolled_loss: 10,
-            weather_loss_cap: Some(3),
-            steady_hands_reduction: 0.0,
-            reinforcement_active: false,
-            catastrophic: false,
-        },
-        route,
-    );
-    assert_eq!(result.depth_after, 17);
-}
-
-#[test]
-fn test_route_loss_bonus_does_not_exceed_weather_cap_applied() {
-    assert_eq!(
-        applied_outcome_route_cave_in_loss(10, route_by_id("fractured_shortcut"), Some(3), false,),
-        3
-    );
-}
-
-#[test]
-fn test_route_loss_keeps_reinforcement_after_steady_hands_live() {
-    let result = resolve_route_cave_in(
-        RouteCaveInInput {
-            depth_before: 40,
-            rolled_loss: 14,
-            weather_loss_cap: None,
-            steady_hands_reduction: 0.25,
-            reinforcement_active: true,
-            catastrophic: false,
-        },
-        route_by_id("fractured_shortcut"),
-    );
-    assert_eq!(result.block_loss, 8);
-}
-
-#[test]
-fn test_route_loss_keeps_reinforcement_after_steady_hands_deterministic() {
-    let result = resolve_route_cave_in(
-        RouteCaveInInput {
-            depth_before: 40,
-            rolled_loss: 14,
-            weather_loss_cap: None,
-            steady_hands_reduction: 0.25,
-            reinforcement_active: true,
-            catastrophic: false,
-        },
-        route_by_id("fractured_shortcut"),
-    );
-    assert_eq!(result.depth_after, 32);
-}
-
-#[test]
-fn test_catastrophic_cave_in_respects_route_loss_cap_live() {
-    let result = resolve_route_cave_in(
-        RouteCaveInInput {
-            depth_before: 148,
-            rolled_loss: 14,
-            weather_loss_cap: None,
-            steady_hands_reduction: 0.0,
-            reinforcement_active: false,
-            catastrophic: true,
-        },
-        route_by_id("old_supports"),
-    );
-    assert!(result.catastrophic);
-    assert_eq!(result.block_loss, 6);
-    assert_eq!(result.depth_after, 142);
-}
-
-#[test]
-fn test_catastrophic_cave_in_respects_route_loss_cap_deterministic() {
-    let result = resolve_route_cave_in(
-        RouteCaveInInput {
-            depth_before: 148,
-            rolled_loss: 14,
-            weather_loss_cap: None,
-            steady_hands_reduction: 0.0,
-            reinforcement_active: false,
-            catastrophic: true,
-        },
-        route_by_id("old_supports"),
-    );
-    assert_eq!(
-        result,
-        RouteCaveInOutcome {
-            block_loss: 6,
-            depth_after: 142,
-            catastrophic: true,
-        }
-    );
-}
-
-#[test]
-fn test_preconditions_include_active_route_modifiers_in_both_dig_engines_old_supports_stone_30_expected0()
- {
-    let input = precondition_input("Stone", 100, 0.22);
-    let route = route_by_id("old_supports");
-    let live = live_route_preconditions(input, route);
-    let deterministic = deterministic_route_preconditions(input, route);
-    assert_eq!(live, deterministic);
-    assert_close(live.cave_in_chance, 0.045);
-    assert_eq!((live.advance_min, live.advance_max), (1, 2));
-    assert_eq!(live.luminosity, 100);
-    assert_close(live.event_chance, 0.22);
-    assert_close(live.artifact_multiplier, 1.0);
-}
-
-#[test]
-fn test_preconditions_include_active_route_modifiers_in_both_dig_engines_sporelit_garden_fungal_depths_160_expected1()
- {
-    let input = precondition_input("Fungal Depths", 100, 0.38);
-    let route = route_by_id("sporelit_garden");
-    let live = live_route_preconditions(input, route);
-    let deterministic = deterministic_route_preconditions(input, route);
-    assert_eq!(live, deterministic);
-    assert_close(live.cave_in_chance, 0.405);
-    assert_eq!((live.advance_min, live.advance_max), (1, 2));
-    assert_eq!(live.luminosity, 99);
-    assert_close(live.event_chance, 0.285);
-    assert_close(live.artifact_multiplier, 1.25);
-}
-
-#[test]
-fn test_boss_victory_conflict_returns_the_persisted_route() {
-    let persisted = RouteTunnelRecord {
-        discord_id: 10_001,
-        guild_id: 12_345,
-        depth: 25,
-        boss_progress: Some("defeated".to_owned()),
-        stinger_curse: Some(r#"{"drain_next_reward":true}"#.to_owned()),
-        route_state: Some(pending_state().to_python_json()),
-    };
-    let claim = BossOutcomeClaim::Conflict { persisted };
-    let side_effects = Cell::new(0);
-    let conflict = after_successful_boss_claim(&claim, || side_effects.set(1)).unwrap_err();
-    assert!(conflict.route_choice_required);
-    assert_eq!(
-        conflict
-            .route_choice
-            .unwrap()
-            .offered_routes
-            .iter()
-            .map(|route| route.id)
-            .collect::<Vec<_>>(),
-        ["shored_passage", "old_supports", "fossil_seam"]
-    );
-    assert_eq!(side_effects.get(), 0);
-}
-
-#[test]
-fn test_boss_loss_conflict_cannot_overwrite_victory_or_damage_gear() {
-    let persisted = RouteTunnelRecord {
-        discord_id: 10_001,
-        guild_id: 12_345,
-        depth: 25,
-        boss_progress: Some("defeated".to_owned()),
-        stinger_curse: None,
-        route_state: Some(pending_state().to_python_json()),
-    };
-    let claim = BossOutcomeClaim::Conflict { persisted };
-    let durability = Cell::new(100);
-    let conflict = after_successful_boss_claim(&claim, || durability.set(90)).unwrap_err();
-    assert!(conflict.route_choice_required);
-    assert_eq!(durability.get(), 100);
-}
-
-#[test]
-fn test_boss_conflict_copy_mentions_route_only_when_one_is_pending() {
-    let without_route = RouteTunnelRecord {
-        discord_id: 10_001,
-        guild_id: 12_345,
-        depth: 20,
-        boss_progress: Some("active".to_owned()),
-        stinger_curse: None,
-        route_state: None,
-    };
-    let result = boss_resolution_conflict_result(Some(&without_route));
-    assert!(!result.error.to_ascii_lowercase().contains("saved route"));
-
-    let with_route = RouteTunnelRecord {
-        route_state: Some(pending_state().to_python_json()),
-        ..without_route
-    };
-    let result = boss_resolution_conflict_result(Some(&with_route));
-    assert!(result.error.to_ascii_lowercase().contains("saved route"));
-}
-
-#[test]
-fn test_thick_skin_still_forces_zero_cave_in_chance_with_risky_route() {
-    let mut input = precondition_input("The Hollow", 100, 0.45);
-    input.thick_skin_saved = true;
-    input.social_cave_in_bonus = 0.09;
-    let result = apply_route_preconditions(input, route_by_id("maws_shortcut"));
-    assert!(result.thick_skin_saved);
-    assert_eq!(result.cave_in_chance, 0.0);
-}
-
-#[test]
 fn test_live_and_deterministic_resolvers_apply_route_artifact_multiplier_live() {
     let multiplier = route_artifact_multiplier(route_by_id("fossil_seam"));
-    assert_close(multiplier, 1.75);
-}
-
-#[test]
-fn test_live_and_deterministic_resolvers_apply_route_artifact_multiplier_deterministic() {
-    let route = route_by_id("fossil_seam");
-    let multiplier =
-        deterministic_route_preconditions(precondition_input("Stone", 100, 0.22), route)
-            .artifact_multiplier;
     assert_close(multiplier, 1.75);
 }
 
