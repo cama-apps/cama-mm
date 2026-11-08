@@ -308,7 +308,7 @@ impl DeadlockRegistrationProvider {
                 host_account,
                 rate_limiter: Mutex::new(RateLimiter::new()),
                 rate_clock: Instant::now(),
-                lobby_lock: tokio::sync::Mutex::new(()),
+                lobby_locks: Mutex::new(BTreeMap::new()),
                 lobby_rendered: Mutex::new(BTreeMap::new()),
                 admin_ids: application.identities.admin_user_ids.clone(),
                 economy: Arc::new(SqliteEconomyEventService::new(
@@ -362,7 +362,8 @@ struct DeadlockHandler {
     host_account: Option<u32>,
     rate_limiter: Mutex<RateLimiter>,
     rate_clock: Instant,
-    lobby_lock: tokio::sync::Mutex<()>,
+    /// One queue-panel publisher per guild; guilds never share panel state.
+    lobby_locks: Mutex<BTreeMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     lobby_rendered: Mutex<BTreeMap<i64, (u64, InteractionResponse)>>,
 }
 struct Context {
@@ -778,6 +779,14 @@ fn parse_context(request: InteractionRequest) -> Result<Context, String> {
 }
 
 impl DeadlockHandler {
+    fn lobby_lock(&self, guild: i64) -> Arc<tokio::sync::Mutex<()>> {
+        self.lobby_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(guild)
+            .or_default()
+            .clone()
+    }
     fn is_admin(&self, c: &Context) -> bool {
         self.admin_ids.contains(&c.user)
             || c.permissions

@@ -318,6 +318,15 @@ impl DeadlockRepository {
         transaction.commit()?;
         Ok(())
     }
+    /// Whether a member currently holds a queue seat in this guild.
+    pub fn is_queued(&self, guild: i64, user: i64) -> Result<bool, DeadlockError> {
+        identity(guild, user)?;
+        Ok(open_runtime_connection(&self.path)?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deadlock_queue WHERE guild_id=?1 AND discord_id=?2)",
+            params![guild, user],
+            |r| r.get(0),
+        )?)
+    }
     pub fn queue_leave(&self, guild: i64, user: i64) -> Result<bool, DeadlockError> {
         identity(guild, user)?;
         Ok(open_runtime_connection(&self.path)?.execute(
@@ -945,6 +954,17 @@ mod tests {
         repo.queue_join(10, user, 100 + user).unwrap();
         repo.ready(10, user, DeadlockFormat::StreetBrawl, 120)
             .unwrap();
+    }
+    #[test]
+    fn queue_membership_is_guild_scoped_and_follows_leave() {
+        let (_file, repo) = fixture();
+        enroll(&repo, 1);
+        assert!(repo.is_queued(10, 1).unwrap());
+        assert!(!repo.is_queued(10, 2).unwrap());
+        assert!(!repo.is_queued(11, 1).unwrap());
+        assert!(repo.queue_leave(10, 1).unwrap());
+        assert!(!repo.is_queued(10, 1).unwrap());
+        assert!(repo.is_queued(0, 1).is_err());
     }
     #[test]
     fn neutral_import_retry_updates_once_without_granting_another_wallet_balance() {
