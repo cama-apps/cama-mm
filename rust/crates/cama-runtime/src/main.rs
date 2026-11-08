@@ -794,6 +794,10 @@ async fn run_serve() -> ExitCode {
         error!(%error, "match reminder composition refused startup");
         return ExitCode::from(1);
     }
+    if let Err(error) = betting_provider.attach_reminder_hooks(reminder_provider.hooks()) {
+        error!(%error, "betting reminder composition refused startup");
+        return ExitCode::from(1);
+    }
     let push_notification_provider =
         match PushNotificationRegistrationProvider::new(&config.db_path, discord_transport.clone())
         {

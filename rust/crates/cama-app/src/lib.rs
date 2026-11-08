@@ -94,4 +94,5 @@ pub mod trivia_data;
 pub mod trivia_image_cache;
 pub mod wheel;
 pub mod wheel_media;
+pub mod wheel_settlement;
 pub mod wrapped_media;

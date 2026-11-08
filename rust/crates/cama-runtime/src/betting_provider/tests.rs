@@ -1,10 +1,20 @@
 use super::*;
+use cama_app::economy_actions::apply_gamba_event_multiplier;
 use cama_app::manashop_rework::BuffService;
 use cama_app::match_recording::GamesMilestone;
+use cama_app::wheel::{
+    CooldownOutcome, WheelEconomyPolicy, cooldown_after_resolution, get_wheel_wedges,
+    next_wheel_reset_at, resolve_explosion, wheel_window_start_at,
+};
+use cama_app::wheel_settlement::{
+    apply_wheel_blood_pact_skim, credit_wheel_income, event_related_id, resolve_wheel_value,
+};
 use cama_db::core_repositories::NewPlayer;
 use cama_db::economy_event_repository::EconomyEventRepository;
+use cama_db::mana_service_repository::{BankruptBuff, ManaRepository};
 use cama_db::manashop_rework_repository::ManashopRepository;
 use cama_db::match_runtime::{PendingMatchRepository, PendingMatchState};
+use cama_db::wheel_spin_repository::{NewWheelSpin, WheelSpinRepository};
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -459,32 +469,6 @@ fn economy_invest_retry_after_truncates_four_point_two_to_four_seconds() {
 }
 
 #[test]
-fn golden_wheel_member_snapshot_removes_departed_wealth_before_rank_selection() {
-    let mut departed = Player::new("departed");
-    departed.discord_id = Some(99);
-    departed.jopacoin_balance = 10_000;
-    let mut first = Player::new("first");
-    first.discord_id = Some(1);
-    first.jopacoin_balance = 900;
-    let mut second = Player::new("second");
-    second.discord_id = Some(2);
-    second.jopacoin_balance = 800;
-    let mut third = Player::new("third");
-    third.discord_id = Some(3);
-    third.jopacoin_balance = 700;
-    let raw = vec![departed, first, second, third];
-    let visible_ids = BTreeSet::from([1, 2, 3]);
-    let visible = filter_visible_wheel_leaderboard(raw, Some(&visible_ids));
-    assert_eq!(
-        visible
-            .iter()
-            .filter_map(|player| player.discord_id)
-            .collect::<Vec<_>>(),
-        vec![1, 2, 3]
-    );
-}
-
-#[test]
 fn synthetic_wheel_members_require_explicit_opt_in_and_negative_ids() {
     assert!(is_enabled_synthetic_wheel_member(-101, true));
     assert!(!is_enabled_synthetic_wheel_member(-101, false));
@@ -611,38 +595,6 @@ async fn wheel_member_snapshot_failure_cancels_pending_requests() {
         .await
         .expect("failed snapshot must cancel its pending lookup");
     assert!(dropped.load(Ordering::SeqCst));
-}
-
-#[test]
-fn golden_wheel_member_snapshot_preserves_raw_order_when_unavailable() {
-    let mut departed = Player::new("departed");
-    departed.discord_id = Some(99);
-    departed.jopacoin_balance = 10_000;
-    let mut visible = Player::new("visible");
-    visible.discord_id = Some(1);
-    visible.jopacoin_balance = 900;
-    let raw = vec![departed, visible];
-    let result = filter_visible_wheel_leaderboard(raw, None);
-    assert_eq!(result[0].discord_id, Some(99));
-}
-
-#[test]
-fn golden_wheel_dividend_uses_visible_positive_wealth_snapshot() {
-    let mut departed = Player::new("departed");
-    departed.discord_id = Some(99);
-    departed.jopacoin_balance = 100_000;
-    let mut first = Player::new("first");
-    first.discord_id = Some(1);
-    first.jopacoin_balance = 2_500;
-    let mut second = Player::new("second");
-    second.discord_id = Some(2);
-    second.jopacoin_balance = 1_500;
-    let raw = vec![departed, first, second];
-    let visible_ids = BTreeSet::from([1, 2]);
-    assert_eq!(
-        visible_wheel_positive_balance(&raw, Some(&visible_ids)),
-        Some(4_000)
-    );
 }
 
 #[test]
@@ -2001,13 +1953,16 @@ fn a_retried_selection_keeps_the_first_attempts_option_and_reroll() {
         original_responder: None,
         attempt: Arc::default(),
     };
-    let (pinned, reroll) = pin_wheel_selection(&pending, first.clone(), true);
+    let (pinned, reroll) = pin_wheel_selection(&pending.attempt, first.clone(), true);
     assert_eq!((pinned.label.as_str(), reroll), ("RECESSION", true));
     // A later click on the other option, or the timeout default, cannot
     // change what the first attempt began settling.
     let clone = pending.clone();
-    let (pinned, reroll) =
-        pin_wheel_selection(&clone, mechanic_option(WheelMechanic::Jailbreak), false);
+    let (pinned, reroll) = pin_wheel_selection(
+        &clone.attempt,
+        mechanic_option(WheelMechanic::Jailbreak),
+        false,
+    );
     assert_eq!(
         (pinned.label.as_str(), reroll),
         (first.label.as_str(), true)
@@ -2510,14 +2465,8 @@ fn command_tree_contains_betting_and_economy_surface() {
 
 #[test]
 fn golden_wheel_announcement_matches_public_python_copy_and_mentions_top_players() {
-    let mut first = Player::new("first");
-    first.discord_id = Some(7);
-    first.jopacoin_balance = 900;
-    let mut second = Player::new("second");
-    second.discord_id = Some(8);
-    second.jopacoin_balance = 700;
     let names = BTreeMap::from([(7, "First Player".to_owned())]);
-    let announcement = golden_wheel_announcement(7, &[first, second], &names);
+    let announcement = golden_wheel_announcement(7, &[(7, 900), (8, 700)], &names);
     assert!(!announcement.ephemeral);
     assert_eq!(
         announcement.allowed_mentions,
@@ -2836,71 +2785,6 @@ fn nested_option_parser_reads_discord_subcommand_payload() {
 }
 
 #[test]
-fn event_multiplier_changes_numeric_wedges_but_not_special_values() {
-    let mut positive = cama_app::wheel::WheelWedge {
-        label: "10".to_owned(),
-        value: WheelValue::Numeric(10),
-        color: "#fff",
-    };
-    apply_event_multiplier_to_wedge(&mut positive, 1.5, 0.5);
-    assert_eq!(positive.value, WheelValue::Numeric(15));
-    assert_eq!(positive.label, "15");
-
-    let mut zero = cama_app::wheel::WheelWedge {
-        label: "LOSE".to_owned(),
-        value: WheelValue::Numeric(0),
-        color: "#000",
-    };
-    apply_event_multiplier_to_wedge(&mut zero, 10.0, 0.0);
-    assert_eq!(zero.value, WheelValue::Numeric(0));
-    assert_eq!(zero.label, "LOSE");
-
-    let mut mechanic = cama_app::wheel::WheelWedge {
-        label: "DISCOVER".to_owned(),
-        value: WheelValue::Mechanic(WheelMechanic::Discover),
-        color: "#000",
-    };
-    apply_event_multiplier_to_wedge(&mut mechanic, 2.0, 2.0);
-    assert_eq!(
-        mechanic.value,
-        WheelValue::Mechanic(WheelMechanic::Discover)
-    );
-    assert_eq!(mechanic.label, "DISCOVER");
-}
-
-#[test]
-fn gamba_special_minted_rewards_apply_event_after_central_scaling() {
-    assert_eq!(scale_minted_gamba_reward(50, 0.5, 1.0, false), 25);
-    assert_eq!(scale_minted_gamba_reward(100, 0.5, 1.0, false), 50);
-}
-
-#[test]
-fn gamba_chain_reaction_scales_only_the_newly_minted_copy() {
-    assert_eq!(scale_minted_gamba_reward(30, 0.5, 1.0, false), 15);
-}
-
-#[test]
-fn gamba_dynamic_minted_rewards_apply_event_and_report_adjusted_amount() {
-    assert_eq!(scale_minted_gamba_reward(20, 0.5, 1.0, false), 10);
-    assert_eq!(scale_minted_gamba_reward(50, 0.5, 1.0, false), 25);
-}
-
-#[test]
-fn gamba_heist_fallback_is_event_scaled() {
-    assert_eq!(scale_minted_gamba_reward(20, 0.5, 1.0, false), 10);
-}
-
-#[test]
-fn gamba_market_crash_fallback_is_event_scaled() {
-    assert_eq!(scale_minted_gamba_reward(25, 0.5, 1.0, false), 12);
-}
-
-#[test]
-fn gamba_hostile_takeover_fallback_is_event_scaled() {
-    assert_eq!(scale_minted_gamba_reward(40, 0.5, 1.0, false), 20);
-}
-
-#[test]
 fn gamba_numeric_and_player_transfer_rewards_are_not_double_scaled() {
     assert_eq!(apply_gamba_event_multiplier(20, 1.0, 1.0), 20);
     assert_eq!(apply_gamba_event_multiplier(12, 1.0, 1.0), 12);
@@ -2933,7 +2817,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         &wedge,
         WheelKind::Bankrupt,
         &effects,
-        &config,
+        &config.wheel_settlement(),
         "extend-no-penalty",
         &taxable,
         &BTreeSet::new(),
@@ -2944,6 +2828,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         None,
         &BTreeMap::new(),
         0,
+        1_700_000_000,
     )
     .expect("resolve no-op extension");
     assert_eq!(
@@ -2964,7 +2849,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         &wedge,
         WheelKind::Bankrupt,
         &effects,
-        &config,
+        &config.wheel_settlement(),
         "extend-active-penalty",
         &taxable,
         &BTreeSet::new(),
@@ -2975,6 +2860,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         None,
         &BTreeMap::new(),
         0,
+        1_700_000_000,
     )
     .expect("resolve active extension");
     assert_eq!(
@@ -3031,7 +2917,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             &wedge,
             WheelKind::Bankrupt,
             &ManaEffects::default(),
-            &runtime,
+            &runtime.wheel_settlement(),
             &event_id,
             &BTreeSet::new(),
             &BTreeSet::new(),
@@ -3042,6 +2928,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             None,
             &BTreeMap::new(),
             0,
+            1_700_000_000,
         )
         .expect("resolve bankrupt loss");
 
@@ -3082,7 +2969,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             &wedge,
             WheelKind::Bankrupt,
             &ManaEffects::default(),
-            &runtime,
+            &runtime.wheel_settlement(),
             &event_id,
             &BTreeSet::new(),
             &BTreeSet::new(),
@@ -3093,6 +2980,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             None,
             &BTreeMap::new(),
             0,
+            1_700_000_000,
         )
         .expect("retry bankrupt loss");
         assert_eq!(retry.logged, -expected_applied);
@@ -3178,6 +3066,7 @@ fn fully_shielded_numeric_wheel_losses_keep_their_landed_presentation_and_histor
             None,
             &BTreeMap::new(),
             &Mutex::default(),
+            &NoWheelReminders,
         )
         .expect("resolve pending numeric loss");
         assert!(
@@ -3756,7 +3645,7 @@ fn wheel_income_applies_vanity_tax_snapshot_and_stable_exact_once_key() {
         7,
         0,
         100,
-        &runtime,
+        &runtime.wheel_settlement(),
         "123:7:abc",
         "test wheel reward",
         &taxable_ids,
@@ -3798,7 +3687,7 @@ fn wheel_income_stacks_low_priority_tax_beside_the_vanity_tax() {
         7,
         0,
         100,
-        &runtime,
+        &runtime.wheel_settlement(),
         "321:7:abc",
         "test wheel reward",
         &taxable_ids,
@@ -3852,7 +3741,7 @@ fn wheel_income_leaves_players_outside_the_low_priority_set_untaxed() {
         8,
         0,
         100,
-        &runtime,
+        &runtime.wheel_settlement(),
         "322:8:abc",
         "test wheel reward",
         &BTreeSet::new(),
@@ -3895,7 +3784,7 @@ fn wheel_positive_delta_applies_blood_pact_once_through_protection_gateway() {
         7,
         0,
         100,
-        &runtime,
+        &runtime.wheel_settlement(),
         "wheel-blood-pact",
         "test wheel reward",
         &BTreeSet::new(),
@@ -3974,7 +3863,7 @@ fn wheel_blood_pact_skims_only_the_wheel_receipts_not_a_concurrent_credit() {
         7,
         0,
         100,
-        &runtime,
+        &runtime.wheel_settlement(),
         "wheel-concurrent-credit",
         "test wheel reward",
         &BTreeSet::new(),
@@ -4241,7 +4130,7 @@ async fn blue_mana_sixty_jc_choice_is_acknowledged_before_render_and_settles_at_
         user_id: 7,
         guild_id: 42,
         created_at: Instant::now(),
-        options: wedges.iter().map(wheel_option).collect(),
+        options: wedges.iter().map(WheelOption::from_wedge).collect(),
         wheel_wedges: wedges,
         golden: false,
         display_name: Some("player".to_owned()),
@@ -4365,7 +4254,7 @@ async fn wheel_component_reroll_replaces_public_gif_attachment() {
         user_id: 7,
         guild_id: 42,
         created_at: Instant::now(),
-        options: wedges.iter().map(wheel_option).collect(),
+        options: wedges.iter().map(WheelOption::from_wedge).collect(),
         wheel_wedges: wedges.clone(),
         golden: false,
         display_name: Some("player".to_owned()),
@@ -4433,118 +4322,6 @@ async fn wheel_component_reroll_replaces_public_gif_attachment() {
         ManaRepository::new(database.path())
             .is_bankrupt_buff_used(7, Some(42), BankruptBuff::Reroll)
             .expect("reroll claim")
-    );
-}
-
-#[test]
-fn hostile_result_notes_preserve_python_detail_fields() {
-    let config = ApplicationConfig::from_lookup(|name| {
-        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
-    })
-    .expect("configuration");
-    let config = BettingRuntimeConfig::from_application_config(&config);
-    let lightning = HostileResolution {
-        lightning_total: 27,
-        lightning_count: 2,
-        total: 27,
-        count: 2,
-        victims: vec![(11, 19), (12, 8)],
-        shield_absorbed_total: 3,
-        shielded_count: 1,
-        ..HostileResolution::default()
-    };
-    let names = BTreeMap::from([(11, "Server Alice".to_owned())]);
-    let note = hostile_result_note(WheelMechanic::LightningBolt, &lightning, &config, &names);
-    assert!(note.contains("**2** player(s)"));
-    assert!(note.contains("27"));
-    assert!(note.contains("Server Alice"));
-    assert!(note.contains("Unknown player"));
-    assert!(!note.contains("bob"));
-    assert!(note.contains("White Mana Shields"));
-
-    let shell = HostileResolution {
-        total: 12,
-        victim_id: Some(13),
-        victim_new_balance: Some(88),
-        ..HostileResolution::default()
-    };
-    let note = hostile_result_note(
-        WheelMechanic::RedShell,
-        &shell,
-        &config,
-        &BTreeMap::from([(13, "Server Rival".to_owned())]),
-    );
-    assert!(note.contains("Server Rival"));
-    assert!(note.contains("Victim's new balance: **88**"));
-}
-
-#[test]
-fn hostile_mechanics_only_target_visible_guild_members() {
-    // Python parity: every hostile victim pool reads the guild-member
-    // visibility-filtered leaderboard, so a departed ex-member with the
-    // largest balance can neither hold a rank nor be robbed.
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("schema");
-    let players = PlayerRepository::new(database.path());
-    players
-        .add(&NewPlayer::new(1, "spinner", Some(42)))
-        .expect("spinner");
-    players
-        .add(&NewPlayer::new(2, "member", Some(42)))
-        .expect("member");
-    players
-        .add(&NewPlayer::new(99, "departed", Some(42)))
-        .expect("departed");
-    players
-        .update_balance(1, Some(42), 100)
-        .expect("spinner balance");
-    players
-        .update_balance(2, Some(42), 100)
-        .expect("member balance");
-    players
-        .update_balance(99, Some(42), 1_000)
-        .expect("departed balance");
-    let config = ApplicationConfig::from_lookup(|name| {
-        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
-    })
-    .expect("configuration");
-    let config = BettingRuntimeConfig::from_application_config(&config);
-    let visible = BTreeSet::from([1_i64, 2]);
-
-    let resolution = resolve_hostile_mechanic(
-        database.path(),
-        42,
-        1,
-        100,
-        WheelMechanic::Heist,
-        "heist-visibility",
-        &config,
-        &BTreeSet::new(),
-        &BTreeSet::new(),
-        1.0,
-        Some(&visible),
-        0,
-    )
-    .expect("resolve heist");
-
-    assert!(resolution.total > 0, "the visible member must be robbed");
-    let departed_balance = players
-        .get_by_id(99, Some(42))
-        .expect("read departed")
-        .expect("departed row")
-        .jopacoin_balance;
-    assert_eq!(
-        departed_balance, 1_000,
-        "a departed ex-member must never be a hostile victim"
-    );
-    let member_balance = players
-        .get_by_id(2, Some(42))
-        .expect("read member")
-        .expect("member row")
-        .jopacoin_balance;
-    assert!(
-        member_balance < 100,
-        "the visible member funds the heist (was {member_balance})"
     );
 }
 
