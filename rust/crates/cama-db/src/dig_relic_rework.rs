@@ -13,8 +13,6 @@ use thiserror::Error;
 
 use crate::open_runtime_connection;
 
-pub const RELIC_LOADOUT_MAX: i64 = 6;
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RelicCapRepairReport {
     pub flagged_tunnels: usize,

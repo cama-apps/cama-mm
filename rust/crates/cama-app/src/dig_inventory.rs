@@ -248,23 +248,6 @@ where
         })
     }
 
-    pub fn ensure_auto_buy_items(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        item_types: &[&str],
-        reserved_balance: i64,
-    ) -> Result<Vec<AutoBuyAction>, P::Error> {
-        self.ensure_auto_buy_items_at(
-            discord_id,
-            guild_id,
-            item_types,
-            reserved_balance,
-            unix_timestamp(),
-            None,
-        )
-    }
-
     /// Deterministic seam for scheduled dig orchestration and stale-snapshot
     /// parity tests. Production callers normally pass `None` for the observed
     /// balance and let the repository use its live transaction snapshot.
@@ -394,14 +377,6 @@ where
                 format!("Trap costs {cost} JC but you only have {balance} JC."),
             ),
         })
-    }
-
-    pub fn buy_insurance(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<DigInventoryAction, P::Error> {
-        self.buy_insurance_at(discord_id, guild_id, unix_timestamp())
     }
 
     pub fn buy_insurance_at(

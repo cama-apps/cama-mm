@@ -11,8 +11,6 @@ use crate::interaction_safety::{
     edit_message_with_fallback, safe_defer,
 };
 
-pub const BOSS_MODAL_TIMEOUT_SECONDS: u64 = 600;
-pub const BOSS_DUEL_TIMEOUT_SECONDS: u64 = 120;
 pub const BOSS_WAGER_MAX_JC: i64 = 1_000;
 pub const BOSS_WAGER_LABEL: &str = "Wager Amount (max 1,000 JC)";
 pub const BOSS_WAGER_PLACEHOLDER: &str = "0-1000";

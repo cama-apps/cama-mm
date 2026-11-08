@@ -42,7 +42,7 @@ use cama_domain::dig_cave_in::{
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_gear::{AMULET_TIERS, ARMOR_TIERS, BOOTS_TIERS, WEAPON_TIERS, unique_gear};
 use cama_domain::game_date::game_date_for_timestamp;
-use cama_domain::mana::{ManaEffects, weather_combo_modifiers};
+use cama_domain::mana::{ManaEffects, mana_day_label_at, weather_combo_modifiers};
 use cama_domain::pet::{PetDigWork, PetDigWorkClaim};
 use chrono::NaiveDate;
 use rusqlite::{Transaction, TransactionBehavior};
@@ -74,6 +74,7 @@ use crate::dig_service::{
     defeated_boundaries_from_json, effective_dig_cooldown, layer_at, next_undefeated_boss,
     paid_dig_cost, scale_dig_minigame_jc, scale_dig_yield_once,
 };
+use crate::dig_tunnel_naming::DigTunnelNamingService;
 use crate::dig_tunnels::{
     aggregate_prestige_perk_effects, ascension_effects, mutation_effects, mutations_from_json,
     roll_corruption, round_prestige_perk_bonus_half_up,
@@ -323,11 +324,15 @@ pub struct DigRuntimeCanonicalEventRequest<'a> {
 
 impl DigRuntimeSnapshot {
     #[must_use]
-    pub fn fresh(discord_id: i64, guild_id: i64, balance: i64, now: i64) -> Self {
+    pub fn fresh(discord_id: i64, guild_id: i64, balance: i64, _now: i64) -> Self {
         Self {
             registered: true,
             balance,
-            tunnel: Some(DigRuntimeTunnel::new(discord_id, guild_id, now)),
+            tunnel: Some(DigRuntimeTunnel::new(
+                discord_id,
+                guild_id,
+                DigTunnelNamingService::default().generate_tunnel_name(),
+            )),
             inventory: Vec::new(),
             artifacts: Vec::new(),
             gear: Vec::new(),
@@ -556,11 +561,12 @@ pub trait DigRuntimeStore: Send + Sync {
     /// Resolve one immutable Mana snapshot for the whole admitted Dig.
     /// Every paid-cost, cooldown, hazard, yield, and tax policy reuses this
     /// value so a request cannot observe two different daily assignments.
+    /// `_mana_day` is the `cama_domain::mana` day label, not the game day.
     fn mana_effects(
         &self,
         _discord_id: i64,
         _guild_id: i64,
-        _today: &str,
+        _mana_day: &str,
     ) -> Result<ManaEffects, DigRuntimeStoreError> {
         Ok(ManaEffects::default())
     }
@@ -1613,7 +1619,7 @@ where
             current.tunnel = Some(DigRuntimeTunnel::new(
                 request.discord_id,
                 request.guild_id,
-                now,
+                DigTunnelNamingService::default().generate_tunnel_name(),
             ));
         }
         let tunnel = current
@@ -1776,8 +1782,11 @@ where
         let mana_effects = if first_dig {
             ManaEffects::default()
         } else {
+            // Mana is assigned on the daylight-saving 4 AM Los Angeles day,
+            // not the fixed UTC-8 game day used for Dig's own daily limits.
+            let mana_day = mana_day_label_at(now).unwrap_or_else(|| "unknown".to_owned());
             self.store
-                .mana_effects(request.discord_id, request.guild_id, &today)?
+                .mana_effects(request.discord_id, request.guild_id, &mana_day)?
         };
         let paid_count = if tunnel.paid_dig_date.as_deref() == Some(today.as_str()) {
             usize::try_from(tunnel.paid_digs_today.max(0)).unwrap_or(usize::MAX)

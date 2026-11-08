@@ -1426,13 +1426,6 @@ impl InMemorySplashState {
             );
     }
 
-    pub fn fail_next_settlement(&self) {
-        self.state
-            .lock()
-            .expect("splash-state mutex poisoned")
-            .fail_next = true;
-    }
-
     #[must_use]
     pub fn balance(&self, guild_id: u64, discord_id: u64) -> Option<i64> {
         self.state

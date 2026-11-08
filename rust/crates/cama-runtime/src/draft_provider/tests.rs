@@ -529,6 +529,8 @@ fn provider_fixture() -> (
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
+            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
+                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -668,6 +670,8 @@ fn provider_fixture_with_scheduler(
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
+            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
+                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -722,6 +726,8 @@ async fn populated_lobby_fixture() -> (
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
+            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
+                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -953,6 +959,8 @@ fn provider_recreation_hydrates_state_phase_message_and_deadline() {
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
+            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
+                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -1164,6 +1172,8 @@ fn draft_ready_observer_hydrates_active_rows_idempotently() {
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
+            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
+                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -1242,6 +1252,8 @@ fn draft_ready_observer_ignores_foreign_guild_rows_before_transport() {
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
+            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
+                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -3664,6 +3676,8 @@ fn hydration_skips_unfenced_complete_state_for_recovery() {
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
+            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
+                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -5068,6 +5082,8 @@ fn one_guild_hydration_failure_does_not_block_other_guilds() {
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
+            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
+                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),

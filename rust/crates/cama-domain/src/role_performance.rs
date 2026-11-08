@@ -54,13 +54,6 @@ pub fn role_factor(record: RoleRecord) -> f64 {
     MIN_ROLE_FACTOR + (MAX_ROLE_FACTOR - MIN_ROLE_FACTOR) * win_rate
 }
 
-/// Apply [`role_factor`] to a base rating value, clamped at zero to match the
-/// effective-value contract used elsewhere in team scoring.
-#[must_use]
-pub fn adjusted_value(base_value: f64, record: RoleRecord) -> f64 {
-    (base_value * role_factor(record)).max(0.0)
-}
-
 #[cfg(test)]
 #[path = "role_performance/tests.rs"]
 mod tests;

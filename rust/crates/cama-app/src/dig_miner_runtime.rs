@@ -93,6 +93,8 @@ pub enum DigMinerRuntimeError {
     Repository(#[from] DigMinerRuntimeRepositoryError),
     #[error("invalid Dig miner state: {0}")]
     InvalidState(String),
+    #[error("Dig tunnel name repair failed: {0}")]
+    NameRepair(#[from] rusqlite::Error),
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +111,19 @@ impl DigMinerRuntimeService {
             repository: DigMinerRuntimeRepository::new(&path),
             path,
         }
+    }
+
+    /// Give every tunnel still stored under the old `Miner <owner id>`
+    /// placeholder a generated name, so no public title shows the ID. Safe to
+    /// run on every start: renamed tunnels no longer match. Returns how many
+    /// tunnels were renamed.
+    pub fn repair_placeholder_tunnel_names(&self) -> Result<usize, DigMinerRuntimeError> {
+        let mut connection = cama_db::open_runtime_connection(&self.path)?;
+        let mut naming = DigTunnelNamingService::default();
+        Ok(cama_db::dig_runtime_store::repair_placeholder_tunnel_names(
+            &mut connection,
+            || naming.generate_tunnel_name(),
+        )?)
     }
 
     pub fn profile(

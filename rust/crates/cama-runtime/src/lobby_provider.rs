@@ -114,6 +114,8 @@ pub struct LobbyRuntimeConfig {
     /// A ready check against too small a lobby wastes everyone's react.
     /// Fixed for now rather than a per-guild setting.
     pub min_readycheck_players: usize,
+    /// Fingerprint of the deployment's configured OpenSkill system.
+    pub openskill_algorithm_fingerprint: String,
 }
 
 impl LobbyRuntimeConfig {
@@ -140,6 +142,7 @@ impl LobbyRuntimeConfig {
             max_players: positive_usize(config.values.lobby_max_players, "LOBBY_MAX_PLAYERS")?,
             first_game_pool_daily_amount: config.values.first_game_pool_daily_amount,
             min_readycheck_players: MINIMUM_READYCHECK_PLAYERS,
+            openskill_algorithm_fingerprint: config.migration.openskill.algorithm_fingerprint(),
         })
     }
 }
@@ -1685,6 +1688,9 @@ fn mutate_fake_lobby_blocking(
             fastrand::shuffle(&mut roles);
             let role_count = 1 + fastrand::usize(..roles.len());
             let mut player = NewPlayer::new(fake_id, &fake_name, Some(scope.guild_id.0));
+            player
+                .openskill_algorithm_fingerprint
+                .clone_from(&state.config.openskill_algorithm_fingerprint);
             player.glicko_rating = Some(f64::from(fastrand::u16(1_000..2_001)));
             player.glicko_rd = Some(50.0 + fastrand::f64() * 300.0);
             player.glicko_volatility = Some(0.06);

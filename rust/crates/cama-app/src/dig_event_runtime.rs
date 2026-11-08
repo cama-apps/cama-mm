@@ -29,8 +29,7 @@ use cama_domain::dig_cave_in::{CAVE_IN_BLOCK_LOSS_RANGES, cave_in_band};
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_splash::{HOSTILE_LOSS_MIN_BALANCE, strengthen_dig_event_penalty};
 use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
-use cama_domain::game_date::game_date_for_timestamp;
-use cama_domain::mana::ManaEffects;
+use cama_domain::mana::{ManaEffects, mana_day_label_at};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -51,6 +50,7 @@ use crate::dig_runtime::{DigRuntimeConfig, DigRuntimeEventRequest};
 use crate::dig_service::{defeated_boundaries_from_json, next_undefeated_boss};
 use crate::dig_tunnels::ascension_effects;
 use crate::economy_event_sqlite::SqliteEconomyEventService;
+use crate::mana_effects_service::color_for_land;
 
 const EVENT_INVENTORY_CAPACITY: usize = 8;
 pub const DIG_EVENT_VIEW_TIMEOUT_SECONDS: i64 = 60;
@@ -1821,8 +1821,9 @@ impl DigEventRuntimeService {
         if amount <= 0 {
             return Ok(SplashExecution::empty(splash, &resolution.event_name));
         }
-        let mana_date = game_date_for_timestamp(request.now as f64)
-            .map_err(|error| DigEventRuntimeError::Splash(error.to_string()))?;
+        let mana_date = mana_day_label_at(request.now).ok_or_else(|| {
+            DigEventRuntimeError::Splash("timestamp is outside the supported range".to_owned())
+        })?;
         let destination = if splash.mode == "steal" {
             HostileDestination::Player
         } else {
@@ -2145,7 +2146,7 @@ impl DigEventRuntimeService {
         if amount <= 0 {
             return amount;
         }
-        let Ok(today) = game_date_for_timestamp(request.now as f64) else {
+        let Some(today) = mana_day_label_at(request.now) else {
             return amount;
         };
         let effects = ManaRepository::new(&self.path)
@@ -2746,14 +2747,7 @@ fn next_boss_boundary(raw: &str) -> Option<i64> {
 }
 
 fn mana_effects_for_land(land: &str) -> ManaEffects {
-    let color = match land {
-        "Mountain" => Some("Red"),
-        "Island" => Some("Blue"),
-        "Forest" => Some("Green"),
-        "Plains" => Some("White"),
-        "Swamp" => Some("Black"),
-        _ => None,
-    };
+    let color = color_for_land(land);
     ManaEffects::for_color(color, color.map(|_| land))
 }
 

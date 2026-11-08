@@ -17,9 +17,11 @@ use cama_db::dig_boss_runtime::{
     DigBossPreparationActivation, DigBossPreparationActivationOutcome, DigBossRegularGearGrant,
     DigBossRuntimeArtifactGrant, DigBossRuntimeAudit, DigBossRuntimeCommit,
     DigBossRuntimeCommitOutcome, DigBossRuntimeEcho, DigBossRuntimeKey, DigBossRuntimeRepository,
-    DigBossRuntimeSnapshot, DigBossRuntimeState,
+    DigBossRuntimeRepositoryError, DigBossRuntimeSnapshot, DigBossRuntimeState,
 };
-use cama_db::dig_carry_wager::{CarryTunnelKey, DigCarryWagerRepository};
+use cama_db::dig_carry_wager::{
+    CARRIED_WAGER_ESCROWED_KEY, CarryTunnelKey, DigCarryWagerRepository,
+};
 use cama_db::dig_gear_runtime::DigGearRuntimeRepository;
 use cama_db::dig_inventory_repository::DigInventoryRepository;
 use cama_db::mana_service_repository::ManaRepository;
@@ -33,8 +35,7 @@ use cama_domain::dig_gear::{
     GearSlot as DomainGearSlot, apply_gear_to_combat, drop_tier_at_depth, tier_table, unique_gear,
 };
 use cama_domain::dig_stats::survival_roll_bonus;
-use cama_domain::game_date::game_date_for_timestamp;
-use cama_domain::mana::ManaEffects;
+use cama_domain::mana::{ManaEffects, mana_day_label_at};
 use cama_domain::pet::{PetMood as DomainPetMood, PetStage as DomainPetStage, get_species};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -49,14 +50,15 @@ use crate::boss_multi_tier::{
     BossCombatPreparationPort, BossCombatPreparationRequest, BossMultiTierService, BossNotice,
     BossOutcomeSinkPort, BossPreparationActivationPort, BossPreparationMutation,
     BossPreparationState, BossProgress, BossProgressEntry, BossProgressValue, BossRepositoryPort,
-    BossServiceError, BossStatus, CombatEffects, CombatState, Combatant, CurseKind, EchoRecord,
-    EconomyEventPort, EntropyPort, FixedClock, GearRepairPort, GearSnapshot, GearWearResult,
-    GuildId, MechanicDefinition, MechanicOption as CoreMechanicOption, MechanicRoundRecord,
-    MechanicStatusEffect, OutcomeRoll as CoreOutcomeRoll, PLAYER_HIT_CEILING, PLAYER_HIT_FLOOR,
-    PausedBossDuel, PendingPrompt, PlayerKey, PromptOption, RepositoryCommit, RepositoryError,
-    ResolvedFight, RoundEffectLog, RoundRecord, ScoutResult, StartBossDuelOutcome,
-    StingerCurseState, WAGERED_PLAYER_HIT_FLOOR, apply_option_outcome, at_boss_boundary,
-    calibrate_combat_player_hit, mechanic_by_id, regular_boss_wager_allowed, run_combat_round,
+    BossServiceError, BossStake, BossStatus, CombatEffects, CombatState, Combatant, CurseKind,
+    EchoRecord, EconomyEventPort, EntropyPort, FixedClock, GearRepairPort, GearSnapshot,
+    GearWearResult, GuildId, MechanicDefinition, MechanicOption as CoreMechanicOption,
+    MechanicRoundRecord, MechanicStatusEffect, OutcomeRoll as CoreOutcomeRoll, PLAYER_HIT_CEILING,
+    PLAYER_HIT_FLOOR, PausedBossDuel, PendingPrompt, PlayerKey, PromptOption, RepositoryCommit,
+    RepositoryError, ResolvedFight, RoundEffectLog, RoundRecord, ScoutResult, StartBossDuelOutcome,
+    StingerCurseState, WAGERED_PLAYER_HIT_FLOOR, WagerEscrow, apply_option_outcome,
+    at_boss_boundary, calibrate_combat_player_hit, mechanic_by_id, regular_boss_wager_allowed,
+    run_combat_round,
 };
 use crate::dig_bosses::{
     BarkContext, CombatStats as BossCombatStats, DialogueSlots, DuelOddsInput, PINNACLE_DEPTH,
@@ -70,10 +72,16 @@ use crate::dig_carry_wager::{
 };
 use crate::dig_relic_rework::{SHIFTING_IDOL_PLAYER_HIT_CEILING, ShiftingIdolBonus};
 use crate::dig_service::{BOSS_REST_PENDING_KEY, DIG_STARTING_STAT_POINTS};
+use crate::dig_tunnel_naming::DigTunnelNamingService;
 use crate::economy_event_service::EconomyEventConfig;
 use crate::economy_event_sqlite::SqliteEconomyEventService;
+use crate::mana_effects_service::color_for_land;
 use crate::service_container::PersistentVanityTaxService;
 use crate::vanity_tax_service::VanityTaxService;
+
+/// Audit action for a paused duel's escrowed stake. It is not a boss fight,
+/// so fight statistics never count it.
+const BOSS_WAGER_ESCROW_ACTION: &str = "boss_wager_escrow";
 
 #[derive(Clone, Debug)]
 struct LoadedBossSnapshot {
@@ -247,6 +255,28 @@ impl BossRepositoryPort for SqliteBossRepository {
             .audit
             .as_ref()
             .map(|audit| boss_audit_detail(audit, &commit));
+        let paused_row = commit
+            .paused_duel
+            .as_ref()
+            .map(|duel| paused_duel_row(key, duel, self.now))
+            .transpose()
+            .map_err(|error| self.repository_error(error))?;
+        // Escrowing a paused duel's stake moves the balance without settling a
+        // fight, so it is audited (and ledgered) as its own action rather than
+        // as a boss fight.
+        let escrow_detail = commit
+            .paused_duel
+            .as_ref()
+            .filter(|_| commit.audit.is_none() && proposed.balance != loaded.snapshot.balance)
+            .map(|duel| {
+                json!({
+                    "boss_id": duel.boss_id,
+                    "boundary": duel.boundary,
+                    "wager": duel.wager,
+                    "risk_tier": risk_name(duel.risk_tier),
+                })
+                .to_string()
+            });
         let audit = commit
             .audit
             .as_ref()
@@ -256,6 +286,16 @@ impl BossRepositoryPort for SqliteBossRepository {
                 target_id: None,
                 detail_json,
                 created_at: self.now,
+            })
+            .or_else(|| {
+                escrow_detail
+                    .as_deref()
+                    .map(|detail_json| DigBossRuntimeAudit {
+                        action_type: BOSS_WAGER_ESCROW_ACTION,
+                        target_id: None,
+                        detail_json,
+                        created_at: self.now,
+                    })
             });
         let echo = commit.echo.as_ref().map(|echo| DigBossRuntimeEcho {
             boss_id: &echo.boss_id,
@@ -283,11 +323,20 @@ impl BossRepositoryPort for SqliteBossRepository {
                 vanity_tax: commit.vanity_tax,
                 low_priority_tax: commit.low_priority_tax,
                 consume_lantern_id,
+                save_duel: paused_row.as_ref(),
+                abandon_duel: None,
             })
-            .map_err(|error| self.repository_error(error))?;
+            .map_err(|error| match error {
+                DigBossRuntimeRepositoryError::DuelAlreadyActive => {
+                    RepositoryError::DuelAlreadyActive
+                }
+                error => self.repository_error(error),
+            })?;
         match outcome {
             DigBossRuntimeCommitOutcome::Applied(receipt) => {
-                self.last_action_id = receipt.action_id;
+                // Escrowing a stake settles nothing, so only a fight audit is
+                // reported as the resolution's action.
+                self.last_action_id = commit.audit.as_ref().and(receipt.action_id);
                 if let Some(audit) = commit.audit {
                     self.audits.push(audit);
                 }
@@ -298,18 +347,6 @@ impl BossRepositoryPort for SqliteBossRepository {
             DigBossRuntimeCommitOutcome::MissingPlayer
             | DigBossRuntimeCommitOutcome::MissingTunnel => Err(RepositoryError::MissingTunnel),
         }
-    }
-
-    fn save_active_duel(
-        &mut self,
-        key: PlayerKey,
-        duel: PausedBossDuel,
-    ) -> Result<(), RepositoryError> {
-        let row =
-            paused_duel_row(key, &duel, self.now).map_err(|error| self.repository_error(error))?;
-        self.repository
-            .save_active_duel(&row)
-            .map_err(|error| self.repository_error(error))
     }
 
     fn claim_active_duel(
@@ -654,7 +691,7 @@ impl SqliteBossCombatPreparation {
     }
 
     fn mana_effects(&self, key: PlayerKey, now: i64) -> ManaEffects {
-        let Ok(today) = game_date_for_timestamp(now as f64) else {
+        let Some(today) = mana_day_label_at(now) else {
             return ManaEffects::default();
         };
         match ManaRepository::new(&self.database_path).get_mana(key.player_id, Some(key.guild_id.0))
@@ -896,14 +933,7 @@ impl BossCombatPreparationPort for SqliteBossCombatPreparation {
 }
 
 fn mana_effects_for_land(land: &str) -> ManaEffects {
-    let color = match land {
-        "Mountain" => Some("Red"),
-        "Island" => Some("Blue"),
-        "Forest" => Some("Green"),
-        "Plains" => Some("White"),
-        "Swamp" => Some("Black"),
-        _ => None,
-    };
+    let color = color_for_land(land);
     ManaEffects::for_color(color, color.map(|_| land))
 }
 
@@ -1310,6 +1340,7 @@ fn paused_duel_row(
         "gear_snapshot_ids": duel.gear_snapshot.gear_ids,
         "armor_snapshot_id": duel.gear_snapshot.armor_id,
         "forced_no_wager_phase": duel.forced_no_wager_phase,
+        "wager_escrowed": duel.wager_escrowed,
     })
     .to_string();
     Ok(DigBossPausedDuelRow {
@@ -1430,6 +1461,8 @@ fn paused_duel_from_row(row: &DigBossPausedDuelRow) -> Result<PausedBossDuel, St
             armor_id: status.get("armor_snapshot_id").and_then(Value::as_i64),
         },
         forced_no_wager_phase: json_bool(status.get("forced_no_wager_phase")),
+        // Rows paused before stakes were escrowed carry no marker.
+        wager_escrowed: json_bool(status.get("wager_escrowed")),
         echo_applied: row.echo_applied,
         echo_killer_id: row.echo_killer_id,
     })
@@ -1745,10 +1778,42 @@ fn clear_carried_wager_json(
     {
         entry.remove("carried_wager");
         entry.remove("carried_risk_tier");
+        entry.remove(CARRIED_WAGER_ESCROWED_KEY);
     }
     serde_json::to_string(&value)
         .map(Some)
         .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))
+}
+
+/// The boss boundary a runtime snapshot is parked on, by the dig gate's rule.
+fn snapshot_boss_boundary(snapshot: &DigBossRuntimeSnapshot) -> Option<i64> {
+    let defeated = crate::dig_service::defeated_boundaries_from_json(
+        snapshot.boss_progress_json.as_deref().unwrap_or("{}"),
+    );
+    crate::dig_service::parked_boss_boundary(snapshot.depth, &defeated)
+}
+
+/// Escrow a new stake on a proposed runtime state, the raw-state twin of
+/// [`BossStake::escrow`] for settlements written straight to the repository.
+fn escrow_pending_stake(
+    proposed: &mut DigBossRuntimeState,
+    amount: i64,
+    consumes_halving_curse: bool,
+) -> Result<(), BossServiceError> {
+    if amount > 0 && proposed.balance < amount {
+        return Err(BossServiceError::InsufficientBalance {
+            wager: amount,
+            balance: proposed.balance,
+        });
+    }
+    proposed.balance -= amount;
+    if consumes_halving_curse {
+        let mut curse = parse_stinger_curse(proposed.stinger_curse_json.as_deref());
+        curse.consume(CurseKind::HalveNextWager);
+        proposed.stinger_curse_json =
+            merge_stinger_curse(proposed.stinger_curse_json.as_deref(), &curse);
+    }
+    Ok(())
 }
 
 fn gear_snapshot_from_paused_row(row: &DigBossPausedDuelRow) -> DigBossGearSnapshot {
@@ -2199,6 +2264,7 @@ struct PinnacleSettlementInput {
     phase: u8,
     risk_tier: RiskTier,
     wager: i64,
+    escrow: WagerEscrow,
     won: bool,
     ending_boss_hp: i32,
     boss_hp_max: i32,
@@ -2519,6 +2585,16 @@ impl DigBossRuntimeService {
             .active_duel(database_key(request.player_key()))
             .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             .ok_or(BossServiceError::NoActiveDuel)?;
+        if !self.paused_encounter_is_live(request, &active)? {
+            // The tunnel left this encounter while the prompt was open. The
+            // duel is forfeited like any abandoned pause instead of restoring
+            // the depth or paying the wager.
+            let boundary = narrow_i32(active.boundary, "duel boundary")
+                .map_err(DigBossRuntimeError::Infrastructure)?;
+            let abandoned = self.claim_abandoned_duel(request, boundary)?;
+            self.settle_abandoned_gear(request, abandoned.as_ref())?;
+            return Err(BossServiceError::DuelEncounterEnded.into());
+        }
         if active.boundary == i64::from(PINNACLE_DEPTH) {
             self.resume_pinnacle(request, option_index, entropy)
                 .map(|result| {
@@ -2554,8 +2630,14 @@ impl DigBossRuntimeService {
     }
 
     /// Atomically retreat from either a regular or pinnacle encounter. Depth,
-    /// carry removal, clamped half-stake forfeit and audit share the actor CAS,
-    /// matching Python's double-click/failure boundary.
+    /// carry removal, the half-stake forfeit, any paused duel the retreat
+    /// abandons, and the audit share the actor CAS, matching Python's
+    /// double-click/failure boundary.
+    ///
+    /// A paused duel is forfeited in full, exactly as a replacement Fight
+    /// would forfeit it; its escrowed stake is already gone, so only a legacy
+    /// pause still debits here. Without a paused duel, an escrowed pinnacle
+    /// carry returns the half that is not forfeited.
     pub fn retreat<E: EntropyPort>(
         &self,
         request: DigBossRuntimeRequest,
@@ -2576,13 +2658,33 @@ impl DigBossRuntimeService {
                 .ok_or(BossServiceError::MissingTunnel)?;
             let boundary = current_boss_boundary(&carry_snapshot)
                 .ok_or(BossServiceError::NotAtBossBoundary)?;
+            let abandoned = repository
+                .active_duel(database_key(request.player_key()))
+                .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?;
             let block_loss = entropy.inclusive_i32(2, 3).clamp(2, 3);
-            let carried_wager_forfeit =
-                active_pinnacle_carry(&carry_snapshot, boundary).map_or(0, |carry| carry.wager / 2);
-            let actual_forfeit = carried_wager_forfeit.min(expected.balance.max(0));
+            let (carried_wager_forfeit, stake_delta, abandoned_wager_forfeit) =
+                if let Some(duel) = abandoned.as_ref() {
+                    let forfeit = duel.wager.max(0);
+                    if duel.wager_escrowed() {
+                        (0, 0, forfeit)
+                    } else {
+                        let debit = forfeit.min(expected.balance.max(0));
+                        (0, -debit, debit)
+                    }
+                } else if let Some(carry) = active_pinnacle_carry(&carry_snapshot, boundary) {
+                    let forfeit = carry.wager / 2;
+                    if carry_snapshot.carried_wager_escrowed(boundary) {
+                        (forfeit, carry.wager - forfeit, 0)
+                    } else {
+                        let debit = forfeit.min(expected.balance.max(0));
+                        (debit, -debit, 0)
+                    }
+                } else {
+                    (0, 0, 0)
+                };
             let mut proposed = DigBossRuntimeState::from(&expected);
             proposed.depth = proposed.depth.saturating_sub(i64::from(block_loss)).max(0);
-            proposed.balance = proposed.balance.saturating_sub(actual_forfeit);
+            proposed.balance = proposed.balance.saturating_add(stake_delta);
             let mut progress = boss_progress_object(proposed.boss_progress_json.as_deref());
             let entry = progress
                 .entry(boundary.to_string())
@@ -2601,11 +2703,14 @@ impl DigBossRuntimeService {
             entry.insert(BOSS_REST_PENDING_KEY.to_owned(), Value::Bool(true));
             entry.remove("carried_wager");
             entry.remove("carried_risk_tier");
+            entry.remove(CARRIED_WAGER_ESCROWED_KEY);
             proposed.boss_progress_json = Some(Value::Object(progress).to_string());
             let detail = json!({
                 "boundary":boundary,
                 "loss":block_loss,
-                "carried_wager_forfeit":actual_forfeit,
+                "carried_wager_forfeit":carried_wager_forfeit,
+                "abandoned_duel_wager_forfeit":abandoned_wager_forfeit,
+                "balance_delta":stake_delta,
             })
             .to_string();
             match repository
@@ -2624,10 +2729,19 @@ impl DigBossRuntimeService {
                     vanity_tax: 0,
                     low_priority_tax: 0,
                     consume_lantern_id: None,
+                    save_duel: None,
+                    abandon_duel: abandoned.as_ref(),
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
                 DigBossRuntimeCommitOutcome::Applied(receipt) => {
+                    let abandoned = abandoned.map(|row| ClaimedAbandonedDuel {
+                        row,
+                        action_id: receipt.action_id,
+                        wager_forfeit: abandoned_wager_forfeit,
+                    });
+                    let abandoned_gear_wear =
+                        self.settle_abandoned_gear(request, abandoned.as_ref())?;
                     return Ok(DigBossRuntimeResult {
                         outcome: DigBossRetreatOutcome {
                             boundary: narrow_i32(boundary, "boss boundary")
@@ -2635,13 +2749,15 @@ impl DigBossRuntimeService {
                             block_loss,
                             new_depth: narrow_i32(proposed.depth, "retreat depth")
                                 .map_err(DigBossRuntimeError::Infrastructure)?,
-                            carried_wager_forfeit: actual_forfeit,
-                            actual_balance_delta: -actual_forfeit,
+                            carried_wager_forfeit,
+                            actual_balance_delta: stake_delta,
                         },
                         action_id: receipt.action_id,
-                        abandoned_action_id: None,
-                        abandoned_wager_forfeit: 0,
-                        abandoned_gear_wear: GearWearResult::default(),
+                        abandoned_action_id: abandoned
+                            .as_ref()
+                            .and_then(|abandoned| abandoned.action_id),
+                        abandoned_wager_forfeit,
+                        abandoned_gear_wear,
                         gear_drop: None,
                         prestige_relic_drop: None,
                         broken_gear: Vec::new(),
@@ -2709,7 +2825,8 @@ impl DigBossRuntimeService {
                     expected: &snapshot,
                     proposed_target_cheer_data_json: &encoded,
                     cheerer_last_cheer_at: now,
-                    create_cheerer_tunnel_name: &format!("Miner {cheerer_id}"),
+                    create_cheerer_tunnel_name: &DigTunnelNamingService::default()
+                        .generate_tunnel_name(),
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -2740,7 +2857,7 @@ impl DigBossRuntimeService {
     ) -> Result<DigBossRuntimeResult<StartBossDuelOutcome>, DigBossRuntimeError> {
         let boundary = self.regular_boundary(request)?;
         let abandoned = self.claim_abandoned_duel(request, boundary)?;
-        let wager = self.validate_and_resolve_start_wager(request, boundary, wager)?;
+        self.validate_start_wager(request, boundary, wager)?;
         self.activate_start_preparation(request, boundary)?;
         let abandoned_gear_wear = self.settle_abandoned_gear(request, abandoned.as_ref())?;
         let mut service = self.compose(request.now, entropy);
@@ -2936,16 +3053,6 @@ impl DigBossRuntimeService {
         finish_composed(&mut service, outcome)
     }
 
-    pub fn retreat_regular<E: EntropyPort>(
-        &self,
-        request: DigBossRuntimeRequest,
-        entropy: E,
-    ) -> Result<DigBossRuntimeResult<i32>, DigBossRuntimeError> {
-        let mut service = self.compose(request.now, entropy);
-        let outcome = service.retreat_boss(request.player_key());
-        finish_composed(&mut service, outcome)
-    }
-
     pub fn start_pinnacle<E: EntropyPort>(
         &self,
         request: DigBossRuntimeRequest,
@@ -2955,12 +3062,12 @@ impl DigBossRuntimeService {
     ) -> Result<DigBossRuntimeResult<DigPinnacleStartOutcome>, DigBossRuntimeError> {
         self.pinnacle_snapshot(request)?;
         let abandoned = self.claim_abandoned_duel(request, PINNACLE_DEPTH)?;
-        let (risk_tier, wager) =
+        let (risk_tier, wager, escrow) =
             self.validate_and_resolve_pinnacle_wager(request, risk_tier, wager)?;
         self.activate_start_preparation(request, PINNACLE_DEPTH)?;
         let abandoned_gear_wear = self.settle_abandoned_gear(request, abandoned.as_ref())?;
         let attempt = self.prepare_pinnacle_attempt(request, risk_tier, wager, &mut entropy)?;
-        let mut result = self.run_pinnacle_attempt(request, attempt, &mut entropy)?;
+        let mut result = self.run_pinnacle_attempt(request, attempt, escrow, &mut entropy)?;
         if let Some(abandoned) = abandoned {
             result.abandoned_action_id = abandoned.action_id;
             result.abandoned_wager_forfeit = abandoned.wager_forfeit;
@@ -3093,6 +3200,7 @@ impl DigBossRuntimeService {
                 phase,
                 risk_tier: paused.risk_tier,
                 wager: paused.wager,
+                escrow: WagerEscrow::for_paused(paused.wager_escrowed),
                 won,
                 ending_boss_hp: paused.combat.boss_hp,
                 boss_hp_max: paused.boss_hp_max,
@@ -3139,14 +3247,9 @@ impl DigBossRuntimeService {
         Ok(snapshot)
     }
 
-    /// The pinnacle phase of an already-claimed duel, read without the
-    /// at-the-boundary gate.
-    ///
-    /// Once `claim_active_duel` has deleted the paused row, the duel is the
-    /// only record of the wagered stake: failing here would drop the fight
-    /// without settling it, letting a player who retreated mid-mechanic void a
-    /// losing wager entirely. The claimed row is the authority, so a player who
-    /// has since left the boundary still settles.
+    /// The pinnacle phase of an already-claimed duel. Whether the tunnel is
+    /// still at the boundary is decided by the guarded settlement, which
+    /// refuses to pay a fight the tunnel has since left.
     fn claimed_pinnacle_phase(
         &self,
         request: DigBossRuntimeRequest,
@@ -3163,12 +3266,16 @@ impl DigBossRuntimeService {
             .map_err(|_| DigBossRuntimeError::InvalidPinnacle("phase is outside u8".to_owned()))
     }
 
+    /// The risk, stake and escrow state for a pinnacle start. A carried wager
+    /// keeps the escrow it was carried with; a new wager is priced by the
+    /// canonical [`BossStake::resolve`] and escrowed by the commit that pauses
+    /// or settles the attempt.
     fn validate_and_resolve_pinnacle_wager(
         &self,
         request: DigBossRuntimeRequest,
         requested_risk: RiskTier,
         requested_wager: i64,
-    ) -> Result<(RiskTier, i64), DigBossRuntimeError> {
+    ) -> Result<(RiskTier, i64, WagerEscrow), DigBossRuntimeError> {
         let key = CarryTunnelKey {
             discord_id: request.discord_id,
             guild_id: Some(request.guild_id),
@@ -3183,7 +3290,12 @@ impl DigBossRuntimeService {
                 return Err(BossServiceError::NotAtBossBoundary.into());
             }
             if let Some(carried) = active_pinnacle_carry(&snapshot, i64::from(PINNACLE_DEPTH)) {
-                return Ok((carried.risk_tier, carried.wager));
+                let escrowed = snapshot.carried_wager_escrowed(i64::from(PINNACLE_DEPTH));
+                return Ok((
+                    carried.risk_tier,
+                    carried.wager,
+                    WagerEscrow::for_paused(escrowed),
+                ));
             }
             if requested_wager < 0 {
                 return Err(BossServiceError::NegativeWager.into());
@@ -3194,69 +3306,33 @@ impl DigBossRuntimeService {
                     maximum: MAX_NEW_BOSS_WAGER,
                 });
             }
-            let resolved = self.resolve_new_pinnacle_wager(request, requested_wager)?;
+            let repository = SqliteBossRepository::new(&self.config.database_path, request.now);
+            let tunnel = repository
+                .load_tunnel(request.player_key())
+                .ok_or_else(|| match repository.take_error() {
+                    Some(error) => DigBossRuntimeError::Infrastructure(error),
+                    None => BossServiceError::MissingTunnel.into(),
+                })?;
+            let stake = BossStake::resolve(&tunnel, requested_wager)?;
+            let escrow = WagerEscrow::Pending {
+                consumes_halving_curse: stake.consumes_halving_curse,
+            };
             let has_stale_markers = snapshot
                 .entry(i64::from(PINNACLE_DEPTH))
                 .is_some_and(cama_db::dig_carry_wager::CarryProgressEntry::has_either_marker);
             if !has_stale_markers {
-                return Ok((requested_risk, resolved));
+                return Ok((requested_risk, stake.amount, escrow));
             }
             match carry_repository
                 .clear_carry_markers(&snapshot, i64::from(PINNACLE_DEPTH))
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
                 cama_db::dig_carry_wager::ClearCarryOutcome::Cleared { .. } => {
-                    return Ok((requested_risk, resolved));
+                    return Ok((requested_risk, stake.amount, escrow));
                 }
                 cama_db::dig_carry_wager::ClearCarryOutcome::Conflict => continue,
                 cama_db::dig_carry_wager::ClearCarryOutcome::MissingTunnel => {
                     return Err(BossServiceError::MissingTunnel.into());
-                }
-            }
-        }
-    }
-
-    fn resolve_new_pinnacle_wager(
-        &self,
-        request: DigBossRuntimeRequest,
-        wager: i64,
-    ) -> Result<i64, DigBossRuntimeError> {
-        if wager == 0 {
-            return Ok(0);
-        }
-        loop {
-            let mut repository = SqliteBossRepository::new(&self.config.database_path, request.now);
-            let tunnel = repository
-                .load_tunnel(request.player_key())
-                .ok_or(BossServiceError::MissingTunnel)?;
-            let cursed = tunnel.stinger_curse.contains(CurseKind::HalveNextWager);
-            let effective = if cursed { wager / 2 + wager % 2 } else { wager };
-            if tunnel.balance < effective {
-                return Err(BossServiceError::InsufficientBalance {
-                    wager: effective,
-                    balance: tunnel.balance,
-                }
-                .into());
-            }
-            if !cursed {
-                return Ok(effective);
-            }
-            let mut next = tunnel.clone();
-            next.stinger_curse.consume(CurseKind::HalveNextWager);
-            match repository.commit(
-                request.player_key(),
-                tunnel.revision,
-                RepositoryCommit {
-                    next_tunnel: next,
-                    ..RepositoryCommit::default()
-                },
-            ) {
-                Ok(()) => return Ok(effective),
-                Err(RepositoryError::Conflict) => continue,
-                Err(error) => {
-                    return Err(DigBossRuntimeError::Infrastructure(
-                        repository.take_error().unwrap_or_else(|| error.to_string()),
-                    ));
                 }
             }
         }
@@ -3292,6 +3368,8 @@ impl DigBossRuntimeService {
                     vanity_tax: 0,
                     low_priority_tax: 0,
                     consume_lantern_id: None,
+                    save_duel: None,
+                    abandon_duel: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -3537,6 +3615,8 @@ impl DigBossRuntimeService {
                     vanity_tax: 0,
                     low_priority_tax: 0,
                     consume_lantern_id: None,
+                    save_duel: None,
+                    abandon_duel: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -3606,10 +3686,64 @@ impl DigBossRuntimeService {
         })
     }
 
+    /// Save a paused pinnacle duel in the same guarded commit that escrows a
+    /// new stake and consumes the curse that halved it. A carried stake was
+    /// escrowed (or not, for a legacy carry) when it was carried.
+    fn escrow_paused_pinnacle(
+        &self,
+        request: DigBossRuntimeRequest,
+        escrow: WagerEscrow,
+        paused: &PausedBossDuel,
+    ) -> Result<(), DigBossRuntimeError> {
+        loop {
+            let mut repository = SqliteBossRepository::new(&self.config.database_path, request.now);
+            let tunnel = repository
+                .load_tunnel(request.player_key())
+                .ok_or_else(|| match repository.take_error() {
+                    Some(error) => DigBossRuntimeError::Infrastructure(error),
+                    None => BossServiceError::MissingTunnel.into(),
+                })?;
+            let mut next = tunnel.clone();
+            if let WagerEscrow::Pending {
+                consumes_halving_curse,
+            } = escrow
+            {
+                BossStake {
+                    amount: paused.wager,
+                    consumes_halving_curse,
+                }
+                .escrow(&mut next)?;
+            }
+            match repository.commit(
+                request.player_key(),
+                tunnel.revision,
+                RepositoryCommit {
+                    next_tunnel: next,
+                    paused_duel: Some(paused.clone()),
+                    ..RepositoryCommit::default()
+                },
+            ) {
+                Ok(()) => return Ok(()),
+                Err(RepositoryError::Conflict) => continue,
+                Err(RepositoryError::DuelAlreadyActive) => {
+                    return Err(
+                        BossServiceError::Repository(RepositoryError::DuelAlreadyActive).into(),
+                    );
+                }
+                Err(error) => {
+                    return Err(DigBossRuntimeError::Infrastructure(
+                        repository.take_error().unwrap_or_else(|| error.to_string()),
+                    ));
+                }
+            }
+        }
+    }
+
     fn run_pinnacle_attempt<E: EntropyPort>(
         &self,
         request: DigBossRuntimeRequest,
         mut attempt: PreparedPinnacleAttempt,
+        escrow: WagerEscrow,
         entropy: &mut E,
     ) -> Result<DigBossRuntimeResult<DigPinnacleStartOutcome>, DigBossRuntimeError> {
         let mut round_log = Vec::new();
@@ -3642,12 +3776,9 @@ impl DigBossRuntimeService {
                     forced_no_wager_phase: false,
                     echo_applied: false,
                     echo_killer_id: None,
+                    wager_escrowed: escrow.escrows(),
                 };
-                let row = paused_duel_row(request.player_key(), &paused, request.now)
-                    .map_err(DigBossRuntimeError::Infrastructure)?;
-                DigBossRuntimeRepository::new(&self.config.database_path)
-                    .save_active_duel(&row)
-                    .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?;
+                self.escrow_paused_pinnacle(request, escrow, &paused)?;
                 return Ok(DigBossRuntimeResult {
                     outcome: DigPinnacleStartOutcome::Paused(Box::new(paused.clone())),
                     action_id: None,
@@ -3686,6 +3817,7 @@ impl DigBossRuntimeService {
                 phase: attempt.phase,
                 risk_tier: attempt.risk_tier,
                 wager: attempt.wager,
+                escrow,
                 won,
                 ending_boss_hp: attempt.combat.boss_hp,
                 boss_hp_max: attempt.boss_hp_max,
@@ -3771,12 +3903,25 @@ impl DigBossRuntimeService {
                     "pinnacle phase or boss changed before settlement".to_owned(),
                 ));
             }
+            // The attempt only settles against the encounter it started on: a
+            // tunnel knocked off the boundary since the pause is never paid.
+            if snapshot_boss_boundary(&expected) != Some(i64::from(PINNACLE_DEPTH)) {
+                return Err(BossServiceError::NotAtBossBoundary.into());
+            }
             let pinnacle = pinnacle_by_id(&input.boss_id)
                 .ok_or_else(|| DigBossRuntimeError::InvalidPinnacle(input.boss_id.clone()))?;
             let mut progress = boss_progress_object(expected.boss_progress_json.as_deref());
             let phase_key = pinnacle_phase_key(input.phase);
             let boundary_key = PINNACLE_DEPTH.to_string();
             let mut proposed = DigBossRuntimeState::from(&expected);
+            // An attempt that never paused escrows its new stake in this same
+            // commit, so every escrowed stake settles the same way below.
+            if let WagerEscrow::Pending {
+                consumes_halving_curse,
+            } = input.escrow
+            {
+                escrow_pending_stake(&mut proposed, input.wager, consumes_halving_curse)?;
+            }
             let mut phase_event_id = None;
             let mut relic_drop = None;
             let mut gross_payout = 0;
@@ -3838,9 +3983,16 @@ impl DigBossRuntimeService {
                         "carried_risk_tier".to_owned(),
                         Value::String(risk_name(input.risk_tier).to_owned()),
                     );
+                    // The stake stays escrowed while it is carried.
+                    if input.escrow.escrows() {
+                        entry.insert(CARRIED_WAGER_ESCROWED_KEY.to_owned(), Value::Bool(true));
+                    } else {
+                        entry.remove(CARRIED_WAGER_ESCROWED_KEY);
+                    }
                 } else {
                     entry.remove("carried_wager");
                     entry.remove("carried_risk_tier");
+                    entry.remove(CARRIED_WAGER_ESCROWED_KEY);
                 }
                 proposed.pinnacle_phase = i64::from(next_phase);
                 proposed.luminosity =
@@ -3886,7 +4038,16 @@ impl DigBossRuntimeService {
                 low_priority_tax = adjustment.low_priority_tax;
                 jc_delta = adjustment.penalized;
                 payout = jc_delta;
-                proposed.balance = expected.balance.saturating_add(jc_delta);
+                // The escrowed stake comes back with the payout.
+                let returned_stake = if input.escrow.escrows() {
+                    input.wager.max(0)
+                } else {
+                    0
+                };
+                proposed.balance = proposed
+                    .balance
+                    .saturating_add(jc_delta)
+                    .saturating_add(returned_stake);
                 proposed.depth = i64::from(PINNACLE_DEPTH);
                 proposed.max_depth = proposed.max_depth.max(i64::from(PINNACLE_DEPTH));
                 proposed.pinnacle_phase = 0;
@@ -3911,9 +4072,15 @@ impl DigBossRuntimeService {
                     knockback = (knockback + 1) / 2;
                 }
                 proposed.depth = proposed.depth.saturating_sub(i64::from(knockback)).max(0);
-                let actual_debit = input.wager.max(0).min(expected.balance.max(0));
-                proposed.balance = expected.balance.saturating_sub(actual_debit);
-                jc_delta = -actual_debit;
+                // An escrowed stake is already gone, so the loss takes nothing
+                // more; a legacy pause still debits what the balance holds.
+                if input.escrow.escrows() {
+                    jc_delta = -input.wager.max(0);
+                } else {
+                    let actual_debit = input.wager.max(0).min(expected.balance.max(0));
+                    proposed.balance = expected.balance.saturating_sub(actual_debit);
+                    jc_delta = -actual_debit;
+                }
                 proposed.boss_attempts = i64::from(input.attempts.max(0));
                 proposed.cheer_data_json = None;
                 proposed.last_dig_at = Some(request.now);
@@ -3955,6 +4122,7 @@ impl DigBossRuntimeService {
                 entry.insert(BOSS_REST_PENDING_KEY.to_owned(), Value::Bool(true));
                 entry.remove("carried_wager");
                 entry.remove("carried_risk_tier");
+                entry.remove(CARRIED_WAGER_ESCROWED_KEY);
                 entry.remove("active_prep");
             }
             proposed.boss_progress_json = Some(Value::Object(progress).to_string());
@@ -4005,6 +4173,8 @@ impl DigBossRuntimeService {
                     vanity_tax,
                     low_priority_tax,
                     consume_lantern_id: None,
+                    save_duel: None,
+                    abandon_duel: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?;
             match commit {
@@ -4315,6 +4485,34 @@ impl DigBossRuntimeService {
         })
     }
 
+    /// Whether the tunnel still stands at the encounter a paused duel belongs
+    /// to: parked on its boundary with the same boss locked there.
+    fn paused_encounter_is_live(
+        &self,
+        request: DigBossRuntimeRequest,
+        row: &DigBossPausedDuelRow,
+    ) -> Result<bool, DigBossRuntimeError> {
+        let Some(snapshot) = DigBossRuntimeRepository::new(&self.config.database_path)
+            .snapshot(database_key(request.player_key()))
+            .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
+        else {
+            return Ok(false);
+        };
+        if snapshot_boss_boundary(&snapshot) != Some(row.boundary) {
+            return Ok(false);
+        }
+        let locked_boss = if row.boundary == i64::from(PINNACLE_DEPTH) {
+            snapshot.pinnacle_boss_id.clone()
+        } else {
+            boss_progress_object(snapshot.boss_progress_json.as_deref())
+                .get(&row.boundary.to_string())
+                .and_then(|entry| entry.get("boss_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        Ok(locked_boss.as_deref() == Some(row.boss_id.as_str()))
+    }
+
     fn regular_boundary(&self, request: DigBossRuntimeRequest) -> Result<i32, DigBossRuntimeError> {
         let snapshot = DigBossRuntimeRepository::new(&self.config.database_path)
             .snapshot(database_key(request.player_key()))
@@ -4407,20 +4605,30 @@ impl DigBossRuntimeService {
         row: &DigBossPausedDuelRow,
     ) -> Result<(Option<i64>, i64), DigBossRuntimeError> {
         let requested_forfeit = row.wager.max(0);
+        // An escrowed stake already left the balance when the duel paused, so
+        // forfeiting it moves nothing more. Only a legacy pause still debits
+        // what the balance holds.
+        let escrowed = row.wager_escrowed();
         loop {
             let expected = repository
                 .snapshot(database_key(request.player_key()))
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
                 .ok_or(BossServiceError::MissingTunnel)?;
-            let wager_forfeit = requested_forfeit.min(expected.balance.max(0));
+            let (wager_forfeit, debit) = if escrowed {
+                (requested_forfeit, 0)
+            } else {
+                let debit = requested_forfeit.min(expected.balance.max(0));
+                (debit, debit)
+            };
             let mut proposed = DigBossRuntimeState::from(&expected);
-            proposed.balance = proposed.balance.saturating_sub(wager_forfeit);
+            proposed.balance = proposed.balance.saturating_sub(debit);
             proposed.boss_progress_json =
                 clear_carried_wager_json(proposed.boss_progress_json.as_deref(), boundary)?;
             let detail = json!({
                 "boundary":boundary,
                 "abandoned_duel":true,
                 "wager_forfeit":wager_forfeit,
+                "wager_escrowed":escrowed,
                 "boss_id":row.boss_id,
             })
             .to_string();
@@ -4440,6 +4648,8 @@ impl DigBossRuntimeService {
                     vanity_tax: 0,
                     low_priority_tax: 0,
                     consume_lantern_id: None,
+                    save_duel: None,
+                    abandon_duel: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -4455,12 +4665,16 @@ impl DigBossRuntimeService {
         }
     }
 
-    fn validate_and_resolve_start_wager(
+    /// Validate a new regular wager before any start side effect. The stake is
+    /// priced by the canonical [`BossStake::resolve`]; nothing is committed
+    /// here, because the start escrows the stake and consumes the curse in the
+    /// commit that pauses or settles the fight.
+    fn validate_start_wager(
         &self,
         request: DigBossRuntimeRequest,
         boundary: i32,
         wager: i64,
-    ) -> Result<i64, DigBossRuntimeError> {
+    ) -> Result<(), DigBossRuntimeError> {
         if wager < 0 {
             return Err(BossServiceError::NegativeWager.into());
         }
@@ -4473,46 +4687,21 @@ impl DigBossRuntimeService {
         // A free fight stakes nothing, so a player in debt can always take
         // it instead of being parked at the boss with only Retreat working.
         if wager == 0 {
-            return Ok(0);
+            return Ok(());
         }
-        loop {
-            let mut repository = SqliteBossRepository::new(&self.config.database_path, request.now);
-            let tunnel = repository
+        let repository = SqliteBossRepository::new(&self.config.database_path, request.now);
+        let tunnel =
+            repository
                 .load_tunnel(request.player_key())
-                .ok_or(BossServiceError::MissingTunnel)?;
-            if !regular_boss_wager_allowed(&tunnel.boss_progress, boundary, tunnel.prestige_level) {
-                return Err(BossServiceError::WagerNotAllowed.into());
-            }
-            let cursed = tunnel.stinger_curse.contains(CurseKind::HalveNextWager);
-            let effective = if cursed { wager / 2 + wager % 2 } else { wager };
-            if tunnel.balance < effective {
-                return Err(BossServiceError::InsufficientBalance {
-                    wager: effective,
-                    balance: tunnel.balance,
-                }
-                .into());
-            }
-            if !cursed {
-                return Ok(effective);
-            }
-            let mut next = tunnel.clone();
-            next.stinger_curse.consume(CurseKind::HalveNextWager);
-            match repository.commit(
-                request.player_key(),
-                tunnel.revision,
-                RepositoryCommit {
-                    next_tunnel: next,
-                    ..RepositoryCommit::default()
-                },
-            ) {
-                Ok(()) => return Ok(effective),
-                Err(RepositoryError::Conflict) => continue,
-                Err(error) => {
-                    let detail = repository.take_error().unwrap_or_else(|| error.to_string());
-                    return Err(DigBossRuntimeError::Infrastructure(detail));
-                }
-            }
+                .ok_or_else(|| match repository.take_error() {
+                    Some(error) => DigBossRuntimeError::Infrastructure(error),
+                    None => BossServiceError::MissingTunnel.into(),
+                })?;
+        if !regular_boss_wager_allowed(&tunnel.boss_progress, boundary, tunnel.prestige_level) {
+            return Err(BossServiceError::WagerNotAllowed.into());
         }
+        BossStake::resolve(&tunnel, wager)?;
+        Ok(())
     }
 
     fn activate_start_preparation(
@@ -4612,6 +4801,8 @@ impl DigBossRuntimeService {
                     vanity_tax: 0,
                     low_priority_tax: 0,
                     consume_lantern_id: None,
+                    save_duel: None,
+                    abandon_duel: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {

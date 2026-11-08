@@ -90,7 +90,6 @@ pub const DIG_WORK_RATE_HUNGRY: i64 = 3;
 pub const DIG_WORK_CAP_BLOCKS: i64 = 36;
 pub const DIG_WORK_PER_DIG_CAP_BLOCKS: i64 = 12;
 
-pub const SPECIES_WEIGHT_TOTAL: i64 = 10_000;
 pub const GILDED_EGG_PREMIUM: i64 = 230;
 pub const MAX_LIVING_PETS: i64 = 5;
 pub const PET_SWITCH_COST: i64 = 25;

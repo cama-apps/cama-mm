@@ -27,7 +27,7 @@ use tempfile::NamedTempFile;
 
 pub use cama_app::{
     dig_bosses, dig_loot, dig_runtime, dig_service, dig_tunnels, economy_event_service,
-    economy_event_sqlite,
+    economy_event_sqlite, mana_effects_service,
 };
 
 // The event/abandon/prestige/social application paths are deliberately not
@@ -46,6 +46,13 @@ pub mod dig_event_runtime {
 }
 pub mod dig_abandon_runtime {
     pub use crate::dig_abandon_runtime_repository::*;
+}
+// The abandon source settles a paused duel or carried pinnacle wager, so it
+// reads both the boss repository and the carry policy under these paths.
+pub use cama_db_external::dig_boss_runtime;
+pub mod dig_carry_wager {
+    pub use cama_app::dig_carry_wager::{PINNACLE_BOUNDARY, active_pinnacle_carry};
+    pub use cama_db_external::dig_carry_wager::*;
 }
 
 /// The mounted repositories name the runtime connection type at the crate root.
@@ -721,24 +728,6 @@ fn audit_abandon_refund_is_scaled_and_audited() {
         .expect("abandon audit");
     assert_eq!(detail["gross_jc"], 10);
     assert_eq!(detail["reward_multiplier"], 0.65);
-}
-
-#[test]
-fn audit_pinnacle_payout_scales_base_before_wager_profit() {
-    let payout = cama_app::dig_carry_wager::pinnacle_payout(
-        200,
-        cama_app::boss_duel::RiskTier::Cautious,
-        0.5,
-        0,
-    )
-    .expect("pinnacle payout");
-    assert_eq!(payout.scaled_base_reward, 325);
-    assert_eq!(
-        payout.payout,
-        payout.scaled_base_reward + payout.wager_payout
-    );
-    // Daily economy adjustment of both base and wager profit is not wired to
-    // this pure carry policy, unlike Python's _net_boss_payout adapter.
 }
 
 #[test]

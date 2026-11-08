@@ -1,9 +1,9 @@
 //! Daily mana assignment policy and adapter-neutral orchestration.
 //!
-//! The module keeps the four-AM mana clock, weighted land selection, batch
-//! loading, Guardian reconciliation, and presentation model independent from
-//! Discord. SQLite integration delegates to `cama-db`, which only opens the
-//! existing Python-managed schema.
+//! The module keeps weighted land selection, batch loading, Guardian
+//! reconciliation, and presentation model independent from Discord. The
+//! four-AM mana day lives in `cama_domain::mana`. SQLite integration delegates
+//! to `cama-db`, which only opens the existing Python-managed schema.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -12,13 +12,11 @@ use cama_db::mana_service_repository::{
     GuildManaRow as DbGuildManaRow, ManaClaim as DbManaClaim,
     ManaRepository as SqliteManaRepository, ManaRow as DbManaRow,
 };
-use chrono::{DateTime, Duration, FixedOffset, Timelike};
 use thiserror::Error;
 
 pub type DiscordId = i64;
 pub type GuildId = i64;
 
-pub const RESET_HOUR: u32 = 4;
 pub const PLAINS_GUARDIAN_CAPACITY: i64 = 25;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -99,37 +97,6 @@ impl Land {
 impl fmt::Display for Land {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.name())
-    }
-}
-
-/// Resolve the date label for a caller-provided Los Angeles local instant.
-///
-/// `FixedOffset` makes the offset explicit and deterministic. Runtime wiring
-/// is responsible for constructing the instant with the correct LA offset for
-/// that date.
-#[must_use]
-pub fn mana_day_label(now_la: DateTime<FixedOffset>) -> String {
-    let effective = if now_la.hour() < RESET_HOUR {
-        now_la - Duration::days(1)
-    } else {
-        now_la
-    };
-    effective.format("%Y-%m-%d").to_string()
-}
-
-/// Return the Unix timestamp of the four-AM boundary containing `now_la`.
-#[must_use]
-pub fn mana_day_start_timestamp(now_la: DateTime<FixedOffset>) -> i64 {
-    let boundary = now_la
-        .with_hour(RESET_HOUR)
-        .and_then(|value| value.with_minute(0))
-        .and_then(|value| value.with_second(0))
-        .and_then(|value| value.with_nanosecond(0))
-        .expect("four AM is valid for a fixed-offset timestamp");
-    if now_la < boundary {
-        (boundary - Duration::days(1)).timestamp()
-    } else {
-        boundary.timestamp()
     }
 }
 
