@@ -1558,7 +1558,7 @@ fn build_slides(
             "chart_rating",
             "Your rating",
             target_display_name,
-            "All-Time",
+            &year_label,
         );
         let latest = rating_series
             .iter()

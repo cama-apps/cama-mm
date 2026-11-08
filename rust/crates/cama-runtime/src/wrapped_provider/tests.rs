@@ -743,11 +743,15 @@ async fn personal_story_offers_still_mode_recap_and_separate_details() {
         session
             .slides
             .iter()
-            .filter(|slide| matches!(
-                slide.kind.as_str(),
-                "story_teammates" | "story_rivals" | "chart_rating"
-            ))
+            .filter(|slide| matches!(slide.kind.as_str(), "story_teammates" | "story_rivals"))
             .all(|slide| slide.year_label == "All-Time")
+    );
+    assert!(
+        session
+            .slides
+            .iter()
+            .filter(|slide| slide.kind == "chart_rating")
+            .all(|slide| slide.year_label.starts_with("Cama Wrapped "))
     );
     assert!(
         session
