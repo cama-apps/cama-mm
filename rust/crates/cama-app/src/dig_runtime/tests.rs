@@ -5,7 +5,6 @@ use cama_db::dig_carry_wager::CARRY_BOUNDARIES;
 use cama_db::dig_event_runtime::{
     DigEventActorKey, DigEventQuestMutation, DigEventRuntimeRepository,
 };
-use cama_db::dig_guild_modifiers::DigGuildModifierRepository;
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
@@ -2244,13 +2243,13 @@ fn test_helltide_modifier_taxes_dig_yield() {
 
     let helltide_db = fast_migrated_database();
     seed(&helltide_db);
-    DigGuildModifierRepository::new(helltide_db.path())
-        .set_modifier_at(
-            Some(51_002),
-            "helltide_active",
-            600,
-            &serde_json::json!({"tax_per_dig": 5}),
-            1_910_000_000,
+    Connection::open(helltide_db.path())
+        .expect("helltide connection")
+        .execute(
+            "INSERT INTO dig_guild_modifiers
+                (guild_id,modifier_id,expires_at,payload_json,created_at)
+             VALUES (?1,'helltide_active',?2,'{\"tax_per_dig\":5}',?3)",
+            params![51_002, 1_910_000_600_i64, 1_910_000_000_i64],
         )
         .expect("activate helltide");
     let taxed = DigRuntimeService::sqlite(helltide_db.path())
