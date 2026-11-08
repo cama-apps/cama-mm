@@ -688,6 +688,7 @@ async fn test_referral_uses_private_ack_before_public_onboarding() {
     let discord = Arc::new(MockDiscord::default());
     discord.set_channel(42, 111);
     discord.set_channel(42, 222);
+    discord.set_member(42, 20, "Server Newcomer");
     let mut registration_config = config();
     registration_config.lobby_channel_id = Some(111);
     registration_config.low_skill_lobby_channel_id = Some(222);
@@ -731,7 +732,7 @@ async fn test_referral_uses_private_ack_before_public_onboarding() {
     assert_eq!(
         captured.followups[1].content,
         concat!(
-            "**Referral: <@20>**\n",
+            "**Referral: Server Newcomer** <@20>\n",
             "1. If needed, run `/player register` with your Steam32 ID ",
             "(the number in your Dotabuff URL).\n",
             "2. Run `/player roles` with your Dota positions (1-5).\n",
@@ -1037,11 +1038,10 @@ async fn production_registration_uses_one_loopback_fetch_and_atomic_migrated_sql
     assert_eq!(captured.deferred, [true]);
     let success = captured.followups.last().expect("success followup");
     assert!(!success.ephemeral);
-    assert!(success.content.starts_with("✅ Registered <@100>!"));
-    assert_eq!(
-        success.allowed_mentions,
-        InteractionAllowedMentions::Users(vec![100])
-    );
+    // No live or last-seen name exists for this player.
+    assert!(success.content.starts_with("✅ Registered Unknown player!"));
+    assert!(!success.content.contains("<@"));
+    assert_eq!(success.allowed_mentions, InteractionAllowedMentions::None);
     drop(captured);
     let requests = server.requests(1);
     assert_eq!(requests.len(), 1);
@@ -1202,7 +1202,7 @@ async fn test_register_with_valid_opendota_response() {
     let captured = responder.captured.lock().expect("response capture");
     let success = captured.followups.last().expect("success followup");
     assert!(!success.ephemeral);
-    assert!(success.content.starts_with("✅ Registered <@100001>!"));
+    assert!(success.content.starts_with("✅ Registered Unknown player!"));
     drop(captured);
     assert_eq!(server.requests(1).len(), 1);
     let connection = Connection::open(database.path()).expect("inspect valid registration");
@@ -1260,7 +1260,7 @@ async fn computed_mmr_float_registers_without_manual_mmr_prompt() {
 
     let captured = responder.captured.lock().expect("response capture");
     let success = captured.followups.last().expect("success followup");
-    assert!(success.content.starts_with("✅ Registered <@100002>!"));
+    assert!(success.content.starts_with("✅ Registered Unknown player!"));
     assert!(success.components.is_empty(), "manual MMR prompt was shown");
     drop(captured);
     assert_eq!(
@@ -1378,7 +1378,11 @@ async fn mmr_button_and_modal_survive_provider_restart_without_refetch() {
         .expect("finish modal registration");
     let captured = modal.captured.lock().expect("modal capture");
     assert_eq!(captured.immediate[0].content, "✅ MMR received");
-    assert!(captured.followups[0].content.contains("Registered <@101>"));
+    assert!(
+        captured.followups[0]
+            .content
+            .contains("Registered Restarted Player!")
+    );
     drop(captured);
     assert_eq!(server.requests(1).len(), 1, "manual MMR must not refetch");
     let connection = Connection::open(database.path()).expect("open registration database");

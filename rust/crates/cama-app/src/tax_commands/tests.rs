@@ -70,6 +70,7 @@ fn ledger_row(index: i64, reason: Option<String>, source: &str) -> LedgerRow {
         ledger_id: index,
         guild_id: 123,
         account: LedgerAccount::Player(u64::try_from(10_000 + index).unwrap()),
+        account_name: Some(format!("Ledger Player {index}")),
         delta: index + 1,
         balance_before: index * 10,
         balance_after: index * 10 + index + 1,
@@ -530,6 +531,24 @@ fn test_ledger_rows_prefer_descriptive_reason() {
     )]);
     assert!(text.contains("gamba lightning bolt tax"));
     assert!(!text.contains("via `balance_update`"));
+}
+
+#[test]
+fn test_ledger_rows_name_player_accounts_without_ids_or_mentions() {
+    let named = ledger_row(1, None, "dig");
+    let mut stale = ledger_row(2, None, "dig");
+    stale.account_name = Some("<@10002>".to_owned());
+    let mut unnamed = ledger_row(3, None, "dig");
+    unnamed.account_name = None;
+    let text = format_ledger_rows(&[named, stale, unnamed]);
+    let lines = text.lines().collect::<Vec<_>>();
+    assert!(lines[0].contains(" - Ledger Player 1: "), "{text}");
+    assert!(lines[1].contains(" - Unknown player: "), "{text}");
+    assert!(lines[2].contains(" - Unknown player: "), "{text}");
+    assert!(!text.contains("<@"), "{text}");
+    for id in ["10001", "10002", "10003"] {
+        assert!(!text.contains(id), "{text}");
+    }
 }
 
 #[test]

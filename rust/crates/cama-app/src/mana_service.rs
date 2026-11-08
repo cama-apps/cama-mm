@@ -679,29 +679,6 @@ pub trait GuardianProtection {
     ) -> Result<BTreeMap<DiscordId, i64>, ManaServiceError>;
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoopGuardianProtection;
-
-impl GuardianProtection for NoopGuardianProtection {
-    fn reconcile_guardian(
-        &mut self,
-        _discord_id: DiscordId,
-        _guild_id: GuildId,
-        _since: i64,
-    ) -> Result<i64, ManaServiceError> {
-        Ok(0)
-    }
-
-    fn reconcile_guardians(
-        &mut self,
-        _discord_ids: &[DiscordId],
-        _guild_id: GuildId,
-        _since: i64,
-    ) -> Result<BTreeMap<DiscordId, i64>, ManaServiceError> {
-        Ok(BTreeMap::new())
-    }
-}
-
 pub struct ManaService<R, D, E, P> {
     repository: R,
     data: D,

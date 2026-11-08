@@ -31,7 +31,9 @@ use cama_db::tip_repository::TipRepository;
 use cama_domain::mana::{mana_day_label_at, mana_day_start_at};
 
 use crate::ApplicationConfig;
-use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::discord_transport::{
+    DiscordIdPlayerNameResolver, GuildPlayerNameDirectory, GuildPlayerNameResolver,
+};
 use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, user_option};
 use crate::registration::{
@@ -276,7 +278,7 @@ impl ManaInteractionHandler {
         let target_id = target.as_ref().map_or(user_id, |target| target.id);
         let target_name = target.as_ref().map_or_else(
             || user_display_name.clone(),
-            |target| target.display_name_or_mention(),
+            |target| target.readable_display_name(),
         );
         let mut member = self
             .discord
@@ -313,6 +315,26 @@ impl ManaInteractionHandler {
             }
         }
         Ok(())
+    }
+
+    /// Last-seen names for board rows whose players left the member list.
+    fn departed_board_names(
+        &self,
+        guild_id: i64,
+        rows: &[BoardRow],
+        members: &[ManaGuildMember],
+    ) -> GuildPlayerNameDirectory {
+        let departed = rows
+            .iter()
+            .map(|row| row.discord_id)
+            .filter(|discord_id| !members.iter().any(|member| member.user_id == *discord_id))
+            .collect::<Vec<_>>();
+        if departed.is_empty() {
+            return GuildPlayerNameDirectory::default();
+        }
+        self.player_names
+            .names_for_guild(guild_id, &departed)
+            .unwrap_or_default()
     }
 
     async fn single_command(
@@ -409,7 +431,8 @@ impl ManaInteractionHandler {
         let mut members = self.discord.mana_guild_members(guild_id)?;
         self.render_member_names(guild_id, &mut members).await?;
         let rows = self.read_board_rows(guild_id, moment).await?;
-        let pages = board_pages(&rows, &members, &today);
+        let departed_names = self.departed_board_names(guild_id, &rows, &members);
+        let pages = board_pages(&rows, &members, &departed_names, &today);
         let mut response = InteractionResponse::message("").embed(pages[0].clone());
         if pages.len() > 1 {
             response = response.action_row(board_controls(owner_id, 0, pages.len()));
@@ -469,7 +492,8 @@ impl ManaInteractionHandler {
         let mut members = self.discord.mana_guild_members(guild_id)?;
         self.render_member_names(guild_id, &mut members).await?;
         let rows = self.read_board_rows(guild_id, moment).await?;
-        let pages = board_pages(&rows, &members, &today);
+        let departed_names = self.departed_board_names(guild_id, &rows, &members);
+        let pages = board_pages(&rows, &members, &departed_names, &today);
         let page = requested_page.min(pages.len().saturating_sub(1));
         responder
             .update(
@@ -864,6 +888,7 @@ fn single_embed(
 fn board_pages(
     rows: &[BoardRow],
     members: &[ManaGuildMember],
+    departed_names: &GuildPlayerNameDirectory,
     today: &str,
 ) -> Vec<InteractionEmbed> {
     let names = members
@@ -896,7 +921,7 @@ fn board_pages(
         .iter()
         .map(|row| {
             let name = names.get(&row.discord_id).map_or_else(
-                || format!("<@{}>", row.discord_id),
+                || departed_names.resolve(row.discord_id),
                 |name| (*name).to_owned(),
             );
             format!("{} **{}** · {name}", row.land.emoji(), row.land)

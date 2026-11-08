@@ -15,7 +15,9 @@ use crate::discord_transport::{
     DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt,
     DiscordMessageSnapshot, DiscordPresence,
 };
-use crate::registration::{InteractionMessageDelivery, InteractionResponseError};
+use crate::registration::{
+    InteractionAllowedMentions, InteractionMessageDelivery, InteractionResponseError,
+};
 use crate::registration::{InteractionOption, InteractionValue};
 
 const GUILD: u64 = 7_001;
@@ -1033,13 +1035,11 @@ async fn migrated_sqlite_and_live_members_drive_all_seven_lazy_tabs() {
         .description
         .as_deref()
         .expect("balance description");
-    assert!(balance_text.contains("<@303>"));
-    assert!(!balance_text.contains("<@202>"));
+    assert!(balance_text.contains("CarolLive"));
+    assert!(!balance_text.contains("<@"));
+    assert!(!balance_text.contains("Bob"));
     assert!(balance_text.contains(JOPACOIN_EMOTE));
-    assert_eq!(
-        initial.allowed_mentions,
-        InteractionAllowedMentions::Users(vec![CAROL])
-    );
+    assert_eq!(initial.allowed_mentions, InteractionAllowedMentions::None);
     assert_eq!(initial.components.len(), 2);
     assert_eq!(initial.components[0].buttons.len(), 4);
     assert_eq!(initial.components[1].buttons.len(), 5);
@@ -1143,7 +1143,7 @@ async fn partial_cache_fetches_missing_members_and_leaderboard_is_guild_bound() 
             .description
             .as_ref()
             .unwrap()
-            .contains("<@303>")
+            .contains("CarolLive")
     );
     let id = published.components[0].buttons[0].custom_id.clone();
     assert!(id.starts_with(&format!("info:{}:", ALICE + 10_000)));
@@ -1185,9 +1185,13 @@ async fn a_transport_without_a_member_cache_still_resolves_every_candidate() {
         .description
         .clone()
         .expect("balance description");
-    assert!(description.contains("<@303>"), "cached members still list");
     assert!(
-        !description.contains("<@202>"),
+        description.contains("CarolLive"),
+        "cached members still list"
+    );
+    assert!(!description.contains("<@"), "{description}");
+    assert!(
+        !description.contains("Bob"),
         "a departed candidate is still filtered out"
     );
     let queried = discord.member_lookups.lock().expect("member lookups");
@@ -1368,10 +1372,8 @@ async fn calibration_runs_live_sqlite_analytics_and_emits_real_png_bytes() {
         (640, 390),
         "the live attachment preserves the reviewed native calibration geometry"
     );
-    assert_eq!(
-        response.allowed_mentions,
-        InteractionAllowedMentions::Users(vec![ALICE, BOB_DEPARTED, CAROL])
-    );
+    assert_eq!(response.allowed_mentions, InteractionAllowedMentions::None);
+    assert!(!rendered.contains("<@"), "{rendered}");
 
     let individual = Arc::new(RecordingResponder::default());
     handler

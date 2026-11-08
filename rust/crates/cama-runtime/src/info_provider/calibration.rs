@@ -16,6 +16,7 @@ use cama_domain::rating_insights::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::ApplicationConfig;
+use crate::discord_transport::GuildPlayerNameDirectory;
 use crate::embed_colors::DISCORD_BLUE;
 use crate::registration::{
     InteractionAllowedMentions, InteractionAttachment, InteractionEmbed, InteractionResponse,
@@ -95,21 +96,26 @@ impl CalibrationDataSources {
     }
 }
 
+/// `names` resolves the players a report lists. It runs on the blocking
+/// worker, so callers pass the member cache and last-seen names.
 pub(super) fn calibration_response(
     sources: CalibrationDataSources,
     target: (u64, Option<String>, bool),
     guild_id: Option<i64>,
+    names: &dyn Fn(&[i64]) -> GuildPlayerNameDirectory,
 ) -> Result<InteractionResponse, String> {
     if target.2 {
         let user_id = i64::try_from(target.0)
             .map_err(|_| "Discord user ID exceeds SQLite's signed range".to_owned())?;
         sources.individual_response(
             user_id,
-            target.1.unwrap_or_else(|| target.0.to_string()),
+            target
+                .1
+                .unwrap_or_else(|| cama_domain::discord_content::UNKNOWN_PLAYER.to_owned()),
             guild_id,
         )
     } else {
-        sources.server_response(guild_id)
+        sources.server_response(guild_id, names)
     }
 }
 
@@ -134,7 +140,11 @@ struct PerformanceRow {
 }
 
 impl CalibrationDataSources {
-    fn server_response(&self, guild_id: Option<i64>) -> Result<InteractionResponse, String> {
+    fn server_response(
+        &self,
+        guild_id: Option<i64>,
+        names: &dyn Fn(&[i64]) -> GuildPlayerNameDirectory,
+    ) -> Result<InteractionResponse, String> {
         let players = self
             .player_repository()
             .get_all(guild_id)
@@ -172,6 +182,20 @@ impl CalibrationDataSources {
         )
         .map_err(|error| error.to_string())?;
         let rating_system = &self.rating_system;
+        let listed_ids = [
+            &stats.top_rated,
+            &stats.most_calibrated,
+            &stats.highest_volatility,
+            &stats.lowest_rated,
+            &stats.least_calibrated,
+            &stats.most_experienced,
+        ]
+        .into_iter()
+        .flat_map(|players| players.iter().take(3))
+        .filter_map(|player| player.discord_id)
+        .chain(performance.iter().take(3).map(|entry| entry.discord_id))
+        .collect::<Vec<_>>();
+        let names = names(&listed_ids);
 
         let bucket = |name| stats.rating_bucket_count(name).unwrap_or_default();
         let avg_rating = optional_rounded(stats.avg_rating);
@@ -285,7 +309,7 @@ impl CalibrationDataSources {
         embed = embed
             .field(
                 "Highest Rated",
-                format_ranked(&stats.top_rated, |player| {
+                format_ranked(&stats.top_rated, &names, |player| {
                     format!(
                         "{:.0}",
                         rating_system.rating_to_display(player.glicko_rating.unwrap_or_default())
@@ -295,19 +319,19 @@ impl CalibrationDataSources {
             )
             .field(
                 "Most Calibrated",
-                format_calibrated(&stats.most_calibrated),
+                format_calibrated(&stats.most_calibrated, &names),
                 true,
             )
             .field(
                 "Most Volatile",
-                format_ranked(&stats.highest_volatility, |player| {
+                format_ranked(&stats.highest_volatility, &names, |player| {
                     format!("{:.3}", player.glicko_volatility.unwrap_or_default())
                 }),
                 true,
             )
             .field(
                 "Lowest Rated",
-                format_ranked(&stats.lowest_rated, |player| {
+                format_ranked(&stats.lowest_rated, &names, |player| {
                     format!(
                         "{:.0}",
                         rating_system.rating_to_display(player.glicko_rating.unwrap_or_default())
@@ -317,12 +341,12 @@ impl CalibrationDataSources {
             )
             .field(
                 "Least Calibrated",
-                format_calibrated(&stats.least_calibrated),
+                format_calibrated(&stats.least_calibrated, &names),
                 true,
             )
             .field(
                 "Most Experienced",
-                format_ranked(&stats.most_experienced, |player| {
+                format_ranked(&stats.most_experienced, &names, |player| {
                     format!("{} games", player.wins.saturating_add(player.losses))
                 }),
                 true,
@@ -392,24 +416,17 @@ impl CalibrationDataSources {
             );
         }
         if !performance.is_empty() {
-            let registered = players
-                .iter()
-                .filter_map(|player| player.discord_id)
-                .collect::<std::collections::BTreeSet<_>>();
             embed = embed.field(
                 "🎯 Top Outperformers",
                 performance
                     .iter()
                     .take(3)
                     .map(|entry| {
-                        let name = if registered.contains(&entry.discord_id) {
-                            format!("<@{}>", entry.discord_id)
-                        } else {
-                            format!("ID:{}", entry.discord_id)
-                        };
                         format!(
-                            "{name}: +{:.1} wins over expected ({} games)",
-                            entry.overperformance, entry.total_matches
+                            "{}: +{:.1} wins over expected ({} games)",
+                            names.resolve(entry.discord_id),
+                            entry.overperformance,
+                            entry.total_matches
                         )
                     })
                     .collect::<Vec<_>>()
@@ -437,7 +454,7 @@ impl CalibrationDataSources {
             ));
         }
         response.ephemeral = true;
-        response.allowed_mentions = user_mentions_from_embed(&response.embeds);
+        response.allowed_mentions = InteractionAllowedMentions::None;
         Ok(response)
     }
 
@@ -715,7 +732,11 @@ fn side_balance_text(balance: &cama_domain::rating_insights::SideBalance) -> Str
     }
 }
 
-fn format_ranked(players: &[Player], value: impl Fn(&Player) -> String) -> String {
+fn format_ranked(
+    players: &[Player],
+    names: &GuildPlayerNameDirectory,
+    value: impl Fn(&Player) -> String,
+) -> String {
     if players.is_empty() {
         return "n/a".to_owned();
     }
@@ -724,23 +745,30 @@ fn format_ranked(players: &[Player], value: impl Fn(&Player) -> String) -> Strin
         .take(3)
         .enumerate()
         .map(|(index, player)| {
-            format!("{}. {} ({})", index + 1, player_name(player), value(player))
+            format!(
+                "{}. {} ({})",
+                index + 1,
+                player_name(player, names),
+                value(player)
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn format_calibrated(players: &[Player]) -> String {
-    format_ranked(players, |player| {
+fn format_calibrated(players: &[Player], names: &GuildPlayerNameDirectory) -> String {
+    format_ranked(players, names, |player| {
         let rd = cap_glicko_rd(player.glicko_rd.unwrap_or(MAX_GLICKO_RD));
         format!("RD {rd:.0}, {:.0}%", rd_to_certainty(rd))
     })
 }
 
-fn player_name(player: &Player) -> String {
+/// Synthetic members have no Discord account, so their stored name is all
+/// they have; real players use their resolved display name.
+fn player_name(player: &Player, names: &GuildPlayerNameDirectory) -> String {
     player.discord_id.filter(|id| *id > 0).map_or_else(
         || player.name.clone(),
-        |discord_id| format!("<@{discord_id}>"),
+        |discord_id| names.resolve(discord_id),
     )
 }
 
@@ -909,11 +937,11 @@ impl CalibrationDataSources {
             .get_by_id(user_id, guild_id)
             .map_err(|error| error.to_string())?
         else {
-            return Ok(
-                InteractionResponse::message(format!("❌ <@{user_id}> is not registered."))
-                    .ephemeral()
-                    .with_user_mentions(vec![u64::try_from(user_id).unwrap_or_default()]),
-            );
+            return Ok(InteractionResponse::message(format!(
+                "❌ {display_name} is not registered."
+            ))
+            .ephemeral()
+            .without_mentions());
         };
         let detailed_history = self.player_history(user_id, guild_id, 50)?;
         let history = detailed_history
@@ -1662,41 +1690,6 @@ fn highlight_lines(calibration: &PlayerCalibration) -> Vec<String> {
     lines
 }
 
-fn user_mentions_from_embed(embeds: &[InteractionEmbed]) -> InteractionAllowedMentions {
-    let mut users = std::collections::BTreeSet::new();
-    for embed in embeds {
-        for text in embed
-            .title
-            .iter()
-            .chain(embed.description.iter())
-            .chain(embed.fields.iter().map(|field| &field.value))
-        {
-            let mut rest = text.as_str();
-            while let Some(start) = rest.find("<@") {
-                rest = &rest[start + 2..];
-                let digits = rest
-                    .trim_start_matches('!')
-                    .chars()
-                    .take_while(|character| character.is_ascii_digit())
-                    .collect::<String>();
-                if let Ok(id) = digits.parse::<u64>() {
-                    users.insert(id);
-                }
-                if let Some(end) = rest.find('>') {
-                    rest = &rest[end + 1..];
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-    if users.is_empty() {
-        InteractionAllowedMentions::None
-    } else {
-        InteractionAllowedMentions::Users(users.into_iter().take(100).collect())
-    }
-}
-
 trait CalibrationHeroCatalog: Send + Sync {
     fn is_support(&self, hero_id: i64) -> Result<bool, String>;
 }
@@ -2056,5 +2049,37 @@ mod configured_model_tests {
                 "*O: Shuffle swings are 25% larger than Draft*",
             ]
         );
+    }
+
+    #[test]
+    fn ranked_lines_name_players_without_ids_or_mentions() {
+        const NAMED: i64 = 581_234_567_890_123_431;
+        const NAMELESS: i64 = 581_234_567_890_123_432;
+        let player = |name: &str, discord_id: i64| Player {
+            name: name.to_owned(),
+            discord_id: Some(discord_id),
+            ..Player::default()
+        };
+        let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
+            u64::try_from(NAMED).unwrap(),
+            "Calibrated Player".to_owned(),
+        )])));
+
+        let text = format_ranked(
+            &[
+                player("registration-name", NAMED),
+                player("other-registration", NAMELESS),
+                player("Synthetic Seat", -5),
+            ],
+            &names,
+            |_| "x".to_owned(),
+        );
+
+        assert_eq!(
+            text,
+            "1. Calibrated Player (x)\n2. Unknown player (x)\n3. Synthetic Seat (x)"
+        );
+        assert!(!text.contains(&NAMED.to_string()));
+        assert!(!text.contains(&NAMELESS.to_string()));
     }
 }

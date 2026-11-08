@@ -480,7 +480,7 @@ impl WrappedHandler {
             return Ok(());
         }
         let (target_id, _target_name) = user_option(&options, "user")?
-            .map(|user| (user.raw_id, user.display_name_or_id()))
+            .map(|user| (user.raw_id, user.readable_display_name()))
             .unwrap_or((user_id, user_display_name));
         let (signed_guild, signed_target) =
             (signed_id(guild_id, "guild")?, signed_id(target_id, "user")?);

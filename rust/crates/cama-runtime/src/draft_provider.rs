@@ -25,6 +25,7 @@ use cama_app::draft::{
 use cama_app::embeds::LobbyKind as AppLobbyKind;
 use cama_db::core_repositories::{CoreRepositoryError, NewPlayer, PlayerRepository};
 use cama_db::match_runtime::{PendingMatchRecord, PendingMatchRepository, PendingMatchState};
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::formatting::{JOPACOIN_EMOTE, escape_discord_text};
 use cama_domain::player::Player;
 use serde_json::{Value, json};
@@ -5011,7 +5012,9 @@ fn team_field(state: &DraftState, ids: &[i64]) -> String {
             let captain =
                 Some(*id) == state.radiant_captain_id || Some(*id) == state.dire_captain_id;
             let player = state.player_pool_data.get(id);
-            let name = player.map_or_else(|| id.to_string(), |player| player.name.clone());
+            let name = player
+                .and_then(|player| readable_player_name(&player.name))
+                .unwrap_or(UNKNOWN_PLAYER);
             let rating = player.map_or(1500.0, |player| player.rating);
             format!(
                 "{} {} ({rating:.0})",

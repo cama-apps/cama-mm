@@ -806,27 +806,25 @@ impl MafiaInteractionHandler {
             .await
             .map_err(|error| error.to_string().into());
         }
+        let name = mafia_name(&self.cached_player_names(guild_id, &[target]), target);
         let text = match (reply.action_type, reply.result) {
             (Some(MafiaActionType::Investigate), Some(result)) => {
-                format!("🕵️ Investigation result for <@{}>: **{}**.", target, result)
+                format!("🕵️ Investigation result for {name}: **{result}**.")
             }
-            (Some(MafiaActionType::Save), _) => {
-                format!("⚕️ You will protect <@{}> tonight.", target)
-            }
+            (Some(MafiaActionType::Save), _) => format!("⚕️ You will protect {name} tonight."),
             (Some(MafiaActionType::VigilanteKill), _) => {
-                format!("🔫 Your one shot is locked on <@{}>.", target)
+                format!("🔫 Your one shot is locked on {name}.")
             }
             (Some(MafiaActionType::Wager), _) => format!(
-                "🎰 Ticket placed: you're calling <@{}> to swing from the rax today. Call it right and the house pays out.",
-                target
+                "🎰 Ticket placed: you're calling {name} to swing from the rax today. Call it right and the house pays out."
             ),
-            _ => format!("🔪 Kill vote registered for <@{}>.", target),
+            _ => format!("🔪 Kill vote registered for {name}."),
         };
         responder
             .respond(
                 InteractionResponse::message(text)
                     .ephemeral()
-                    .with_user_mentions(vec![unsigned_id(target, "target")?]),
+                    .without_mentions(),
             )
             .await
             .map_err(|error| error.to_string().into())
@@ -858,7 +856,17 @@ impl MafiaInteractionHandler {
         } else {
             "locked in for"
         };
-        responder.respond(InteractionResponse::message(format!("🗳️ Vote {} <@{}>. You can change it until dusk; tallies stay hidden until then.", verb, target)).ephemeral().with_user_mentions(vec![unsigned_id(target, "target")?])).await.map_err(|error| error.to_string().into())
+        let name = mafia_name(&self.cached_player_names(guild_id, &[target]), target);
+        responder
+            .respond(
+                InteractionResponse::message(format!(
+                    "🗳️ Vote {verb} {name}. You can change it until dusk; tallies stay hidden until then."
+                ))
+                .ephemeral()
+                .without_mentions(),
+            )
+            .await
+            .map_err(|error| error.to_string().into())
     }
 
     async fn bounty(
@@ -883,7 +891,17 @@ impl MafiaInteractionHandler {
             .await
             .map_err(|error| error.to_string().into());
         }
-        responder.respond(InteractionResponse::message(format!("🎯 Bounty placed: 1 {JOPACOIN_EMOTE} on <@{target}>. If the town lynches them today and they bleed mafia red, the contributors split the bounty (up to the number still alive).")).ephemeral().with_user_mentions(vec![unsigned_id(target, "target")?])).await.map_err(|error| error.to_string().into())
+        let name = mafia_name(&self.cached_player_names(guild_id, &[target]), target);
+        responder
+            .respond(
+                InteractionResponse::message(format!(
+                    "🎯 Bounty placed: 1 {JOPACOIN_EMOTE} on {name}. If the town lynches them today and they bleed mafia red, the contributors split the bounty (up to the number still alive)."
+                ))
+                .ephemeral()
+                .without_mentions(),
+            )
+            .await
+            .map_err(|error| error.to_string().into())
     }
 
     async fn join(

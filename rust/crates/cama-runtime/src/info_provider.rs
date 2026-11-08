@@ -13,9 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::unified_leaderboard::{
-    ApmEntry, BalanceLeaderboard, BankruptcyState, ButtonStyle, GamblingEntry, GamblingServerStats,
-    GamblingSnapshot, GuildMemberDirectory, LeaderboardTab, NegativeBalanceEntry, RatingKind,
-    ScopedTipLeaderboardEntry, TRIVIA_WINDOW_DAYS, TabData, TabState, TipsSnapshot, TriviaEntry,
+    ApmEntry, BankruptcyState, ButtonStyle, GamblingEntry, GamblingServerStats, GamblingSnapshot,
+    GuildMemberDirectory, LeaderboardTab, NegativeBalanceEntry, RatingKind,
+    ScopedTipLeaderboardEntry, TRIVIA_WINDOW_DAYS, TabState, TipsSnapshot, TriviaEntry,
     UnifiedLeaderboardRepositoryPort, UnifiedLeaderboardView,
 };
 use cama_db::bankruptcy_repository::BankruptcyRepository;
@@ -89,13 +89,16 @@ pub fn read_info_analytics_snapshot(
 }
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordTransport, resolve_guild_player_names};
+use crate::discord_transport::{
+    DiscordTransport, GuildPlayerNameDirectory, cached_guild_player_names,
+    resolve_guild_player_names,
+};
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_GOLD};
 use crate::option_ext::{integer_option, string_option, user_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
-    InteractionActionRow, InteractionAllowedMentions, InteractionButton, InteractionButtonStyle,
-    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionMessageDelivery,
+    InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
+    InteractionHandler, InteractionHandlerError, InteractionMessageDelivery,
     InteractionMessageReceipt, InteractionRequest, InteractionResponder, InteractionResponse,
     RegistrationError, RegistrationProvider, RegistryBuilder,
 };
@@ -728,8 +731,18 @@ impl InfoHandler {
         let signed_guild = signed_optional_id(guild_id, "guild")?;
         let target_name = self.player_render_name(guild_id, target_id).await?;
         let target = (target_id, Some(target_name), selected_user);
+        let discord = Arc::clone(&self.discord);
         let response = tokio::task::spawn_blocking(move || {
-            calibration_response(sources, target, signed_guild)
+            let names = |player_ids: &[i64]| {
+                let user_ids = player_ids
+                    .iter()
+                    .filter_map(|id| u64::try_from(*id).ok())
+                    .collect::<Vec<_>>();
+                guild_id.map_or_else(GuildPlayerNameDirectory::default, |guild_id| {
+                    cached_guild_player_names(discord.as_ref(), guild_id, &user_ids)
+                })
+            };
+            calibration_response(sources, target, signed_guild, &names)
         })
         .await
         .unwrap_or_else(|error| Err(format!("calibration task failed: {error}")));
@@ -905,16 +918,10 @@ fn leaderboard_response(
     view: &UnifiedLeaderboardView<InfoLeaderboardRepository>,
 ) -> InteractionResponse {
     let embed = interaction_embed(view.build_embed(), view.current_tab());
-    let mut response = InteractionResponse::message("")
+    InteractionResponse::message("")
         .embed(embed)
-        .action_rows(leaderboard_action_rows(view_id, view));
-    let mentions = leaderboard_mentions(view);
-    response.allowed_mentions = if mentions.is_empty() {
-        InteractionAllowedMentions::None
-    } else {
-        InteractionAllowedMentions::Users(mentions)
-    };
-    response
+        .action_rows(leaderboard_action_rows(view_id, view))
+        .without_mentions()
 }
 
 fn interaction_embed(embed: EmbedModel, tab: LeaderboardTab) -> InteractionEmbed {
@@ -980,43 +987,6 @@ fn tab_button(
     style: impl Fn(LeaderboardTab) -> InteractionButtonStyle,
 ) -> InteractionButton {
     InteractionButton::new(format!("info:{view_id}:tab:{}", tab.as_str()), label).style(style(tab))
-}
-
-fn leaderboard_mentions(view: &UnifiedLeaderboardView<InfoLeaderboardRepository>) -> Vec<u64> {
-    let state = view.tab_state(view.current_tab());
-    let page_size = view.current_tab().page_size();
-    let start = state.current_page.saturating_mul(page_size);
-    let mut ids = BTreeSet::new();
-    match state.data.as_ref() {
-        Some(TabData::Balance(BalanceLeaderboard {
-            players, debtors, ..
-        })) => {
-            ids.extend(
-                players
-                    .iter()
-                    .skip(start)
-                    .take(page_size)
-                    .filter_map(|entry| u64::try_from(entry.discord_id).ok()),
-            );
-            if state.current_page == 0 {
-                ids.extend(
-                    debtors
-                        .iter()
-                        .take(10)
-                        .filter_map(|entry| u64::try_from(entry.discord_id).ok()),
-                );
-            }
-        }
-        Some(TabData::Glicko(data) | TabData::OpenSkill(data)) => ids.extend(
-            data.players
-                .iter()
-                .skip(start)
-                .take(page_size)
-                .filter_map(|entry| u64::try_from(entry.discord_id).ok()),
-        ),
-        _ => {}
-    }
-    ids.into_iter().collect()
 }
 
 fn help_embed(

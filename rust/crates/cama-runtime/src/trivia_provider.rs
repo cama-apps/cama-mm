@@ -1256,7 +1256,7 @@ fn parse_component_id(custom_id: &str) -> Result<ParsedComponentId, String> {
 
 fn user_option(options: &[InteractionOption]) -> Result<(i64, String), String> {
     crate::option_ext::user_option(options, "user")?
-        .map(|user| (user.id, user.display_name_or_id()))
+        .map(|user| (user.id, user.readable_display_name()))
         .ok_or_else(|| "trivia reset requires a user".to_owned())
 }
 

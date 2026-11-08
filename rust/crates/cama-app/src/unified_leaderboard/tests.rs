@@ -1287,3 +1287,45 @@ fn test_unnamed_players_render_unknown_player_not_ids() {
     assert!(!earners.value.contains("User "));
     assert!(!earners.value.contains("<@"));
 }
+
+#[test]
+fn test_balance_and_rating_tabs_name_members_without_mentions() {
+    let repository = FakeRepository {
+        balance: vec![player(123, GUILD, 300), player(456, GUILD, 200)],
+        player_count: 2,
+        debtors: vec![NegativeBalanceEntry {
+            discord_id: 789,
+            guild_id: Some(GUILD),
+            username: "Player789".to_owned(),
+            balance: -50,
+        }],
+        glicko: vec![player(123, GUILD, 1_600), player(456, GUILD, 1_500)],
+        glicko_count: 2,
+        ..FakeRepository::default()
+    };
+    let mut view = view(repository, LeaderboardTab::Balance, 100);
+    view.load_tab(LeaderboardTab::Balance).unwrap();
+    let balance = view.build_embed();
+    let mut text = description(&balance).to_owned();
+    for field in &balance.fields {
+        text.push('\n');
+        text.push_str(&field.value);
+    }
+    assert!(text.contains("**User123**"), "{text}");
+    assert!(text.contains("User789 - -50"), "{text}");
+
+    view.switch_tab(LeaderboardTab::Glicko);
+    view.load_tab(LeaderboardTab::Glicko).unwrap();
+    let rating = view.build_embed();
+    for field in &rating.fields {
+        text.push('\n');
+        text.push_str(&field.value);
+    }
+    if let Some(rating_description) = rating.description.as_deref() {
+        text.push('\n');
+        text.push_str(rating_description);
+    }
+    assert!(text.contains("**User456**"), "{text}");
+    assert!(!text.contains("<@"), "{text}");
+    assert!(!text.contains("Player123"), "{text}");
+}

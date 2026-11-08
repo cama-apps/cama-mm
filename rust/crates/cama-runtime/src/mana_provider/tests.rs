@@ -488,6 +488,51 @@ async fn board_skips_unknown_land_rows_and_renders_the_rest() {
 }
 
 #[tokio::test]
+async fn board_names_departed_players_without_ids_or_mentions() {
+    let fixture = Fixture::new(2);
+    fixture.assign(USER, "Island", TODAY);
+    fixture.assign(USER + 1, "Plains", TODAY);
+    let provider = provider(
+        &fixture,
+        FakeDiscord {
+            gamba: true,
+            members: members(1),
+        },
+    );
+    let responder = Arc::new(CapturingResponder::default());
+    let options = vec![InteractionOption {
+        name: "all".to_owned(),
+        value: InteractionValue::Boolean(true),
+    }];
+
+    registry(&provider)
+        .command_handler("mana")
+        .expect("mana handler")
+        .handle(command(options), responder.clone())
+        .await
+        .expect("dispatch board with a departed player");
+
+    let captured = responder.captured.lock().expect("response capture");
+    let description = captured.followups[0].embeds[0]
+        .description
+        .clone()
+        .expect("board description");
+    assert!(
+        description.contains("**Island** · Player 01"),
+        "{description}"
+    );
+    assert!(
+        description.contains("**Plains** · Unknown player"),
+        "{description}"
+    );
+    assert!(!description.contains("<@"), "{description}");
+    assert!(
+        !description.contains(&(USER + 1).to_string()),
+        "{description}"
+    );
+}
+
+#[tokio::test]
 async fn board_displays_all_players_already_assigned_and_paginates_twelve_per_page() {
     let fixture = Fixture::new(13);
     for i in 0..13 {
