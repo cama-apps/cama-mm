@@ -17,8 +17,7 @@ pub use cama_app_gameplay::{
 };
 pub use cama_app_match::{
     disburse_service, dota_info, draft, economy_actions, loan, match_recording,
-    match_voting_service, prediction_resolution, predictions, rating_comparison_service,
-    tax_commands, vanity_tax_service,
+    match_voting_service, predictions, rating_comparison_service, tax_commands, vanity_tax_service,
 };
 pub use cama_app_platform::{
     admin_low_priority, blame_luke_media, embeds, font_assets, moderation, player_mmr_fallback,
@@ -93,4 +92,6 @@ mod test_support;
 pub mod trivia_data;
 pub mod trivia_image_cache;
 pub mod wheel;
+pub mod wheel_media;
+pub mod wheel_settlement;
 pub mod wrapped_media;

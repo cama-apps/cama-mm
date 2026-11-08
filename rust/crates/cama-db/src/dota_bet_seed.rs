@@ -121,16 +121,6 @@ pub struct FirstGamePoolRefresh {
 
 const FIRST_GAME_POOL_REFRESH_KEY: &str = "first_game_pool_display_refresh";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirstGameClaim {
-    pub guild_id: i64,
-    pub lobby: FirstGameLobby,
-    pub game_date: String,
-    pub pending_match_id: i64,
-    pub amount: i64,
-    pub settled: bool,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SeedSettlement {
     /// Seed shape after first-game recovery and legacy-house normalization.

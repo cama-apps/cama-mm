@@ -6,7 +6,6 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::OptionalExtension;
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -22,13 +21,6 @@ pub struct GoldenBalanceRow {
     pub balance: i64,
     pub wins: i64,
     pub glicko_rating: Option<f64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GoldenWheelColumnInfo {
-    pub name: String,
-    pub not_null: bool,
-    pub default_value: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -163,29 +155,6 @@ impl GoldenWheelRepository {
     ) -> Result<Option<WheelSpinRecord>, GoldenWheelRepositoryError> {
         WheelSpinRepository::new(&self.path)
             .get_wheel_spin(spin_id)
-            .map_err(Into::into)
-    }
-
-    /// Inspect the migrated Golden Wheel marker without mutating schema.
-    pub fn is_golden_column_info(
-        &self,
-    ) -> Result<Option<GoldenWheelColumnInfo>, GoldenWheelRepositoryError> {
-        let connection = open_runtime_connection(&self.path)?;
-        connection
-            .query_row(
-                "SELECT name, \"notnull\", dflt_value
-                   FROM pragma_table_info('wheel_spins')
-                  WHERE name = 'is_golden'",
-                [],
-                |row| {
-                    Ok(GoldenWheelColumnInfo {
-                        name: row.get(0)?,
-                        not_null: row.get::<_, i64>(1)? != 0,
-                        default_value: row.get(2)?,
-                    })
-                },
-            )
-            .optional()
             .map_err(Into::into)
     }
 }

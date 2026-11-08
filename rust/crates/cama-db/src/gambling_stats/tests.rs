@@ -126,6 +126,12 @@ impl Fixture {
                      bankruptcy_penalty INTEGER NOT NULL DEFAULT 0,
                      PRIMARY KEY (match_id, guild_id, discord_id)
                  );
+                 CREATE TABLE app_kv (
+                     guild_id INTEGER NOT NULL,
+                     key TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     PRIMARY KEY (guild_id, key)
+                 );
                  CREATE TABLE bankruptcy_state (
                      discord_id INTEGER NOT NULL,
                      guild_id INTEGER NOT NULL DEFAULT 0,
@@ -580,19 +586,6 @@ fn test_bet_history_guild_isolation() {
             .player_bet_history(1001, Some(222))
             .expect("guild B")
             .is_empty()
-    );
-}
-
-#[test]
-fn test_leverage_distribution_from_history_matches_repository_semantics_empty() {
-    assert_eq!(leverage_distribution_from_nullable(&[]), BTreeMap::new());
-}
-
-#[test]
-fn test_leverage_distribution_from_history_matches_repository_semantics_values() {
-    assert_eq!(
-        leverage_distribution_from_nullable(&[None, None, Some(1), Some(2), Some(5), Some(5)]),
-        BTreeMap::from([(1, 3), (2, 1), (5, 2)])
     );
 }
 

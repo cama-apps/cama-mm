@@ -323,6 +323,13 @@ async fn wrong_channel_charges_one_before_defer_and_uses_exact_ephemeral_copy() 
         .expect("dispatch wrong-channel command");
 
     assert_eq!(fixture.balance(USER), before - 1);
+    assert_eq!(
+        crate::test_support::penance_ledger::gamba_channel_penance_ledger(
+            fixture.database.path(),
+            GUILD
+        ),
+        crate::test_support::penance_ledger::GAMBA_CHANNEL_PENANCE_LEDGER
+    );
     let captured = responder.captured.lock().expect("response capture");
     assert!(captured.defers.is_empty());
     assert_eq!(captured.immediate.len(), 1);

@@ -557,6 +557,7 @@ impl Fixture {
         PredictionRegistrationProvider {
             handler: Arc::new(PredictionInteractionHandler {
                 predictions: PredictionRepository::new(&self.path),
+                penalties: LoanRepository::new(&self.path),
                 resolutions: PredictionResolutionRepository::new(&self.path),
                 pets: PetEvolutionRepository::new(&self.path),
                 low_priority: LowPriorityRepository::new(&self.path),
@@ -904,6 +905,10 @@ async fn wrong_channel_charges_one_coin_and_returns_python_denial_copy() {
         )
         .expect("read charged wallet");
     assert_eq!((balance, lowest), (9, 9));
+    assert_eq!(
+        crate::test_support::penance_ledger::gamba_channel_penance_ledger(&fixture.path, GUILD),
+        crate::test_support::penance_ledger::GAMBA_CHANNEL_PENANCE_LEDGER
+    );
 }
 
 /// Records how many gamba-channel lookups had run when the interaction was

@@ -18,7 +18,9 @@ use crate::dota_bet_seed_repository::{
     abort_seed_in_transaction, settle_seed_with_player_pool_in_transaction,
 };
 use crate::open_runtime_connection;
-use cama_db_core::profit_deductions::{ProfitDeductionPolicy, compute_profit_deductions};
+use cama_db_core::profit_deductions::{
+    ProfitDeductionPolicy, record_bet_settlement_rates, resolve_profit_deduction_rates,
+};
 use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 
 #[derive(Debug, Error)]
@@ -1430,17 +1432,35 @@ impl BettingServiceRepository {
             low_priority_tax_rate: adjustments.low_priority_tax_rate.unwrap_or(0.0),
             low_priority_taxable_ids: &adjustments.low_priority_taxable_ids,
         };
+        // Freeze every bettor's rates, losers included, so a winner-flip
+        // correction splits the corrected profit as this settlement would
+        // have instead of reading penalty games and rosters at correction time.
+        let mut frozen_rates = BTreeMap::new();
+        for discord_id in bets
+            .iter()
+            .map(|bet| bet.discord_id)
+            .collect::<BTreeSet<_>>()
+        {
+            frozen_rates.insert(
+                discord_id,
+                resolve_profit_deduction_rates(
+                    &transaction,
+                    guild_id,
+                    discord_id,
+                    &deduction_policy,
+                )?,
+            );
+        }
+        record_bet_settlement_rates(&transaction, guild_id, match_id, &frozen_rates)?;
         let mut bankruptcy_penalties = BTreeMap::new();
         let mut vanity_taxes = BTreeMap::new();
         let mut low_priority_taxes = BTreeMap::new();
         for (discord_id, (payout, stake)) in profit_inputs {
-            let deductions = compute_profit_deductions(
-                &transaction,
-                guild_id,
-                discord_id,
-                payout.saturating_sub(stake),
-                &deduction_policy,
-            )?;
+            let deductions = frozen_rates
+                .get(&discord_id)
+                .copied()
+                .unwrap_or_default()
+                .split(payout.saturating_sub(stake));
             if deductions.bankruptcy_penalty > 0 {
                 if let Some(credit) = credits.get_mut(&discord_id) {
                     *credit = credit.saturating_sub(deductions.bankruptcy_penalty);

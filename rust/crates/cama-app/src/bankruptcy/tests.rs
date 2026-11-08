@@ -27,15 +27,6 @@ impl FakePort {
             .balances
             .insert((guild_id, discord_id), balance);
     }
-
-    fn set_balance(&self, discord_id: i64, guild_id: i64, balance: i64) {
-        let replaced = self
-            .data
-            .borrow_mut()
-            .balances
-            .insert((guild_id, discord_id), balance);
-        assert!(replaced.is_some(), "fixture player must exist");
-    }
 }
 
 impl BankruptcyPort for FakePort {
@@ -223,88 +214,6 @@ fn declare(harness: &Harness, discord_id: i64) -> BankruptcyDeclaration {
         BankruptcyExecution::Applied(declaration) => declaration,
         BankruptcyExecution::Rejected(rejection) => panic!("unexpected rejection: {rejection:?}"),
     }
-}
-
-#[test]
-fn test_cannot_declare_bankruptcy_with_positive_balance() {
-    let harness = Harness::new();
-    harness.port.add_player(1_001, GUILD, 100);
-    let validation = harness
-        .service
-        .validate_bankruptcy(1_001, Some(GUILD))
-        .unwrap();
-    assert_eq!(
-        validation,
-        BankruptcyValidation::Rejected(BankruptcyRejection::NotInDebt { balance: 100 })
-    );
-    let BankruptcyValidation::Rejected(rejection) = validation else {
-        panic!("expected rejection");
-    };
-    assert_eq!(rejection.error_code(), NOT_IN_DEBT);
-}
-
-#[test]
-fn test_cannot_declare_bankruptcy_with_zero_balance() {
-    let harness = Harness::new();
-    harness.port.add_player(1_001, GUILD, 0);
-    assert_eq!(
-        harness
-            .service
-            .validate_bankruptcy(1_001, Some(GUILD))
-            .unwrap(),
-        BankruptcyValidation::Rejected(BankruptcyRejection::NotInDebt { balance: 0 })
-    );
-}
-
-#[test]
-fn test_can_declare_bankruptcy_with_negative_balance() {
-    let harness = Harness::new();
-    harness.port.add_player(1_001, GUILD, -100);
-    assert_eq!(
-        harness
-            .service
-            .validate_bankruptcy(1_001, Some(GUILD))
-            .unwrap(),
-        BankruptcyValidation::Eligible { debt: 100 }
-    );
-}
-
-#[test]
-fn test_cannot_declare_bankruptcy_on_cooldown() {
-    let harness = Harness::new();
-    harness.port.add_player(1_001, GUILD, -200);
-    declare(&harness, 1_001);
-    harness.port.set_balance(1_001, GUILD, -100);
-
-    let validation = harness
-        .service
-        .validate_bankruptcy(1_001, Some(GUILD))
-        .unwrap();
-    assert_eq!(
-        validation,
-        BankruptcyValidation::Rejected(BankruptcyRejection::Cooldown {
-            remaining_seconds: 604_800,
-        })
-    );
-}
-
-#[test]
-fn test_cooldown_expires_after_duration() {
-    let mut policy = bankruptcy_policy();
-    policy.cooldown_seconds = 1;
-    let harness = Harness::with_policy(policy);
-    harness.port.add_player(1_001, GUILD, -200);
-    declare(&harness, 1_001);
-    harness.now.set(harness.now.get() + 2);
-    harness.port.set_balance(1_001, GUILD, -100);
-
-    assert!(
-        harness
-            .service
-            .validate_bankruptcy(1_001, Some(GUILD))
-            .unwrap()
-            .is_eligible()
-    );
 }
 
 #[test]
@@ -498,24 +407,6 @@ fn test_bankruptcy_debuff_sets_three_penalty_games() {
             .unwrap()
             .penalty_games_remaining,
         3
-    );
-}
-
-#[test]
-fn test_bankruptcy_debuff_three_wins_clear_penalty() {
-    let harness = debuff_harness();
-    harness.port.add_player(5_002, GUILD, -50);
-    declare(&harness, 5_002);
-    assert_eq!(harness.service.on_game_won(5_002, Some(GUILD)).unwrap(), 2);
-    assert_eq!(harness.service.on_game_won(5_002, Some(GUILD)).unwrap(), 1);
-    assert_eq!(harness.service.on_game_won(5_002, Some(GUILD)).unwrap(), 0);
-    assert_eq!(
-        harness
-            .service
-            .get_state(5_002, Some(GUILD))
-            .unwrap()
-            .penalty_games_remaining,
-        0
     );
 }
 

@@ -24,9 +24,9 @@ use cama_db::gambling_stats_repository::{
     BetHistoryEntry, GamblingOutcome, GamblingStatsPort, GamblingStatsRepository,
     GamblingStatsService,
 };
+use cama_db::loan_repository::LoanRepository;
 use cama_db::mana_protection::ManaProtectionRepository;
 use cama_db::mana_service_repository::ManaRepository;
-use cama_db::predictions_repository::PredictionRepository;
 use cama_db::tip_repository::TipRepository;
 use cama_domain::mana::{mana_day_label_at, mana_day_start_at};
 
@@ -501,8 +501,8 @@ impl ManaInteractionHandler {
         }
         let path = self.database_path.clone();
         spawn_sqlite("mana gamba-channel penalty", move || {
-            PredictionRepository::new(path)
-                .debit_gamba_channel_penalty(user_id, Some(guild_id))
+            LoanRepository::new(path)
+                .charge_gamba_channel_penalty_atomic(user_id, Some(guild_id))
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         })

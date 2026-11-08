@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::*;
 
-const TEST_GUILD_ID: i64 = 12_345;
 const NOW: i64 = 1_700_000_000;
 
 #[derive(Clone, Copy, Debug)]
@@ -41,18 +40,6 @@ impl Default for FakeLoanPort {
 impl FakeLoanPort {
     fn guild_key(discord_id: i64, guild_id: Option<i64>) -> (i64, i64) {
         (discord_id, guild_id.unwrap_or(0))
-    }
-
-    fn set_balance(&self, discord_id: i64, guild_id: Option<i64>, balance: i64) {
-        self.balances
-            .borrow_mut()
-            .insert(Self::guild_key(discord_id, guild_id), balance);
-    }
-
-    fn set_state(&self, state: StoredLoanState, guild_id: Option<i64>) {
-        self.states
-            .borrow_mut()
-            .insert(Self::guild_key(state.discord_id, guild_id), state);
     }
 }
 
@@ -176,168 +163,6 @@ fn service(port: FakeLoanPort) -> LoanService<FakeLoanPort, FixedClock> {
     LoanService::with_clock(port, FixedClock(NOW), policy())
 }
 
-fn registered_service() -> LoanService<FakeLoanPort, FixedClock> {
-    let port = FakeLoanPort::default();
-    port.set_balance(12_345, Some(TEST_GUILD_ID), 10);
-    service(port)
-}
-
-#[test]
-fn test_can_take_loan_with_positive_balance() {
-    let port = FakeLoanPort::default();
-    port.set_balance(1_001, Some(TEST_GUILD_ID), 50);
-    let approval = service(port)
-        .validate_loan(1_001, 50, Some(TEST_GUILD_ID), None, None)
-        .unwrap();
-    assert_eq!(
-        approval,
-        LoanApproval {
-            amount: 50,
-            fee: 10,
-            total_owed: 60,
-            new_balance: 100,
-        }
-    );
-}
-
-#[test]
-fn test_cannot_take_loan_exceeding_max() {
-    let port = FakeLoanPort::default();
-    port.set_balance(1_002, Some(TEST_GUILD_ID), 100);
-    let error = service(port)
-        .validate_loan(1_002, 150, Some(TEST_GUILD_ID), None, None)
-        .unwrap_err();
-    assert_eq!(error.code, LOAN_AMOUNT_EXCEEDED);
-}
-
-#[test]
-fn test_cannot_take_loan_with_outstanding_loan() {
-    let port = FakeLoanPort::default();
-    port.set_balance(1_003, Some(TEST_GUILD_ID), 100);
-    port.set_state(
-        StoredLoanState {
-            discord_id: 1_003,
-            outstanding_principal: 50,
-            outstanding_fee: 10,
-            ..StoredLoanState::default()
-        },
-        Some(TEST_GUILD_ID),
-    );
-    let error = service(port)
-        .validate_loan(1_003, 50, Some(TEST_GUILD_ID), None, None)
-        .unwrap_err();
-    assert_eq!(error.code, LOAN_ALREADY_EXISTS);
-}
-
-#[test]
-fn test_cannot_take_invalid_amount() {
-    let port = FakeLoanPort::default();
-    port.set_balance(1_004, Some(TEST_GUILD_ID), 50);
-    let service = service(port);
-    for amount in [0, -10] {
-        assert_eq!(
-            service
-                .validate_loan(1_004, amount, Some(TEST_GUILD_ID), None, None)
-                .unwrap_err()
-                .code,
-            VALIDATION_ERROR
-        );
-    }
-}
-
-#[test]
-fn test_valid_loan_returns_approval() {
-    let approval = registered_service()
-        .validate_loan(12_345, 50, Some(TEST_GUILD_ID), None, None)
-        .unwrap();
-    assert_eq!(
-        approval,
-        LoanApproval {
-            amount: 50,
-            fee: 10,
-            total_owed: 60,
-            new_balance: 60,
-        }
-    );
-}
-
-#[test]
-fn test_outstanding_loan_fails() {
-    let service = registered_service();
-    service.port().set_state(
-        StoredLoanState {
-            discord_id: 12_345,
-            total_loans_taken: 1,
-            outstanding_principal: 50,
-            outstanding_fee: 10,
-            ..StoredLoanState::default()
-        },
-        None,
-    );
-    let error = service
-        .validate_loan(12_345, 25, None, None, None)
-        .unwrap_err();
-    assert_eq!(error.code, LOAN_ALREADY_EXISTS);
-    assert!(error.message.to_lowercase().contains("outstanding loan"));
-}
-
-#[test]
-fn test_cooldown_fails() {
-    let service = registered_service();
-    service.port().set_state(
-        StoredLoanState {
-            discord_id: 12_345,
-            last_loan_at: Some(NOW - 60),
-            total_loans_taken: 1,
-            ..StoredLoanState::default()
-        },
-        None,
-    );
-    let error = service
-        .validate_loan(12_345, 25, None, None, None)
-        .unwrap_err();
-    assert_eq!(error.code, COOLDOWN_ACTIVE);
-    assert!(error.message.to_lowercase().contains("cooldown"));
-}
-
-#[test]
-fn test_invalid_amount_fails() {
-    let error = registered_service()
-        .validate_loan(12_345, 0, Some(TEST_GUILD_ID), None, None)
-        .unwrap_err();
-    assert_eq!(error.code, VALIDATION_ERROR);
-}
-
-#[test]
-fn test_exceeds_max_fails() {
-    let error = registered_service()
-        .validate_loan(12_345, 200, Some(TEST_GUILD_ID), None, None)
-        .unwrap_err();
-    assert_eq!(error.code, LOAN_AMOUNT_EXCEEDED);
-}
-
-#[test]
-fn test_boolean_context() {
-    let result = registered_service().validate_loan(12_345, 50, None, None, None);
-    assert!(result.is_ok());
-}
-
-#[test]
-fn test_unwrap_on_success() {
-    let approval = registered_service()
-        .validate_loan(12_345, 50, None, None, None)
-        .unwrap();
-    assert_eq!(approval.amount, 50);
-}
-
-#[test]
-fn test_unwrap_or_on_failure() {
-    let approval = registered_service()
-        .validate_loan(12_345, -10, None, None, None)
-        .ok();
-    assert_eq!(approval, None);
-}
-
 #[test]
 fn test_loan_service_delegates_bulk_borrower_lookup() {
     let port = FakeLoanPort::default();
@@ -439,22 +264,6 @@ fn zero_timestamp_is_not_a_cooldown_and_future_timestamp_is() {
     );
     assert!(future.is_on_cooldown);
     assert_eq!(future.cooldown_ends_at, Some(NOW + 110));
-}
-
-#[test]
-fn overrides_are_per_call_and_do_not_mutate_service_policy() {
-    let service = registered_service();
-    let adjusted = service
-        .validate_loan(12_345, 150, Some(TEST_GUILD_ID), Some(0.10), Some(200))
-        .unwrap();
-    assert_eq!((adjusted.fee, adjusted.total_owed), (15, 165));
-    assert_eq!(
-        service
-            .validate_loan(12_345, 150, Some(TEST_GUILD_ID), None, None)
-            .unwrap_err()
-            .code,
-        LOAN_AMOUNT_EXCEEDED
-    );
 }
 
 #[test]

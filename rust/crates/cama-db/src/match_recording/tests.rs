@@ -1317,6 +1317,79 @@ fn low_priority_tax_never_withholds_more_than_the_profit_basis() {
 }
 
 #[test]
+fn vanity_tax_is_trimmed_to_what_the_bankruptcy_share_left() {
+    const PLAYER: i64 = 70_305;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open trimmed award database");
+    insert_award_player(&connection, PLAYER, 500);
+    connection
+        .execute(
+            "INSERT INTO bankruptcy_state (
+                 discord_id,guild_id,last_bankruptcy_at,
+                 penalty_games_remaining,bankruptcy_count
+             ) VALUES (?1,?2,0,20,1)",
+            params![PLAYER, GUILD],
+        )
+        .expect("insert bankruptcy state");
+    drop(connection);
+
+    let receipts = MatchRecordingRepository::new(database.path())
+        .credit_income_awards_atomic(
+            Some(GUILD),
+            &[IncomeAwardRequest {
+                apply_bankruptcy_penalty: true,
+                bankruptcy_penalty_rate_per_game: 0.05,
+                vanity_tax_rate: 0.5,
+                related_type: Some("match_win_bonus"),
+                related_id: Some(934),
+                ..IncomeAwardRequest::ordinary(PLAYER, 100, "match_win_bonus")
+            }],
+        )
+        .expect("credit fully withheld award");
+    let receipt = &receipts[0];
+    assert_eq!(receipt.bankruptcy_penalty, 100);
+    assert_eq!(receipt.vanity_tax, 0);
+    assert!(receipt.bankruptcy_penalty + receipt.vanity_tax + receipt.low_priority_tax <= 100);
+    assert!(receipt.balance_delta >= 0);
+    assert_eq!(receipt.balance_after, 500);
+}
+
+#[test]
+fn nan_rates_withhold_nothing_like_the_shared_split() {
+    const PLAYER: i64 = 70_306;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open NaN award database");
+    insert_award_player(&connection, PLAYER, 0);
+    connection
+        .execute(
+            "INSERT INTO bankruptcy_state (
+                 discord_id,guild_id,last_bankruptcy_at,
+                 penalty_games_remaining,bankruptcy_count
+             ) VALUES (?1,?2,0,3,1)",
+            params![PLAYER, GUILD],
+        )
+        .expect("insert bankruptcy state");
+    drop(connection);
+
+    let receipts = MatchRecordingRepository::new(database.path())
+        .credit_income_awards_atomic(
+            Some(GUILD),
+            &[IncomeAwardRequest {
+                apply_bankruptcy_penalty: true,
+                bankruptcy_penalty_rate_per_game: f64::NAN,
+                vanity_tax_rate: f64::NAN,
+                low_priority_tax_rate: f64::NAN,
+                ..IncomeAwardRequest::ordinary(PLAYER, 100, "match_participation")
+            }],
+        )
+        .expect("credit NaN-rate award");
+    assert_eq!(receipts[0].bankruptcy_penalty, 0);
+    assert_eq!(receipts[0].vanity_tax, 0);
+    assert_eq!(receipts[0].low_priority_tax, 0);
+    assert_eq!(receipts[0].balance_delta, 100);
+}
+
+#[test]
 fn recovered_income_award_receipt_replays_the_low_priority_tax() {
     const PLAYER: i64 = 70_303;
     let database = migrated_award_database();

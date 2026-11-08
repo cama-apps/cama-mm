@@ -142,12 +142,7 @@ pub enum BankruptcyValidation {
     Rejected(BankruptcyRejection),
 }
 
-impl BankruptcyValidation {
-    #[must_use]
-    pub const fn is_eligible(self) -> bool {
-        matches!(self, Self::Eligible { .. })
-    }
-}
+impl BankruptcyValidation {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BankruptcyExecution {
@@ -455,14 +450,6 @@ where
             .collect())
     }
 
-    pub fn validate_bankruptcy(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<BankruptcyValidation, BankruptcyServiceError> {
-        self.validate_at(discord_id, guild_id, self.now()?)
-    }
-
     pub fn execute_bankruptcy(
         &self,
         discord_id: i64,
@@ -518,26 +505,6 @@ where
             penalty_games,
             self.policy.penalty_rate_per_game,
         ))
-    }
-
-    pub fn on_game_won(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<i64, BankruptcyServiceError> {
-        self.port
-            .decrement_penalty_games(discord_id, guild_id)
-            .map_err(Into::into)
-    }
-
-    pub fn on_games_won(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-    ) -> Result<BTreeMap<i64, i64>, BankruptcyServiceError> {
-        self.port
-            .decrement_penalty_games_bulk(discord_ids, guild_id)
-            .map_err(Into::into)
     }
 
     fn validate_at(

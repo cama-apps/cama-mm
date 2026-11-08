@@ -93,14 +93,6 @@ impl LoanState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LoanApproval {
-    pub amount: i64,
-    pub fee: i64,
-    pub total_owed: i64,
-    pub new_balance: i64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoanResult {
     pub amount: i64,
     pub fee: i64,
@@ -509,29 +501,6 @@ where
             .map_err(map_port_error)
     }
 
-    pub fn distribute_nonprofit_stipends(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-        max_stipend: i64,
-    ) -> Result<Vec<StipendPayment>, LoanServiceError> {
-        self.port
-            .distribute_nonprofit_stipends_atomic(discord_ids, guild_id, max_stipend)
-            .map_err(map_port_error)
-    }
-
-    pub fn transfer_balance_to_nonprofit(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        amount: i64,
-        context: &TransferContext,
-    ) -> Result<i64, LoanServiceError> {
-        self.port
-            .transfer_balance_to_nonprofit_atomic(discord_id, guild_id, amount, context)
-            .map_err(map_port_error)
-    }
-
     pub fn reset_loan_cooldown(
         &self,
         discord_id: i64,
@@ -540,78 +509,6 @@ where
         self.port
             .reset_cooldown(discord_id, guild_id)
             .map_err(map_port_error)
-    }
-
-    pub fn validate_loan(
-        &self,
-        discord_id: i64,
-        amount: i64,
-        guild_id: Option<i64>,
-        fee_rate_override: Option<f64>,
-        max_amount_override: Option<i64>,
-    ) -> Result<LoanApproval, LoanServiceError> {
-        let state = self.get_state(discord_id, guild_id)?;
-        let balance = self
-            .port
-            .get_balance(discord_id, guild_id)
-            .map_err(map_port_error)?;
-        if state.has_outstanding_loan() {
-            let total = state.outstanding_total().ok_or_else(|| {
-                LoanServiceError::new("Loan total exceeds signed 64-bit range.", VALIDATION_ERROR)
-            })?;
-            return Err(LoanServiceError::new(
-                format!(
-                    "You have an outstanding loan of {total} (principal: {}, fee: {}). Repay it by playing in a match first!",
-                    state.outstanding_principal, state.outstanding_fee
-                ),
-                LOAN_ALREADY_EXISTS,
-            ));
-        }
-        if state.is_on_cooldown {
-            let remaining = state.cooldown_ends_at.unwrap_or(0).saturating_sub(
-                self.clock
-                    .unix_timestamp()
-                    .map_err(LoanServiceError::storage)?,
-            );
-            return Err(LoanServiceError::new(
-                format!(
-                    "Loan cooldown active. Try again in {}h {}m.",
-                    remaining / 3_600,
-                    (remaining % 3_600) / 60
-                ),
-                COOLDOWN_ACTIVE,
-            ));
-        }
-        if amount <= 0 {
-            return Err(LoanServiceError::new(
-                "Loan amount must be positive.",
-                VALIDATION_ERROR,
-            ));
-        }
-        let max_amount = max_amount_override.unwrap_or(self.policy.max_amount);
-        if amount > max_amount {
-            return Err(LoanServiceError::new(
-                format!("Maximum loan amount is {max_amount}."),
-                LOAN_AMOUNT_EXCEEDED,
-            ));
-        }
-        let fee_rate = fee_rate_override.unwrap_or(self.policy.fee_rate);
-        let fee = calculate_fee(amount, fee_rate)?;
-        let total_owed = amount.checked_add(fee).ok_or_else(|| {
-            LoanServiceError::new("Loan total exceeds signed 64-bit range.", VALIDATION_ERROR)
-        })?;
-        let new_balance = balance.checked_add(amount).ok_or_else(|| {
-            LoanServiceError::new(
-                "Loan balance exceeds signed 64-bit range.",
-                VALIDATION_ERROR,
-            )
-        })?;
-        Ok(LoanApproval {
-            amount,
-            fee,
-            total_owed,
-            new_balance,
-        })
     }
 
     pub fn execute_loan(

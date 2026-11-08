@@ -1,12 +1,21 @@
 use super::*;
+use cama_app::economy_actions::apply_gamba_event_multiplier;
 use cama_app::manashop_rework::BuffService;
 use cama_app::match_recording::GamesMilestone;
+use cama_app::wheel::{
+    CooldownOutcome, WheelEconomyPolicy, cooldown_after_resolution, get_wheel_wedges,
+    next_wheel_reset_at, resolve_explosion, wheel_window_start_at,
+};
+use cama_app::wheel_settlement::{
+    apply_wheel_blood_pact_skim, credit_wheel_income, event_related_id, resolve_wheel_value,
+};
 use cama_db::core_repositories::NewPlayer;
 use cama_db::economy_event_repository::EconomyEventRepository;
+use cama_db::mana_service_repository::{BankruptBuff, ManaRepository};
 use cama_db::manashop_rework_repository::ManashopRepository;
 use cama_db::match_runtime::{PendingMatchRepository, PendingMatchState};
+use cama_db::wheel_spin_repository::{NewWheelSpin, WheelSpinRepository};
 use rusqlite::{Connection, params};
-use std::io::Cursor;
 use tempfile::NamedTempFile;
 
 use crate::registration::InteractionAllowedMentions;
@@ -460,32 +469,6 @@ fn economy_invest_retry_after_truncates_four_point_two_to_four_seconds() {
 }
 
 #[test]
-fn golden_wheel_member_snapshot_removes_departed_wealth_before_rank_selection() {
-    let mut departed = Player::new("departed");
-    departed.discord_id = Some(99);
-    departed.jopacoin_balance = 10_000;
-    let mut first = Player::new("first");
-    first.discord_id = Some(1);
-    first.jopacoin_balance = 900;
-    let mut second = Player::new("second");
-    second.discord_id = Some(2);
-    second.jopacoin_balance = 800;
-    let mut third = Player::new("third");
-    third.discord_id = Some(3);
-    third.jopacoin_balance = 700;
-    let raw = vec![departed, first, second, third];
-    let visible_ids = BTreeSet::from([1, 2, 3]);
-    let visible = filter_visible_wheel_leaderboard(raw, Some(&visible_ids));
-    assert_eq!(
-        visible
-            .iter()
-            .filter_map(|player| player.discord_id)
-            .collect::<Vec<_>>(),
-        vec![1, 2, 3]
-    );
-}
-
-#[test]
 fn synthetic_wheel_members_require_explicit_opt_in_and_negative_ids() {
     assert!(is_enabled_synthetic_wheel_member(-101, true));
     assert!(!is_enabled_synthetic_wheel_member(-101, false));
@@ -612,38 +595,6 @@ async fn wheel_member_snapshot_failure_cancels_pending_requests() {
         .await
         .expect("failed snapshot must cancel its pending lookup");
     assert!(dropped.load(Ordering::SeqCst));
-}
-
-#[test]
-fn golden_wheel_member_snapshot_preserves_raw_order_when_unavailable() {
-    let mut departed = Player::new("departed");
-    departed.discord_id = Some(99);
-    departed.jopacoin_balance = 10_000;
-    let mut visible = Player::new("visible");
-    visible.discord_id = Some(1);
-    visible.jopacoin_balance = 900;
-    let raw = vec![departed, visible];
-    let result = filter_visible_wheel_leaderboard(raw, None);
-    assert_eq!(result[0].discord_id, Some(99));
-}
-
-#[test]
-fn golden_wheel_dividend_uses_visible_positive_wealth_snapshot() {
-    let mut departed = Player::new("departed");
-    departed.discord_id = Some(99);
-    departed.jopacoin_balance = 100_000;
-    let mut first = Player::new("first");
-    first.discord_id = Some(1);
-    first.jopacoin_balance = 2_500;
-    let mut second = Player::new("second");
-    second.discord_id = Some(2);
-    second.jopacoin_balance = 1_500;
-    let raw = vec![departed, first, second];
-    let visible_ids = BTreeSet::from([1, 2]);
-    assert_eq!(
-        visible_wheel_positive_balance(&raw, Some(&visible_ids)),
-        Some(4_000)
-    );
 }
 
 #[test]
@@ -1652,6 +1603,7 @@ async fn expired_wheel_sqlite_failure_keeps_claim_for_retry() {
                 bonus_spin: false,
                 last_regular_spin: None,
                 original_responder: None,
+                attempt: Arc::default(),
             },
         );
     Connection::open(database.path())
@@ -1705,6 +1657,319 @@ async fn expired_wheel_sqlite_failure_keeps_claim_for_retry() {
 }
 
 #[tokio::test]
+async fn neon_hooks_run_on_the_blocking_pool() {
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("Neon configuration");
+    let provider = BettingRegistrationProvider::new(
+        "/tmp/cama-mm-betting-neon-blocking.sqlite",
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    let async_thread = std::thread::current().id();
+    let hook_thread = provider
+        .handler
+        .run_neon(|_| std::thread::current().id())
+        .await
+        .expect("Neon hook");
+    assert_ne!(hook_thread, async_thread);
+}
+
+/// Balances of the spinner (7), two other players (8, 9), and the reserve.
+fn retry_economy_snapshot(path: &Path) -> [i64; 4] {
+    let players = PlayerRepository::new(path);
+    let balance = |discord_id| {
+        players
+            .get_by_id(discord_id, Some(42))
+            .expect("retry player lookup")
+            .expect("retry player")
+            .jopacoin_balance
+    };
+    [
+        balance(7),
+        balance(8),
+        balance(9),
+        LoanRepository::new(path)
+            .get_nonprofit_fund(Some(42))
+            .expect("retry reserve"),
+    ]
+}
+
+/// Settle one expired interactive spin whose first wheel-history write fails,
+/// then retry it. Returns the database and the economy after each attempt.
+async fn retry_wheel_after_failed_history_write(
+    spin_kind: WheelKind,
+    option: WheelOption,
+    seed: impl FnOnce(&Path),
+) -> (NamedTempFile, [i64; 4], [i64; 4]) {
+    let database = NamedTempFile::new().expect("temporary retry database");
+    initialize_or_migrate(database.path()).expect("retry schema");
+    let players = PlayerRepository::new(database.path());
+    for (discord_id, balance) in [(7, 100), (8, 1_000), (9, 500)] {
+        players
+            .add(&NewPlayer::new(discord_id, "retry-player", Some(42)))
+            .expect("retry player");
+        players
+            .update_balance(discord_id, Some(42), balance)
+            .expect("retry balance");
+    }
+    seed(database.path());
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("retry configuration");
+    let provider = BettingRegistrationProvider::new(
+        database.path(),
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    provider
+        .handler
+        .wheel_interactions
+        .lock()
+        .expect("retry interaction lock")
+        .insert(
+            "disc_effect_retry".to_owned(),
+            PendingWheelInteraction {
+                kind: WheelInteractionKind::Discover,
+                user_id: 7,
+                guild_id: 42,
+                created_at: Instant::now() - Duration::from_secs(120),
+                options: vec![option],
+                wheel_wedges: Vec::new(),
+                golden: false,
+                display_name: None,
+                initial_attachment: None,
+                votes: BTreeMap::new(),
+                spin_kind,
+                balance_before: 100,
+                effects: ManaEffects::default(),
+                event_id: "effect-retry-event".to_owned(),
+                config: BettingRuntimeConfig::from_application_config(&config),
+                event_win_multiplier: 1.0,
+                event_loss_multiplier: 1.0,
+                bonus_spin: false,
+                last_regular_spin: None,
+                original_responder: None,
+                attempt: Arc::default(),
+            },
+        );
+    Connection::open(database.path())
+        .expect("open retry database")
+        .execute_batch(
+            "CREATE TRIGGER fail_first_wheel_log
+             BEFORE INSERT ON wheel_spins
+             BEGIN SELECT RAISE(ABORT, 'transient wheel failure'); END;",
+        )
+        .expect("install transient wheel failure");
+    assert!(
+        provider.expire_pending_views().await.is_err(),
+        "the first settlement attempt fails at the history write"
+    );
+    let after_failure = retry_economy_snapshot(database.path());
+    Connection::open(database.path())
+        .expect("reopen retry database")
+        .execute("DROP TRIGGER fail_first_wheel_log", [])
+        .expect("remove transient failure");
+    assert_eq!(
+        provider
+            .expire_pending_views()
+            .await
+            .expect("the retried settlement completes"),
+        1
+    );
+    assert!(
+        provider
+            .handler
+            .wheel_interactions
+            .lock()
+            .expect("settled interaction lock")
+            .is_empty()
+    );
+    let spin_count: i64 = Connection::open(database.path())
+        .expect("open retry result")
+        .query_row(
+            "SELECT COUNT(*) FROM wheel_spins WHERE event_id='effect-retry-event'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("retry spin count");
+    assert_eq!(spin_count, 1);
+    let after_retry = retry_economy_snapshot(database.path());
+    (database, after_failure, after_retry)
+}
+
+fn mechanic_option(mechanic: WheelMechanic) -> WheelOption {
+    WheelOption {
+        label: mechanic.code().to_owned(),
+        value: WheelValue::Mechanic(mechanic),
+        color: "#000000",
+    }
+}
+
+#[tokio::test]
+async fn retried_chain_reaction_copies_a_loss_exactly_once() {
+    let (_database, after_failure, after_retry) = retry_wheel_after_failed_history_write(
+        WheelKind::Bankrupt,
+        mechanic_option(WheelMechanic::ChainReaction),
+        |path| {
+            WheelSpinRepository::new(path)
+                .log_wheel_spin(&NewWheelSpin {
+                    event_id: Some("copied-spin".to_owned()),
+                    ..NewWheelSpin::legacy(8, Some(42), -30, 1_000)
+                })
+                .expect("seed copied losing spin");
+        },
+    )
+    .await;
+    assert_eq!(after_failure, [70, 1_000, 500, 30]);
+    assert_eq!(after_retry, after_failure);
+}
+
+#[tokio::test]
+async fn retried_recession_charges_each_victim_exactly_once() {
+    let (database, after_failure, after_retry) = retry_wheel_after_failed_history_write(
+        WheelKind::Regular,
+        mechanic_option(WheelMechanic::Recession),
+        |_| {},
+    )
+    .await;
+    assert!(after_failure[1] < 1_000 && after_failure[2] < 500);
+    assert_eq!(after_retry, after_failure);
+    let events: i64 = Connection::open(database.path())
+        .expect("open recession events")
+        .query_row(
+            "SELECT COUNT(*) FROM hostile_loss_events
+             WHERE event_key GLOB 'effect-retry-event:*'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count recession events");
+    assert_eq!(events, 3);
+}
+
+#[tokio::test]
+async fn retried_market_crash_keeps_its_random_amounts() {
+    let (_database, after_failure, after_retry) = retry_wheel_after_failed_history_write(
+        WheelKind::Regular,
+        mechanic_option(WheelMechanic::MarketCrash),
+        |_| {},
+    )
+    .await;
+    assert!(
+        after_failure[0] > 100,
+        "the spinner stole from the top players"
+    );
+    assert_eq!(after_retry, after_failure);
+}
+
+#[tokio::test]
+async fn retried_bankrupt_pardon_forgives_the_loss_exactly_once() {
+    let (database, after_failure, after_retry) = retry_wheel_after_failed_history_write(
+        WheelKind::Bankrupt,
+        WheelOption {
+            label: "BANKRUPT".to_owned(),
+            value: WheelValue::Numeric(-20),
+            color: "#1a1a1a",
+        },
+        |path| {
+            PlayerRepository::new(path)
+                .set_wheel_pardon(7, Some(42), true)
+                .expect("arm pardon");
+        },
+    )
+    .await;
+    assert_eq!(after_failure, [100, 1_000, 500, 0]);
+    assert_eq!(after_retry, after_failure);
+    let pardon_armed: i64 = Connection::open(database.path())
+        .expect("open pardon state")
+        .query_row(
+            "SELECT COALESCE(has_wheel_pardon,0) FROM players WHERE discord_id=7 AND guild_id=42",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read pardon");
+    assert_eq!(pardon_armed, 0, "the pardon is consumed exactly once");
+    let logged: i64 = Connection::open(database.path())
+        .expect("open pardon history")
+        .query_row(
+            "SELECT result FROM wheel_spins WHERE event_id='effect-retry-event'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pardoned spin");
+    assert_eq!(logged, 0);
+}
+
+#[tokio::test]
+async fn retried_extend_adds_its_penalty_game_exactly_once() {
+    let (database, _, _) = retry_wheel_after_failed_history_write(
+        WheelKind::Bankrupt,
+        mechanic_option(WheelMechanic::ExtendOne),
+        |path| {
+            BankruptcyRepository::new(path)
+                .adjust_penalty_games_atomic(7, Some(42), 2)
+                .expect("seed penalty");
+        },
+    )
+    .await;
+    assert_eq!(
+        BankruptcyRepository::new(database.path())
+            .get_penalty_games(7, Some(42))
+            .expect("read penalty"),
+        3
+    );
+}
+
+#[test]
+fn a_retried_selection_keeps_the_first_attempts_option_and_reroll() {
+    let first = mechanic_option(WheelMechanic::Recession);
+    let pending = PendingWheelInteraction {
+        kind: WheelInteractionKind::Reroll,
+        user_id: 7,
+        guild_id: 42,
+        created_at: Instant::now(),
+        options: vec![first.clone(), mechanic_option(WheelMechanic::Jailbreak)],
+        wheel_wedges: Vec::new(),
+        golden: false,
+        display_name: None,
+        initial_attachment: None,
+        votes: BTreeMap::new(),
+        spin_kind: WheelKind::Bankrupt,
+        balance_before: 0,
+        effects: ManaEffects::default(),
+        event_id: "pinned".to_owned(),
+        config: BettingRuntimeConfig::from_application_config(
+            &ApplicationConfig::from_lookup(|name| {
+                (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+            })
+            .expect("configuration"),
+        ),
+        event_win_multiplier: 1.0,
+        event_loss_multiplier: 1.0,
+        bonus_spin: false,
+        last_regular_spin: None,
+        original_responder: None,
+        attempt: Arc::default(),
+    };
+    let (pinned, reroll) = pin_wheel_selection(&pending.attempt, first.clone(), true);
+    assert_eq!((pinned.label.as_str(), reroll), ("RECESSION", true));
+    // A later click on the other option, or the timeout default, cannot
+    // change what the first attempt began settling.
+    let clone = pending.clone();
+    let (pinned, reroll) = pin_wheel_selection(
+        &clone.attempt,
+        mechanic_option(WheelMechanic::Jailbreak),
+        false,
+    );
+    assert_eq!(
+        (pinned.label.as_str(), reroll),
+        (first.label.as_str(), true)
+    );
+}
+
+#[tokio::test]
 async fn wheel_click_and_timeout_race_settles_exactly_once() {
     let database = NamedTempFile::new().expect("temporary race database");
     initialize_or_migrate(database.path()).expect("race schema");
@@ -1752,6 +2017,7 @@ async fn wheel_click_and_timeout_race_settles_exactly_once() {
                 bonus_spin: false,
                 last_regular_spin: None,
                 original_responder: None,
+                attempt: Arc::default(),
             },
         );
     let responder = Arc::new(RecordingResponder::default());
@@ -1992,8 +2258,15 @@ async fn lobby_bonus_does_not_inflate_bettor_previews() {
                     .find(|field| field.name == "Current Odds")
                     .expect("odds field")
                     .value;
-                assert!(!odds.contains("1000"));
-                assert!(!odds.contains("600"));
+                // The field ends with the wall-clock lock time as a Discord
+                // timestamp, whose digits can themselves contain "600" or
+                // "1000"; only the amounts above that line are under test.
+                let (amounts, lock_line) = odds
+                    .split_once("\nBetting closes <t:")
+                    .expect("open betting shows its lock time");
+                assert!(lock_line.ends_with(":R>"));
+                assert!(!amounts.contains("1000"));
+                assert!(!amounts.contains("600"));
                 assert!(odds.contains(if mode == "pool" {
                     "Seed: Radiant 200 "
                 } else {
@@ -2192,14 +2465,8 @@ fn command_tree_contains_betting_and_economy_surface() {
 
 #[test]
 fn golden_wheel_announcement_matches_public_python_copy_and_mentions_top_players() {
-    let mut first = Player::new("first");
-    first.discord_id = Some(7);
-    first.jopacoin_balance = 900;
-    let mut second = Player::new("second");
-    second.discord_id = Some(8);
-    second.jopacoin_balance = 700;
     let names = BTreeMap::from([(7, "First Player".to_owned())]);
-    let announcement = golden_wheel_announcement(7, &[first, second], &names);
+    let announcement = golden_wheel_announcement(7, &[(7, 900), (8, 700)], &names);
     assert!(!announcement.ephemeral);
     assert_eq!(
         announcement.allowed_mentions,
@@ -2447,7 +2714,6 @@ fn restart_resilience_full_betting_workflow_settles_both_sides_after_recreation(
 #[test]
 fn provider_exposes_dig_bonus_wheel_seam() {
     let _ = BettingRegistrationProvider::trigger_bonus_spin;
-    let _ = BettingRegistrationProvider::with_wager_refresh_port;
     let explosion = resolve_explosion(true, 0, 1.0, 1.0);
     assert_eq!(explosion.credited_reward, 44);
     assert!(explosion.is_bonus);
@@ -2457,7 +2723,7 @@ fn provider_exposes_dig_bonus_wheel_seam() {
 }
 
 #[test]
-fn wheel_and_explosion_media_are_valid_multi_frame_gifs() {
+fn wheel_and_explosion_attachments_keep_python_filenames() {
     let policy = WheelEconomyPolicy {
         minigame_scale: 1.0,
         regular_target_ev: 10.0,
@@ -2467,457 +2733,10 @@ fn wheel_and_explosion_media_are_valid_multi_frame_gifs() {
     let wedges = get_wheel_wedges(false, false, policy);
     let wheel = render_wheel_attachment(&wedges, 3, false, None).expect("wheel gif");
     let explosion = render_explosion_attachment().expect("explosion gif");
-    let expected_wheel_delays = (0..WHEEL_MEDIA_FRAME_COUNT)
-        .map(wheel_frame_delay_ms)
-        .collect::<Vec<_>>();
-    let expected_explosion_delays = (0..EXPLOSION_MEDIA_FRAME_COUNT)
-        .map(explosion_frame_delay_ms)
-        .collect::<Vec<_>>();
     assert_eq!(wheel.filename, "wheel.gif");
     assert_eq!(explosion.filename, "explosion.gif");
-    for (attachment, expected_frames, expected_delays) in [
-        (
-            wheel,
-            WHEEL_MEDIA_FRAME_COUNT,
-            expected_wheel_delays.as_slice(),
-        ),
-        (
-            explosion,
-            EXPLOSION_MEDIA_FRAME_COUNT,
-            expected_explosion_delays.as_slice(),
-        ),
-    ] {
-        assert!(attachment.bytes.starts_with(b"GIF89a"));
-        assert!(attachment.bytes.len() < WHEEL_MEDIA_UPLOAD_LIMIT);
-        let mut decoder = gif::DecodeOptions::new()
-            .read_info(Cursor::new(&attachment.bytes))
-            .expect("decode gif header");
-        assert_eq!(decoder.width(), WHEEL_MEDIA_SIZE);
-        assert_eq!(decoder.height(), WHEEL_MEDIA_SIZE);
-        let mut frames = 0;
-        let mut delays = Vec::with_capacity(expected_frames);
-        while decoder
-            .read_next_frame()
-            .expect("decode gif frame")
-            .is_some_and(|frame| {
-                delays.push(u64::from(frame.delay) * 10);
-                frames += 1;
-                true
-            })
-        {}
-        let encoded_delays = expected_delays
-            .iter()
-            .map(|milliseconds| milliseconds / 10 * 10)
-            .collect::<Vec<_>>();
-        assert_eq!(delays, encoded_delays);
-        assert_eq!(delays.first().copied(), Some(expected_delays[0]));
-        assert_eq!(delays.last().copied(), Some(60_000));
-        assert_eq!(frames, expected_frames);
-    }
-    assert_eq!(explosion_palette_sample_size((500, 500), 56), (94, 94));
-    let palette_budget = std::hint::black_box(EXPLOSION_PALETTE_SAMPLE_PIXEL_BUDGET);
-    assert!(94_usize * 94 * EXPLOSION_MEDIA_FRAME_COUNT <= palette_budget);
-}
-
-#[test]
-fn wheel_final_pointer_is_centered_on_the_settled_wedge() {
-    for wedge_count in [2, 6, 12, 24, 32] {
-        let slice = std::f64::consts::TAU / wedge_count as f64;
-        for target_index in 0..wedge_count {
-            let rotation =
-                wheel_frame_rotation(WHEEL_MEDIA_FRAME_COUNT - 1, target_index, wedge_count);
-            assert_eq!(
-                wheel_index_at_pointer(rotation, wedge_count),
-                Some(target_index),
-                "pointer must resolve the same wedge as settlement"
-            );
-            let target_label_angle = (target_index as f64 * slice - rotation + slice / 2.0)
-                .rem_euclid(std::f64::consts::TAU);
-            assert!(
-                target_label_angle.min(std::f64::consts::TAU - target_label_angle) < 1e-9,
-                "settled wedge label must be centered under the pointer"
-            );
-        }
-    }
-}
-
-#[test]
-fn wheel_media_labels_cover_python_themes_and_fractional_phases() {
-    let policies = WheelEconomyPolicy {
-        minigame_scale: 1.0,
-        regular_target_ev: 10.0,
-        bankrupt_target_ev: 10.0,
-        golden_target_ev: 10.0,
-    };
-    let cases = [
-        (get_wheel_wedges(false, false, policies), false, 0.0_f64),
-        (get_wheel_wedges(true, false, policies), false, 47.25_f64),
-        (get_wheel_wedges(false, true, policies), true, 271.875_f64),
-        (get_wheel_wedges(false, false, policies), false, 13.37_f64),
-        (get_wheel_wedges(true, false, policies), false, 222.615_f64),
-        (get_wheel_wedges(true, false, policies), false, 358.905_f64),
-    ];
-    for (wedges, golden, rotation) in cases {
-        let colors = wedges
-            .iter()
-            .map(|wedge| parse_hex_rgb(wedge.color).unwrap_or([80, 80, 80]))
-            .collect::<Vec<_>>();
-        let mut palette = vec![
-            [30, 30, 35],
-            [255, 215, 0],
-            [231, 76, 60],
-            if golden { [58, 40, 0] } else { [44, 62, 80] },
-            [0, 0, 0],
-            [255, 255, 255],
-            [55, 190, 55],
-            [55, 90, 55],
-            [255, 255, 0],
-            [160, 160, 160],
-            [220, 220, 220],
-            [150, 127, 0],
-            [30, 110, 30],
-        ];
-        let indices = colors
-            .iter()
-            .map(|color| {
-                palette
-                    .iter()
-                    .position(|candidate| candidate == color)
-                    .unwrap_or_else(|| {
-                        palette.push(*color);
-                        palette.len() - 1
-                    }) as u8
-            })
-            .collect::<Vec<_>>();
-        let mut pixels = vec![0_u8; usize::from(WHEEL_MEDIA_SIZE).pow(2)];
-        let mut sprite_cache = WheelLabelSpriteCache::default();
-        let label_atlas = build_wheel_label_atlas(&wedges, &mut sprite_cache);
-        draw_wheel_frame(
-            &mut pixels,
-            &indices,
-            &indices,
-            &label_atlas,
-            0,
-            ((rotation / 11.75).round() as usize).min(WHEEL_MEDIA_FRAME_COUNT - 1),
-            golden,
-            None,
-        );
-        assert!(pixels.contains(&4));
-        assert!(pixels.contains(&5));
-        assert!(
-            pixels
-                .iter()
-                .all(|pixel| usize::from(*pixel) < palette.len())
-        );
-    }
-}
-
-fn assert_cached_label_visual_case(
-    wedges: &[cama_app::wheel::WheelWedge],
-    golden: bool,
-    frame_index: usize,
-) {
-    let colors = wedges
-        .iter()
-        .map(|wedge| parse_hex_rgb(wedge.color).unwrap_or([80, 80, 80]))
-        .collect::<Vec<_>>();
-    let palette = [
-        [30, 30, 35],
-        [255, 215, 0],
-        [231, 76, 60],
-        if golden { [58, 40, 0] } else { [44, 62, 80] },
-        [0, 0, 0],
-        [255, 255, 255],
-        [55, 190, 55],
-        [55, 90, 55],
-        [255, 255, 0],
-        [160, 160, 160],
-        [220, 220, 220],
-        [150, 127, 0],
-        [30, 110, 30],
-    ];
-    let indices = colors
-        .iter()
-        .map(|color| {
-            palette
-                .iter()
-                .position(|candidate| candidate == color)
-                .unwrap_or(0) as u8
-        })
-        .collect::<Vec<_>>();
-    let mut pixels = vec![0_u8; usize::from(WHEEL_MEDIA_SIZE).pow(2)];
-    let mut sprite_cache = WheelLabelSpriteCache::default();
-    let atlas = build_wheel_label_atlas(wedges, &mut sprite_cache);
-    draw_wheel_frame(
-        &mut pixels,
-        &indices,
-        &indices,
-        &atlas,
-        0,
-        frame_index.min(WHEEL_MEDIA_FRAME_COUNT - 1),
-        golden,
-        None,
-    );
-    assert!(pixels.contains(&4));
-    assert!(pixels.contains(&5));
-    assert!(pixels.iter().all(|pixel| usize::from(*pixel) < 256));
-}
-
-#[test]
-fn cached_wedge_label_sprites_match_normal_visual_bound() {
-    let policy = WheelEconomyPolicy {
-        minigame_scale: 1.0,
-        regular_target_ev: 10.0,
-        bankrupt_target_ev: 10.0,
-        golden_target_ev: 10.0,
-    };
-    assert_cached_label_visual_case(&get_wheel_wedges(false, false, policy), false, 0);
-}
-
-#[test]
-fn cached_wedge_label_sprites_match_bankrupt_visual_bound() {
-    let policy = WheelEconomyPolicy {
-        minigame_scale: 1.0,
-        regular_target_ev: 10.0,
-        bankrupt_target_ev: 10.0,
-        golden_target_ev: 10.0,
-    };
-    assert_cached_label_visual_case(&get_wheel_wedges(true, false, policy), false, 4);
-}
-
-#[test]
-fn cached_wedge_label_sprites_match_golden_visual_bound() {
-    let policy = WheelEconomyPolicy {
-        minigame_scale: 1.0,
-        regular_target_ev: 10.0,
-        bankrupt_target_ev: 10.0,
-        golden_target_ev: 10.0,
-    };
-    assert_cached_label_visual_case(&get_wheel_wedges(false, true, policy), true, 23);
-}
-
-#[test]
-fn cached_wedge_label_sprites_match_fractional_phase_a() {
-    let policy = WheelEconomyPolicy {
-        minigame_scale: 1.0,
-        regular_target_ev: 10.0,
-        bankrupt_target_ev: 10.0,
-        golden_target_ev: 10.0,
-    };
-    assert_cached_label_visual_case(&get_wheel_wedges(false, false, policy), false, 1);
-}
-
-#[test]
-fn cached_wedge_label_sprites_match_fractional_phase_b() {
-    let policy = WheelEconomyPolicy {
-        minigame_scale: 1.0,
-        regular_target_ev: 10.0,
-        bankrupt_target_ev: 10.0,
-        golden_target_ev: 10.0,
-    };
-    assert_cached_label_visual_case(&get_wheel_wedges(false, false, policy), false, 19);
-}
-
-#[test]
-fn cached_wedge_label_sprites_match_fractional_phase_c() {
-    let policy = WheelEconomyPolicy {
-        minigame_scale: 1.0,
-        regular_target_ev: 10.0,
-        bankrupt_target_ev: 10.0,
-        golden_target_ev: 10.0,
-    };
-    assert_cached_label_visual_case(&get_wheel_wedges(true, false, policy), false, 30);
-}
-
-#[test]
-fn wheel_label_layout_is_measured_once_and_reused_across_frames() {
-    let policy = WheelEconomyPolicy {
-        minigame_scale: 1.0,
-        regular_target_ev: 10.0,
-        bankrupt_target_ev: 10.0,
-        golden_target_ev: 10.0,
-    };
-    let wedges = get_wheel_wedges(false, false, policy);
-    let mut cache = WheelLabelSpriteCache::default();
-    let first = build_wheel_label_atlas(&wedges, &mut cache);
-    let misses_after_first = cache.misses;
-    let hits_after_first = cache.hits;
-    let second = build_wheel_label_atlas(&wedges, &mut cache);
-    assert_eq!(first.wedge_sprite_indices, second.wedge_sprite_indices);
-    assert_eq!(cache.misses, misses_after_first);
-    assert_eq!(cache.hits - hits_after_first, first.sprites.len());
-    assert!(cache.entries.len() <= MAX_WHEEL_LABEL_SPRITES);
-}
-
-#[test]
-fn wheel_label_sprite_cache_is_custom_safe_and_bounded() {
-    let wedges = (0..(MAX_WHEEL_LABEL_SPRITES + 24))
-        .map(|index| cama_app::wheel::WheelWedge {
-            label: format!("CUSTOM_{index}"),
-            value: WheelValue::Numeric(0),
-            color: "#123456",
-        })
-        .collect::<Vec<_>>();
-    let mut cache = WheelLabelSpriteCache::default();
-    let atlas = build_wheel_label_atlas(&wedges, &mut cache);
-    assert_eq!(atlas.wedge_sprite_indices.len(), wedges.len());
-    assert!(cache.entries.len() <= MAX_WHEEL_LABEL_SPRITES);
-    assert_eq!(cache.misses, wedges.len());
-    assert!(atlas.sprites.len() > MAX_WHEEL_LABEL_SPRITES);
-}
-
-#[test]
-fn completed_wheel_attachment_cache_is_lru_bounded() {
-    let wedges = vec![cama_app::wheel::WheelWedge {
-        label: "CACHE".to_owned(),
-        value: WheelValue::Numeric(5),
-        color: "#123456",
-    }];
-    let keys = (0..=MAX_CACHED_WHEEL_ATTACHMENTS)
-        .map(|target_index| WheelAttachmentCacheKey::new(&wedges, target_index, false, None))
-        .collect::<Vec<_>>();
-    let mut cache = WheelAttachmentCache::default();
-    for (index, key) in keys.iter().cloned().enumerate() {
-        cache.insert(
-            key,
-            InteractionAttachment::bytes("wheel.gif", vec![index as u8]),
-        );
-    }
-    assert_eq!(cache.entries.len(), MAX_CACHED_WHEEL_ATTACHMENTS);
-    assert!(!cache.entries.contains_key(&keys[0]));
-    assert_eq!(
-        cache.get(keys.last().expect("latest cache key")),
-        Some(InteractionAttachment::bytes(
-            "wheel.gif",
-            vec![MAX_CACHED_WHEEL_ATTACHMENTS as u8],
-        ))
-    );
-}
-
-#[test]
-fn wheel_label_sprite_cache_distinguishes_subpixel_geometry_keys() {
-    let wedges = vec![cama_app::wheel::WheelWedge {
-        label: "PHASE".to_owned(),
-        value: WheelValue::Numeric(0),
-        color: "#123456",
-    }];
-    let mut cache = WheelLabelSpriteCache::default();
-    let _ = cache.get_or_insert("PHASE", 1);
-    let _ = cache.get_or_insert("PHASE", 2);
-    let _ = cache.get_or_insert("PHASE", 1);
-    assert_eq!(cache.misses, 2);
-    assert_eq!(cache.hits, 1);
-    let atlas = build_wheel_label_atlas(&wedges, &mut cache);
-    assert_eq!(atlas.sprites.len(), 1);
-    let expected_scale = label_scale("PHASE", std::f64::consts::TAU, 220);
-    let expected = cache
-        .entries
-        .get(&("PHASE".to_owned(), expected_scale))
-        .expect("atlas geometry is cached under its measured scale");
-    assert_eq!(
-        atlas.sprites[0].width, expected.width,
-        "atlas reuses the font-backed sprite for the measured geometry"
-    );
-}
-
-#[test]
-fn wheel_production_media_is_500px_and_under_discord_limit() {
-    let policy = WheelEconomyPolicy {
-        minigame_scale: 1.0,
-        regular_target_ev: 10.0,
-        bankrupt_target_ev: 10.0,
-        golden_target_ev: 10.0,
-    };
-    let wedges = get_wheel_wedges(false, false, policy);
-    let attachment = render_wheel_attachment(&wedges, 7, false, None).expect("production wheel");
-    assert!(attachment.bytes.len() < WHEEL_MEDIA_UPLOAD_LIMIT);
-    let decoder = gif::DecodeOptions::new()
-        .read_info(Cursor::new(attachment.bytes))
-        .expect("wheel header");
-    assert_eq!(decoder.width(), WHEEL_MEDIA_SIZE);
-    assert_eq!(decoder.height(), WHEEL_MEDIA_SIZE);
-}
-
-#[test]
-fn explosion_production_media_uses_shared_palette_budget_and_upload_bound() {
-    let attachment = render_explosion_attachment().expect("production explosion");
-    assert!(attachment.bytes.len() < WHEEL_MEDIA_UPLOAD_LIMIT);
-    assert_eq!(explosion_palette_sample_size((500, 500), 56), (94, 94));
-    let palette_budget = std::hint::black_box(EXPLOSION_PALETTE_SAMPLE_PIXEL_BUDGET);
-    assert!(94_usize * 94 * EXPLOSION_MEDIA_FRAME_COUNT <= palette_budget);
-}
-
-#[test]
-fn wheel_gif_reuses_palette_seed_without_changing_timing() {
-    let policy = WheelEconomyPolicy {
-        minigame_scale: 1.0,
-        regular_target_ev: 10.0,
-        bankrupt_target_ev: 10.0,
-        golden_target_ev: 10.0,
-    };
-    let attachment =
-        render_wheel_attachment(&get_wheel_wedges(false, false, policy), 0, false, None)
-            .expect("seeded wheel GIF");
-    let mut decoder = gif::DecodeOptions::new()
-        .read_info(Cursor::new(attachment.bytes))
-        .expect("wheel GIF header");
-    let mut delays = Vec::new();
-    while let Some(frame) = decoder.read_next_frame().expect("wheel frame") {
-        delays.push(u64::from(frame.delay) * 10);
-    }
-    assert_eq!(delays.len(), WHEEL_MEDIA_FRAME_COUNT);
-    assert_eq!(delays[..14], [30_u64; 14]);
-    assert_eq!(delays.last().copied(), Some(60_000));
-}
-
-#[test]
-fn explosion_gif_builds_one_shared_palette_without_changing_timing() {
-    let attachment = render_explosion_attachment().expect("shared-palette explosion GIF");
-    let mut decoder = gif::DecodeOptions::new()
-        .read_info(Cursor::new(attachment.bytes))
-        .expect("explosion GIF header");
-    let mut delays = Vec::new();
-    while let Some(frame) = decoder.read_next_frame().expect("explosion frame") {
-        assert!(frame.buffer.iter().all(|index| *index < 6));
-        delays.push(u64::from(frame.delay) * 10);
-    }
-    assert_eq!(delays.len(), EXPLOSION_MEDIA_FRAME_COUNT);
-    assert_eq!(delays[0..14], [50_u64; 14]);
-    assert_eq!(delays.last().copied(), Some(60_000));
-}
-
-#[test]
-fn media_delay_contract_matches_python_frame_tables() {
-    assert_eq!(
-        (0..WHEEL_MEDIA_FRAME_COUNT)
-            .map(wheel_frame_delay_ms)
-            .collect::<Vec<_>>(),
-        [
-            [30; 14].as_slice(),
-            [45; 14].as_slice(),
-            [70; 14].as_slice(),
-            [110; 16].as_slice(),
-            [180].as_slice(),
-            &[195, 210, 225, 240, 255, 270, 285, 300, 315],
-            &[60_000, 60_000],
-        ]
-        .concat()
-    );
-    assert_eq!(
-        (0..EXPLOSION_MEDIA_FRAME_COUNT)
-            .map(explosion_frame_delay_ms)
-            .collect::<Vec<_>>(),
-        [
-            [50; 14].as_slice(),
-            &[60, 70, 80, 90, 100, 110, 120, 130, 140, 150],
-            [60; 4].as_slice(),
-            [80; 14].as_slice(),
-            [100; 13].as_slice(),
-            &[60_000],
-        ]
-        .concat()
-    );
-    assert_eq!(gif_delay_centiseconds(60_000), 6_000);
+    assert!(wheel.bytes.starts_with(b"GIF89a"));
+    assert!(explosion.bytes.starts_with(b"GIF89a"));
 }
 
 #[test]
@@ -2965,71 +2784,6 @@ fn nested_option_parser_reads_discord_subcommand_payload() {
 }
 
 #[test]
-fn event_multiplier_changes_numeric_wedges_but_not_special_values() {
-    let mut positive = cama_app::wheel::WheelWedge {
-        label: "10".to_owned(),
-        value: WheelValue::Numeric(10),
-        color: "#fff",
-    };
-    apply_event_multiplier_to_wedge(&mut positive, 1.5, 0.5);
-    assert_eq!(positive.value, WheelValue::Numeric(15));
-    assert_eq!(positive.label, "15");
-
-    let mut zero = cama_app::wheel::WheelWedge {
-        label: "LOSE".to_owned(),
-        value: WheelValue::Numeric(0),
-        color: "#000",
-    };
-    apply_event_multiplier_to_wedge(&mut zero, 10.0, 0.0);
-    assert_eq!(zero.value, WheelValue::Numeric(0));
-    assert_eq!(zero.label, "LOSE");
-
-    let mut mechanic = cama_app::wheel::WheelWedge {
-        label: "DISCOVER".to_owned(),
-        value: WheelValue::Mechanic(WheelMechanic::Discover),
-        color: "#000",
-    };
-    apply_event_multiplier_to_wedge(&mut mechanic, 2.0, 2.0);
-    assert_eq!(
-        mechanic.value,
-        WheelValue::Mechanic(WheelMechanic::Discover)
-    );
-    assert_eq!(mechanic.label, "DISCOVER");
-}
-
-#[test]
-fn gamba_special_minted_rewards_apply_event_after_central_scaling() {
-    assert_eq!(scale_minted_gamba_reward(50, 0.5, 1.0, false), 25);
-    assert_eq!(scale_minted_gamba_reward(100, 0.5, 1.0, false), 50);
-}
-
-#[test]
-fn gamba_chain_reaction_scales_only_the_newly_minted_copy() {
-    assert_eq!(scale_minted_gamba_reward(30, 0.5, 1.0, false), 15);
-}
-
-#[test]
-fn gamba_dynamic_minted_rewards_apply_event_and_report_adjusted_amount() {
-    assert_eq!(scale_minted_gamba_reward(20, 0.5, 1.0, false), 10);
-    assert_eq!(scale_minted_gamba_reward(50, 0.5, 1.0, false), 25);
-}
-
-#[test]
-fn gamba_heist_fallback_is_event_scaled() {
-    assert_eq!(scale_minted_gamba_reward(20, 0.5, 1.0, false), 10);
-}
-
-#[test]
-fn gamba_market_crash_fallback_is_event_scaled() {
-    assert_eq!(scale_minted_gamba_reward(25, 0.5, 1.0, false), 12);
-}
-
-#[test]
-fn gamba_hostile_takeover_fallback_is_event_scaled() {
-    assert_eq!(scale_minted_gamba_reward(40, 0.5, 1.0, false), 20);
-}
-
-#[test]
 fn gamba_numeric_and_player_transfer_rewards_are_not_double_scaled() {
     assert_eq!(apply_gamba_event_multiplier(20, 1.0, 1.0), 20);
     assert_eq!(apply_gamba_event_multiplier(12, 1.0, 1.0), 12);
@@ -3062,7 +2816,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         &wedge,
         WheelKind::Bankrupt,
         &effects,
-        &config,
+        &config.wheel_settlement(),
         "extend-no-penalty",
         &taxable,
         &BTreeSet::new(),
@@ -3072,6 +2826,8 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         None,
         None,
         &BTreeMap::new(),
+        0,
+        1_700_000_000,
     )
     .expect("resolve no-op extension");
     assert_eq!(
@@ -3092,7 +2848,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         &wedge,
         WheelKind::Bankrupt,
         &effects,
-        &config,
+        &config.wheel_settlement(),
         "extend-active-penalty",
         &taxable,
         &BTreeSet::new(),
@@ -3102,6 +2858,8 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         None,
         None,
         &BTreeMap::new(),
+        0,
+        1_700_000_000,
     )
     .expect("resolve active extension");
     assert_eq!(
@@ -3158,7 +2916,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             &wedge,
             WheelKind::Bankrupt,
             &ManaEffects::default(),
-            &runtime,
+            &runtime.wheel_settlement(),
             &event_id,
             &BTreeSet::new(),
             &BTreeSet::new(),
@@ -3168,6 +2926,8 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             None,
             None,
             &BTreeMap::new(),
+            0,
+            1_700_000_000,
         )
         .expect("resolve bankrupt loss");
 
@@ -3208,7 +2968,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             &wedge,
             WheelKind::Bankrupt,
             &ManaEffects::default(),
-            &runtime,
+            &runtime.wheel_settlement(),
             &event_id,
             &BTreeSet::new(),
             &BTreeSet::new(),
@@ -3218,6 +2978,8 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             None,
             None,
             &BTreeMap::new(),
+            0,
+            1_700_000_000,
         )
         .expect("retry bankrupt loss");
         assert_eq!(retry.logged, -expected_applied);
@@ -3302,6 +3064,8 @@ fn fully_shielded_numeric_wheel_losses_keep_their_landed_presentation_and_histor
             &BTreeSet::new(),
             None,
             &BTreeMap::new(),
+            &Mutex::default(),
+            &NoWheelReminders,
         )
         .expect("resolve pending numeric loss");
         assert!(
@@ -3421,6 +3185,7 @@ fn wheel_interaction_timeout_policy_matches_python_views() {
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: None,
+        attempt: Arc::default(),
     };
     assert_eq!(timeout_wheel_option(&base()).label, "BAD");
     let mut trial = base();
@@ -3473,6 +3238,7 @@ fn wheel_choice_and_blue_preview_embeds_match_python_presentation() {
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: None,
+        attempt: Arc::default(),
     };
 
     let scrying = wheel_interaction_prompt_embed(&pending);
@@ -3852,6 +3618,10 @@ async fn wrong_channel_penalty_debits_one_and_credits_reserve() {
             .expect("reserve"),
         1
     );
+    assert_eq!(
+        crate::test_support::penance_ledger::gamba_channel_penance_ledger(database.path(), 42),
+        crate::test_support::penance_ledger::GAMBA_CHANNEL_PENANCE_LEDGER
+    );
 }
 
 #[test]
@@ -3874,7 +3644,7 @@ fn wheel_income_applies_vanity_tax_snapshot_and_stable_exact_once_key() {
         7,
         0,
         100,
-        &runtime,
+        &runtime.wheel_settlement(),
         "123:7:abc",
         "test wheel reward",
         &taxable_ids,
@@ -3916,7 +3686,7 @@ fn wheel_income_stacks_low_priority_tax_beside_the_vanity_tax() {
         7,
         0,
         100,
-        &runtime,
+        &runtime.wheel_settlement(),
         "321:7:abc",
         "test wheel reward",
         &taxable_ids,
@@ -3970,7 +3740,7 @@ fn wheel_income_leaves_players_outside_the_low_priority_set_untaxed() {
         8,
         0,
         100,
-        &runtime,
+        &runtime.wheel_settlement(),
         "322:8:abc",
         "test wheel reward",
         &BTreeSet::new(),
@@ -4013,7 +3783,7 @@ fn wheel_positive_delta_applies_blood_pact_once_through_protection_gateway() {
         7,
         0,
         100,
-        &runtime,
+        &runtime.wheel_settlement(),
         "wheel-blood-pact",
         "test wheel reward",
         &BTreeSet::new(),
@@ -4025,7 +3795,7 @@ fn wheel_positive_delta_applies_blood_pact_once_through_protection_gateway() {
         database.path(),
         42,
         7,
-        0,
+        credit.balance_delta,
         "wheel-blood-pact",
         1_700_000_001,
         runtime.minigame_jc_delta_scale,
@@ -4049,7 +3819,7 @@ fn wheel_positive_delta_applies_blood_pact_once_through_protection_gateway() {
         database.path(),
         42,
         7,
-        0,
+        credit.balance_delta,
         "wheel-blood-pact",
         1_700_000_002,
         runtime.minigame_jc_delta_scale,
@@ -4064,6 +3834,67 @@ fn wheel_positive_delta_applies_blood_pact_once_through_protection_gateway() {
             .data
             .skimmed_total,
         Some(expected_skim)
+    );
+}
+
+#[test]
+fn wheel_blood_pact_skims_only_the_wheel_receipts_not_a_concurrent_credit() {
+    let database = NamedTempFile::new().expect("temporary database");
+    initialize_or_migrate(database.path()).expect("schema");
+    let players = PlayerRepository::new(database.path());
+    players
+        .add(&NewPlayer::new(7, "target", Some(42)))
+        .expect("target");
+    players
+        .add(&NewPlayer::new(9, "skimmer", Some(42)))
+        .expect("skimmer");
+    BuffService::new(ManashopRepository::new(database.path()), 1_700_000_000)
+        .grant_blood_pact(9, 42, 7)
+        .expect("grant Blood Pact");
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("configuration");
+    let runtime = BettingRuntimeConfig::from_application_config(&config);
+    let credit = credit_wheel_income(
+        database.path(),
+        42,
+        7,
+        0,
+        100,
+        &runtime.wheel_settlement(),
+        "wheel-concurrent-credit",
+        "test wheel reward",
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    )
+    .expect("credit wheel reward");
+    // A tip or bet payout lands between the wheel's resolution and its skim.
+    let current = players
+        .get_by_id(7, Some(42))
+        .expect("target lookup")
+        .expect("target")
+        .jopacoin_balance;
+    players
+        .update_balance(7, Some(42), current + 1_000)
+        .expect("concurrent credit");
+
+    let (skimmed, _) = apply_wheel_blood_pact_skim(
+        database.path(),
+        42,
+        7,
+        credit.balance_delta,
+        "wheel-concurrent-credit",
+        1_700_000_001,
+        runtime.minigame_jc_delta_scale,
+    )
+    .expect("Blood Pact skim");
+    assert_eq!(
+        skimmed,
+        cama_domain::economy_scaling::scale_minigame_jc_delta(
+            25.0,
+            runtime.minigame_jc_delta_scale
+        )
     );
 }
 
@@ -4143,6 +3974,7 @@ async fn wheel_choice_rejects_non_owner_but_town_vote_is_public() {
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: None,
+        attempt: Arc::default(),
     };
     provider
         .handler
@@ -4216,6 +4048,7 @@ async fn wheel_component_edits_public_prompt_after_resolution() {
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: Some(Arc::new(responder.clone())),
+        attempt: Arc::default(),
     };
     provider
         .handler
@@ -4296,7 +4129,7 @@ async fn blue_mana_sixty_jc_choice_is_acknowledged_before_render_and_settles_at_
         user_id: 7,
         guild_id: 42,
         created_at: Instant::now(),
-        options: wedges.iter().map(wheel_option).collect(),
+        options: wedges.iter().map(WheelOption::from_wedge).collect(),
         wheel_wedges: wedges,
         golden: false,
         display_name: Some("player".to_owned()),
@@ -4317,6 +4150,7 @@ async fn blue_mana_sixty_jc_choice_is_acknowledged_before_render_and_settles_at_
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: Some(Arc::new(responder.clone())),
+        attempt: Arc::default(),
     };
     let provider = BettingRegistrationProvider::new(
         database.path(),
@@ -4419,7 +4253,7 @@ async fn wheel_component_reroll_replaces_public_gif_attachment() {
         user_id: 7,
         guild_id: 42,
         created_at: Instant::now(),
-        options: wedges.iter().map(wheel_option).collect(),
+        options: wedges.iter().map(WheelOption::from_wedge).collect(),
         wheel_wedges: wedges.clone(),
         golden: false,
         display_name: Some("player".to_owned()),
@@ -4435,6 +4269,7 @@ async fn wheel_component_reroll_replaces_public_gif_attachment() {
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: Some(Arc::new(responder.clone())),
+        attempt: Arc::default(),
     };
     let provider = BettingRegistrationProvider::new(
         database.path(),
@@ -4486,117 +4321,6 @@ async fn wheel_component_reroll_replaces_public_gif_attachment() {
         ManaRepository::new(database.path())
             .is_bankrupt_buff_used(7, Some(42), BankruptBuff::Reroll)
             .expect("reroll claim")
-    );
-}
-
-#[test]
-fn hostile_result_notes_preserve_python_detail_fields() {
-    let config = ApplicationConfig::from_lookup(|name| {
-        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
-    })
-    .expect("configuration");
-    let config = BettingRuntimeConfig::from_application_config(&config);
-    let lightning = HostileResolution {
-        lightning_total: 27,
-        lightning_count: 2,
-        total: 27,
-        count: 2,
-        victims: vec![(11, 19), (12, 8)],
-        shield_absorbed_total: 3,
-        shielded_count: 1,
-        ..HostileResolution::default()
-    };
-    let names = BTreeMap::from([(11, "Server Alice".to_owned())]);
-    let note = hostile_result_note(WheelMechanic::LightningBolt, &lightning, &config, &names);
-    assert!(note.contains("**2** player(s)"));
-    assert!(note.contains("27"));
-    assert!(note.contains("Server Alice"));
-    assert!(note.contains("Unknown player"));
-    assert!(!note.contains("bob"));
-    assert!(note.contains("White Mana Shields"));
-
-    let shell = HostileResolution {
-        total: 12,
-        victim_id: Some(13),
-        victim_new_balance: Some(88),
-        ..HostileResolution::default()
-    };
-    let note = hostile_result_note(
-        WheelMechanic::RedShell,
-        &shell,
-        &config,
-        &BTreeMap::from([(13, "Server Rival".to_owned())]),
-    );
-    assert!(note.contains("Server Rival"));
-    assert!(note.contains("Victim's new balance: **88**"));
-}
-
-#[test]
-fn hostile_mechanics_only_target_visible_guild_members() {
-    // Python parity: every hostile victim pool reads the guild-member
-    // visibility-filtered leaderboard, so a departed ex-member with the
-    // largest balance can neither hold a rank nor be robbed.
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("schema");
-    let players = PlayerRepository::new(database.path());
-    players
-        .add(&NewPlayer::new(1, "spinner", Some(42)))
-        .expect("spinner");
-    players
-        .add(&NewPlayer::new(2, "member", Some(42)))
-        .expect("member");
-    players
-        .add(&NewPlayer::new(99, "departed", Some(42)))
-        .expect("departed");
-    players
-        .update_balance(1, Some(42), 100)
-        .expect("spinner balance");
-    players
-        .update_balance(2, Some(42), 100)
-        .expect("member balance");
-    players
-        .update_balance(99, Some(42), 1_000)
-        .expect("departed balance");
-    let config = ApplicationConfig::from_lookup(|name| {
-        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
-    })
-    .expect("configuration");
-    let config = BettingRuntimeConfig::from_application_config(&config);
-    let visible = BTreeSet::from([1_i64, 2]);
-
-    let resolution = resolve_hostile_mechanic(
-        database.path(),
-        42,
-        1,
-        100,
-        WheelMechanic::Heist,
-        "heist-visibility",
-        &config,
-        &BTreeSet::new(),
-        &BTreeSet::new(),
-        1.0,
-        Some(&visible),
-    )
-    .expect("resolve heist");
-
-    assert!(resolution.total > 0, "the visible member must be robbed");
-    let departed_balance = players
-        .get_by_id(99, Some(42))
-        .expect("read departed")
-        .expect("departed row")
-        .jopacoin_balance;
-    assert_eq!(
-        departed_balance, 1_000,
-        "a departed ex-member must never be a hostile victim"
-    );
-    let member_balance = players
-        .get_by_id(2, Some(42))
-        .expect("read member")
-        .expect("member row")
-        .jopacoin_balance;
-    assert!(
-        member_balance < 100,
-        "the visible member funds the heist (was {member_balance})"
     );
 }
 

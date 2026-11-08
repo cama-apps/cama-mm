@@ -1391,6 +1391,56 @@ fn hostile_retry_rejects_a_changed_self_protection_semantic() {
 }
 
 #[test]
+fn hostile_batch_once_returns_recorded_losses_and_settles_only_new_victims() {
+    const SECOND: i64 = VICTIM + 1;
+    let fixture = Fixture::new();
+    fixture.player(VICTIM, 100);
+    fixture.player(SECOND, 100);
+    let request = |victim_id: i64, requested: i64| HostileLossRequest {
+        victim_id,
+        guild_id: GUILD,
+        requested,
+        kind: "recession".to_owned(),
+        actor_id: Some(VICTIM + 99),
+        event_key: format!("spin:{victim_id}"),
+        destination: HostileDestination::Reserve,
+        recipient_id: None,
+        clamp_to_balance: true,
+        min_balance: None,
+        protect_self: false,
+        metadata: json!({}),
+        occurred_at: NOW,
+        mana_date: "2033-05-18".to_owned(),
+    };
+    fixture
+        .repository
+        .apply_hostile_losses_once(&[request(VICTIM, 20)])
+        .expect("first partial batch");
+    // The retry re-derives a smaller amount from the already-debited balance;
+    // the recorded loss is reused instead of conflicting or charging again.
+    let retry = fixture
+        .repository
+        .apply_hostile_losses_once(&[request(VICTIM, 16), request(SECOND, 20)])
+        .expect("retried batch");
+    let first = retry[0].as_ref().expect("recorded settlement");
+    assert!(first.duplicate);
+    assert_eq!(first.applied, 20);
+    let second = retry[1].as_ref().expect("new settlement");
+    assert!(!second.duplicate);
+    assert_eq!(second.applied, 20);
+    let balance = |discord_id| {
+        fixture
+            .repository
+            .player(discord_id, GUILD)
+            .unwrap()
+            .unwrap()
+            .balance
+    };
+    assert_eq!(balance(VICTIM), 80);
+    assert_eq!(balance(SECOND), 80);
+}
+
+#[test]
 fn test_protection_reprieve_retro_uses_rolling_pool_and_is_idempotent() {
     let fixture = Fixture::new();
     fixture.player(VICTIM, 100);

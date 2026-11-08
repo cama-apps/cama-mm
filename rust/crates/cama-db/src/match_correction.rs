@@ -14,7 +14,9 @@ use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
-use cama_db_core::profit_deductions::penalty_games_remaining;
+use cama_db_core::profit_deductions::{
+    ProfitDeductionPolicy, bet_settlement_rates, resolve_profit_deduction_rates,
+};
 use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use cama_domain::openskill::{
     CamaOpenSkillSystem, Rating as OpenSkillRating, WeightedPlayer, WinningTeam,
@@ -1411,41 +1413,41 @@ impl MatchCorrectionRepository {
             *combined_deltas.entry(discord_id).or_insert(0) += taxes.total();
         }
         let total_stakes = total_stakes_by_player(&bets);
+        // Reuse the rates the original settlement froze for every bettor, so
+        // the corrected winners are withheld what that settlement would have
+        // taken. Settlements that predate the frozen rates fall back to the
+        // live policy.
+        let frozen_rates = bet_settlement_rates(&transaction, guild_id, match_id)?;
+        let live_policy = ProfitDeductionPolicy {
+            bankruptcy: options.bankruptcy,
+            vanity_tax_rate: options.vanity_tax_rate,
+            vanity_taxable_ids: options.vanity_taxable_ids,
+            low_priority_tax_rate: options.low_priority_tax_rate,
+            low_priority_taxable_ids: options.low_priority_taxable_ids,
+        };
         let mut new_taxes = BTreeMap::new();
         for (&discord_id, &payout) in &new_deltas {
             let profit = payout - total_stakes.get(&discord_id).copied().unwrap_or(0);
             if profit <= 0 {
                 continue;
             }
-            // The bankruptcy share reads the same pre-tax profit as both
-            // taxes and scales with the games the winner still has to win.
-            let bankruptcy_penalty = match options.bankruptcy {
-                Some(policy) => {
-                    let remaining = penalty_games_remaining(&transaction, guild_id, discord_id)?;
-                    (profit as f64 * policy.withheld_rate(remaining)) as i64
-                }
-                None => 0,
+            let rates = match frozen_rates
+                .as_ref()
+                .and_then(|rates| rates.get(&discord_id))
+            {
+                Some(rates) => *rates,
+                None => resolve_profit_deduction_rates(
+                    &transaction,
+                    guild_id,
+                    discord_id,
+                    &live_policy,
+                )?,
             };
-            let vanity_tax = if options.vanity_taxable_ids.contains(&discord_id) {
-                (profit as f64 * options.vanity_tax_rate) as i64
-            } else {
-                0
-            };
-            // All three withholdings are charged against the same pre-tax
-            // profit, so misconfigured rates could otherwise take more than
-            // the player won.  Bankruptcy and vanity totals are already
-            // visible to players, so the clamp falls on the low-priority
-            // share.
-            let low_priority_tax = if options.low_priority_taxable_ids.contains(&discord_id) {
-                ((profit as f64 * options.low_priority_tax_rate) as i64)
-                    .clamp(0, (profit - bankruptcy_penalty - vanity_tax).max(0))
-            } else {
-                0
-            };
+            let deductions = rates.split(profit);
             let taxes = SettlementTaxes {
-                bankruptcy_penalty,
-                vanity_tax,
-                low_priority_tax,
+                bankruptcy_penalty: deductions.bankruptcy_penalty,
+                vanity_tax: deductions.vanity_tax,
+                low_priority_tax: deductions.low_priority_tax,
             };
             if taxes.total() > 0 {
                 new_taxes.insert(discord_id, taxes);

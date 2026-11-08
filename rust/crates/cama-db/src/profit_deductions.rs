@@ -11,10 +11,11 @@
 //! [`debit_profit_deductions`] remain available for callers that must split
 //! the two steps.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
 /// Highest vanity or low-priority share a deployment may configure.
 const MAX_TAX_RATE: f64 = 0.5;
@@ -161,7 +162,44 @@ pub fn compute_profit_deductions(
     if profit <= 0 {
         return Ok(split_profit_deductions(profit, 0.0, 0.0, 0.0));
     }
-    let bankruptcy_rate = match policy.bankruptcy {
+    Ok(resolve_profit_deduction_rates(connection, guild_id, discord_id, policy)?.split(profit))
+}
+
+/// The withholding rates one player's profit is split by, resolved from live
+/// state once so a later re-settlement can reuse them for a different profit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfitDeductionRates {
+    /// The bankruptcy share's withheld rate for the player's penalty games.
+    pub bankruptcy: f64,
+    /// Zero when the player is not on the vanity roster.
+    pub vanity_tax: f64,
+    /// Zero when the player is not on the low-priority roster.
+    pub low_priority_tax: f64,
+}
+
+impl ProfitDeductionRates {
+    /// Split `profit` by these rates; see [`split_profit_deductions`].
+    #[must_use]
+    pub fn split(self, profit: i64) -> ProfitDeductions {
+        split_profit_deductions(
+            profit,
+            self.bankruptcy,
+            self.vanity_tax,
+            self.low_priority_tax,
+        )
+    }
+}
+
+/// Resolve the rates [`compute_profit_deductions`] would split a profit by:
+/// the bankruptcy share from the player's outstanding penalty games, and each
+/// roster's tax rate when the player is on it.
+pub fn resolve_profit_deduction_rates(
+    connection: &Connection,
+    guild_id: i64,
+    discord_id: i64,
+    policy: &ProfitDeductionPolicy<'_>,
+) -> rusqlite::Result<ProfitDeductionRates> {
+    let bankruptcy = match policy.bankruptcy {
         Some(bankruptcy) => {
             bankruptcy.withheld_rate(penalty_games_remaining(connection, guild_id, discord_id)?)
         }
@@ -174,15 +212,14 @@ pub fn compute_profit_deductions(
             0.0
         }
     };
-    Ok(split_profit_deductions(
-        profit,
-        bankruptcy_rate,
-        rate_for(policy.vanity_taxable_ids, policy.vanity_tax_rate),
-        rate_for(
+    Ok(ProfitDeductionRates {
+        bankruptcy,
+        vanity_tax: rate_for(policy.vanity_taxable_ids, policy.vanity_tax_rate),
+        low_priority_tax: rate_for(
             policy.low_priority_taxable_ids,
             policy.low_priority_tax_rate,
         ),
-    ))
+    })
 }
 
 /// Split `profit` by already-resolved rates: the bankruptcy share's withheld
@@ -319,6 +356,83 @@ pub fn withhold_profit_deductions(
         return Ok(None);
     }
     Ok(Some(deductions))
+}
+
+/// `app_kv` key holding the rates a match's bet settlement froze per bettor.
+#[must_use]
+pub fn bet_settlement_rates_key(match_id: i64) -> String {
+    format!("bet-settlement-rates:{match_id}")
+}
+
+/// Freeze every bettor's withholding rates beside a match's bet settlement.
+///
+/// A winner-flip correction re-splits the corrected profits by these rates,
+/// so the withholding matches what the original settlement would have taken
+/// rather than penalty games and rosters at correction time. The first
+/// settlement wins, which keeps a retried or re-corrected settlement on the
+/// original rates.
+pub fn record_bet_settlement_rates(
+    connection: &Connection,
+    guild_id: i64,
+    match_id: i64,
+    rates: &BTreeMap<i64, ProfitDeductionRates>,
+) -> rusqlite::Result<()> {
+    let encoded = serde_json::to_string(
+        &rates
+            .iter()
+            .map(|(discord_id, rates)| (discord_id.to_string(), *rates))
+            .collect::<BTreeMap<_, _>>(),
+    )
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    connection.execute(
+        "INSERT INTO app_kv(guild_id,key,value) VALUES (?1,?2,?3)
+         ON CONFLICT(guild_id,key) DO NOTHING",
+        params![guild_id, bet_settlement_rates_key(match_id), encoded],
+    )?;
+    Ok(())
+}
+
+/// Read the rates [`record_bet_settlement_rates`] froze for one match, or
+/// `None` for a settlement that predates them.
+pub fn bet_settlement_rates(
+    connection: &Connection,
+    guild_id: i64,
+    match_id: i64,
+) -> rusqlite::Result<Option<BTreeMap<i64, ProfitDeductionRates>>> {
+    let Some(raw) = connection
+        .query_row(
+            "SELECT value FROM app_kv WHERE guild_id=?1 AND key=?2",
+            params![guild_id, bet_settlement_rates_key(match_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let decoded =
+        serde_json::from_str::<BTreeMap<String, ProfitDeductionRates>>(&raw).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    decoded
+        .into_iter()
+        .map(|(discord_id, rates)| {
+            discord_id
+                .parse::<i64>()
+                .map(|discord_id| (discord_id, rates))
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+        })
+        .collect::<rusqlite::Result<_>>()
+        .map(Some)
 }
 
 #[cfg(test)]

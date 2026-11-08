@@ -647,30 +647,42 @@ impl ReminderHooks {
         guild_id: i64,
         ready_at: i64,
     ) -> Result<(), String> {
-        let user_id = UserId::new(user_id);
-        let guild_id = GuildId::new(guild_id);
-        let state = Arc::clone(&self.state);
-        let key = ReminderTaskKey::new(user_id, guild_id, kind);
+        let hooks = self.clone();
         tokio::task::spawn_blocking(move || {
-            {
-                // The named guard has to die before the sync re-locks: the
-                // service mutex is not reentrant.
-                let mut service = state.lock_service()?;
-                match kind {
-                    ReminderKind::Wheel => {
-                        service.schedule_wheel_reminder(user_id, Some(guild_id), ready_at, None)
-                    }
-                    ReminderKind::Trivia => {
-                        service.schedule_trivia_reminder(user_id, Some(guild_id), ready_at, None)
-                    }
-                    _ => unreachable!("typed cooldown hook has a closed kind"),
-                }
-                .map_err(|error| error.to_string())?;
-            }
-            state.sync_task_blocking(key)
+            hooks.schedule_cooldown_blocking(kind, user_id, guild_id, ready_at)
         })
         .await
         .map_err(|error| format!("reminder schedule task failed: {error}"))?
+    }
+
+    /// Blocking: takes the service and timer locks, so it must be called from
+    /// a blocking context, never from a Tokio async worker.
+    fn schedule_cooldown_blocking(
+        &self,
+        kind: ReminderKind,
+        user_id: i64,
+        guild_id: i64,
+        ready_at: i64,
+    ) -> Result<(), String> {
+        let user_id = UserId::new(user_id);
+        let guild_id = GuildId::new(guild_id);
+        let key = ReminderTaskKey::new(user_id, guild_id, kind);
+        {
+            // The named guard has to die before the sync re-locks: the
+            // service mutex is not reentrant.
+            let mut service = self.state.lock_service()?;
+            match kind {
+                ReminderKind::Wheel => {
+                    service.schedule_wheel_reminder(user_id, Some(guild_id), ready_at, None)
+                }
+                ReminderKind::Trivia => {
+                    service.schedule_trivia_reminder(user_id, Some(guild_id), ready_at, None)
+                }
+                _ => unreachable!("typed cooldown hook has a closed kind"),
+            }
+            .map_err(|error| error.to_string())?;
+        }
+        self.state.sync_task_blocking(key)
     }
 
     pub async fn reconcile_dig(
@@ -767,6 +779,14 @@ impl ReminderHooks {
             Some(delivery) => self.state.send_delivery(delivery).await,
             None => ReminderDeliveryReport::default(),
         })
+    }
+}
+
+/// Wheel settlement schedules the wheel-ready DM from its blocking worker,
+/// after the spin's cooldown is recorded.
+impl cama_app::wheel_settlement::WheelReminderPort for ReminderHooks {
+    fn schedule_wheel(&self, user_id: i64, guild_id: i64, ready_at: i64) -> Result<(), String> {
+        self.schedule_cooldown_blocking(ReminderKind::Wheel, user_id, guild_id, ready_at)
     }
 }
 

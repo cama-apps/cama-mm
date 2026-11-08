@@ -20,21 +20,8 @@ use cama_domain::permissions::{PermissionContext, has_admin_permission, has_tax_
 pub const LEDGER_DEFAULT_LIMIT: usize = 10;
 pub const LEDGER_MAX_LIMIT: usize = 25;
 pub const LEDGER_MAX_PAGE: usize = 10_000;
-pub const LEDGER_VIEW_TIMEOUT_SECONDS: u64 = 300;
 pub const PLAYER_LEDGER_DEFAULT_LIMIT: usize = 8;
 pub const VANITY_TAX_BASIS_POINTS: i64 = 1_000;
-
-pub const TAX_SUBCOMMANDS: [&str; 9] = [
-    "audit",
-    "event",
-    "player",
-    "ledger",
-    "fine",
-    "resetcooldown",
-    "bankruptcy",
-    "policy",
-    "vanity",
-];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaxEmbed {
@@ -1300,78 +1287,6 @@ pub fn ledger_command<P: LedgerReadPort>(
         )
     });
     LedgerCommandOutput {
-        response: CommandResponse::embed(embed, true),
-        view,
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlayerCommandOutput {
-    pub response: CommandResponse,
-    pub view: Option<TaxPlayerLedgerView>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlayerCommandRequest {
-    pub guild_id: u64,
-    pub requester_id: u64,
-    pub user: UserRef,
-}
-
-#[must_use]
-pub fn player_command<P: PlayerAuditReadPort>(
-    port: &P,
-    authorization: &TaxCommandAuthorization<'_>,
-    request: PlayerCommandRequest,
-) -> PlayerCommandOutput {
-    if let Some(response) = tax_man_denial(authorization) {
-        return PlayerCommandOutput {
-            response,
-            view: None,
-        };
-    }
-    let Ok(snapshot) = port.get_player_snapshot(
-        request.user.id,
-        request.guild_id,
-        PLAYER_LEDGER_DEFAULT_LIMIT,
-        0,
-    ) else {
-        return PlayerCommandOutput {
-            response: CommandResponse::followup(
-                "Couldn't load that Tax Man player audit right now.",
-                true,
-            ),
-            view: None,
-        };
-    };
-    let Ok(total_entries) = port.count_ledger_entries(request.guild_id, Some(request.user.id))
-    else {
-        return PlayerCommandOutput {
-            response: CommandResponse::followup(
-                "Couldn't load that Tax Man player audit right now.",
-                true,
-            ),
-            view: None,
-        };
-    };
-    let embed = build_player_embed(
-        &request.user,
-        &snapshot,
-        1,
-        Some(total_entries),
-        PLAYER_LEDGER_DEFAULT_LIMIT,
-    );
-    let view = (ledger_total_pages(total_entries, PLAYER_LEDGER_DEFAULT_LIMIT) > 1).then(|| {
-        TaxPlayerLedgerView::new(
-            request.guild_id,
-            request.requester_id,
-            request.user,
-            PLAYER_LEDGER_DEFAULT_LIMIT,
-            1,
-            total_entries,
-        )
-    });
-    PlayerCommandOutput {
         response: CommandResponse::embed(embed, true),
         view,
     }

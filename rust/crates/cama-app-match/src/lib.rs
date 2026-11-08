@@ -13,8 +13,6 @@ pub mod loan;
 pub mod match_recording;
 #[path = "../../cama-app/src/match_voting_service.rs"]
 pub mod match_voting_service;
-#[path = "../../cama-app/src/prediction_resolution.rs"]
-pub mod prediction_resolution;
 #[path = "../../cama-app/src/predictions.rs"]
 pub mod predictions;
 #[path = "../../cama-app/src/rating_comparison_service.rs"]

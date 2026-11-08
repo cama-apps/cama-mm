@@ -161,21 +161,6 @@ fn test_render_contains_signature_keyword_system_breach() {
 }
 
 #[test]
-fn test_render_contains_signature_keyword_win_streak() {
-    let result = render_streak("User", 5, true);
-    assert!(result.contains("WIN"));
-    assert!(result.contains("STREAK"));
-    assert!(result.contains("HOT"));
-}
-
-#[test]
-fn test_render_contains_signature_keyword_loss_streak() {
-    let result = render_streak("User", 6, false);
-    assert!(result.contains("LOSS"));
-    assert!(result.contains("ANOMALY"));
-}
-
-#[test]
 fn test_render_contains_signature_keyword_negative_loan() {
     let result = render_negative_loan("User", 50, -200);
     assert!(result.contains("RECURSIVE"));
@@ -187,20 +172,6 @@ fn test_render_contains_signature_keyword_don_loss_box() {
     let result = render_don_loss_box("User", 100);
     assert!(result.contains("DOUBLE"));
     assert!(result.contains("NOTHING"));
-}
-
-#[test]
-fn test_render_contains_signature_keyword_prediction_market_crash() {
-    let result = render_prediction_market_crash("Q?", 500, "yes", 3, 5);
-    assert!(result.contains("MARKET"));
-    assert!(result.contains("SETTLEMENT"));
-}
-
-#[test]
-fn test_render_contains_signature_keyword_soft_avoid_surveillance() {
-    let result = render_soft_avoid_surveillance(50, 3);
-    assert!(result.contains("SOCIAL"));
-    assert!(result.contains("Avoid"));
 }
 
 #[test]
@@ -219,13 +190,10 @@ fn test_all_renders_produce_ansi_block_under_45_lines() {
         render_bet_placed(50, "dire", 5),
         render_loan_taken(100, 120),
         render_cooldown_hit("loan"),
-        render_match_recorded(),
         render_bankruptcy_filing("User", 300, 1),
         render_debt_collector("User", 400),
         render_system_breach("User"),
         render_balance_zero("User"),
-        render_streak("User", 5, true),
-        render_streak("User", 6, false),
         render_negative_loan("User", 50, -200),
         render_wheel_bankrupt("User", -100),
         render_don_win("User", 200),
@@ -235,10 +203,6 @@ fn test_all_renders_produce_ansi_block_under_45_lines() {
         render_registration("NewUser"),
         render_lobby_join("QueueUser", 7),
         render_gamba_spectator("Watcher"),
-        render_prediction_resolved("Test?", "yes", 200),
-        render_prediction_market_crash("Test?", 500, "yes", 3, 5),
-        render_soft_avoid(50, 3),
-        render_soft_avoid_surveillance(50, 3),
     ];
     for render in renders {
         assert!(render.contains("```ansi"));
@@ -696,33 +660,6 @@ fn lobby_join_and_gamba_spectator_use_exact_trigger_chances_and_cooldown() {
 }
 
 #[test]
-fn test_neon_frames_share_one_adaptive_palette() {
-    let mut frames = vec![
-        PaletteFrame {
-            colors: vec![[255, 0, 0], [0, 255, 0]],
-            ..PaletteFrame::default()
-        },
-        PaletteFrame {
-            colors: vec![[0, 0, 255], [255, 0, 0]],
-            ..PaletteFrame::default()
-        },
-        PaletteFrame {
-            colors: vec![[120, 120, 120]],
-            ..PaletteFrame::default()
-        },
-    ];
-    let stats = quantize_frames_with_shared_palette(&mut frames);
-    assert_eq!(stats.adaptive_searches, 1);
-    assert_eq!(stats.palette_remaps, frames.len());
-    assert!(frames.iter().all(|frame| frame.indexed));
-    assert!(
-        frames[1..]
-            .iter()
-            .all(|frame| frame.palette == frames[0].palette)
-    );
-}
-
-#[test]
 fn test_terminal_crash_gif_preserves_frame_timing_and_seekability() {
     let gif = GifAsset::terminal_crash("TestUser", 5);
     assert!(gif.upload_safe());
@@ -794,7 +731,6 @@ fn native_neon_gifs_are_animated_seekable_and_parameterized() {
         create_freefall_gif("Alice", 200, 0),
         create_degen_certificate_gif("Alice", 95),
         create_don_coin_flip_gif("Alice", 200),
-        create_market_crash_gif(1_000, "no", 5, 10),
         create_bomb_pot_gif(1_000, 10),
     ];
     for asset in &assets {
@@ -835,10 +771,6 @@ fn native_neon_gifs_are_animated_seekable_and_parameterized() {
     assert_ne!(
         create_don_coin_flip_gif("Alice", 200).bytes,
         create_don_coin_flip_gif("Alice", 300).bytes
-    );
-    assert_ne!(
-        create_market_crash_gif(1_000, "no", 5, 10).bytes,
-        create_market_crash_gif(2_000, "yes", 5, 10).bytes
     );
     assert_ne!(
         create_bomb_pot_gif(1_000, 10).bytes,
@@ -924,10 +856,6 @@ gif_upload_test!(
     create_don_coin_flip_gif("TestUser", 200)
 );
 gif_upload_test!(
-    test_neon_gif_generates_under_4mb_market_crash,
-    create_market_crash_gif(1_000, "no", 5, 10)
-);
-gif_upload_test!(
     test_neon_gif_generates_under_4mb_bomb_pot,
     create_bomb_pot_gif(1_000, 10)
 );
@@ -990,30 +918,11 @@ fn test_one_time_db_fallback_without_repo() {
 }
 
 #[test]
-fn test_different_triggers_independent() {
-    let mut service = service();
-    assert!(service.on_degen_milestone(123, Some(456), 95).is_some());
-    assert!(service.check_one_time(123, Some(456), "registration"));
-    assert!(!service.check_one_time(123, Some(456), "degen_90"));
-}
-
-#[test]
 fn test_different_guilds_independent() {
     let mut service = service();
     assert!(service.on_degen_milestone(123, Some(456), 95).is_some());
     assert!(service.on_degen_milestone(123, Some(789), 95).is_some());
     assert!(service.on_degen_milestone(123, Some(456), 95).is_none());
-}
-
-#[test]
-fn test_player_context_does_not_send_discord_id() {
-    let context = build_player_context(Some(&PlayerSnapshot {
-        discord_id: 123_456_789,
-        name: "Player".into(),
-        balance: 42,
-        lowest_balance: None,
-    }));
-    assert!(!context.contains_key("discord_id"));
 }
 
 #[test]
@@ -1374,6 +1283,15 @@ fn test_strict_post_match_generation_rejects_wrong_outcome_polarity() {
         },
     );
     assert_eq!(result.text, "fallback");
+}
+
+#[test]
+fn test_different_triggers_independent() {
+    let mut service = service();
+    assert!(service.on_degen_milestone(123, Some(456), 95).is_some());
+    service.queue_rolls([0.0]);
+    assert!(service.on_registration(123, Some(456), "Player").is_some());
+    assert!(service.on_degen_milestone(123, Some(456), 95).is_none());
 }
 
 struct FixedNeonNames;
