@@ -28,3 +28,11 @@ fn test_aegis_charge_block_conserves_jc() {
     assert_eq!(result.target_delta, 15);
     assert_eq!(result.net_delta(), 0);
 }
+
+#[test]
+fn test_ward_block_is_audited_as_a_ward_block() {
+    let ward = funded_protection(ProtectionSource::Ward, 20, 10);
+    assert_eq!(ward.audit_action, "sabotage_ward_blocked");
+    let shield = funded_protection(ProtectionSource::Shield, 20, 10);
+    assert_eq!(shield.audit_action, "sabotage_blocked");
+}
