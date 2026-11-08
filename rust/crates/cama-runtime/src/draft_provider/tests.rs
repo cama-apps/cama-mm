@@ -120,6 +120,7 @@ struct NullDiscord {
     /// A channel Discord itself reports as gone: sends and history probes
     /// fail, and `destination_status` proves the failure is permanent.
     undeliverable_channel: AtomicU64,
+    member_names: StdMutex<BTreeMap<u64, String>>,
 }
 
 impl NullDiscord {
@@ -145,6 +146,7 @@ impl Default for NullDiscord {
             accept_delivery_before_failure: AtomicBool::new(false),
             fail_delivery_history: AtomicBool::new(false),
             undeliverable_channel: AtomicU64::new(0),
+            member_names: StdMutex::default(),
         }
     }
 }
@@ -351,6 +353,23 @@ impl DiscordTransport for NullDiscord {
         _user_id: u64,
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String> {
         Ok(None)
+    }
+
+    fn cached_guild_member_render_names(
+        &self,
+        _guild_id: u64,
+        user_ids: &[u64],
+    ) -> Result<Option<crate::discord_transport::DiscordGuildMemberRenderNames>, String> {
+        let names = self.member_names.lock().expect("member names");
+        if names.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            user_ids
+                .iter()
+                .filter_map(|id| names.get(id).map(|name| (*id, name.clone())))
+                .collect(),
+        ))
     }
 
     async fn destination_status(&self, channel_id: u64) -> DiscordDestinationStatus {
@@ -3082,39 +3101,381 @@ async fn final_pick_defer_failure_reopens_fenced_row_for_recovery() {
         .await
         .expect_err("defer failure must stop completion");
     assert!(error.to_string().contains("simulated defer failure"));
-    tokio::time::advance(Duration::from_secs(DRAFTING_TIMEOUT_SECONDS + 1)).await;
-    tokio::task::yield_now().await;
-    let fenced = persistence.load_all().expect("load fenced row");
-    assert_eq!(fenced.len(), 1);
-    assert!(fenced[0].finalizing);
-    assert_eq!(fenced[0].pending_match_id, None);
-    assert_eq!(fenced[0].state.as_state().phase, DraftPhase::Complete);
+    // The fenced final pick is undone at once rather than waiting for READY.
+    assert_final_pick_reopened(&provider, &drafts, &persistence);
     assert_eq!(
-        drafts
-            .get_state(Some(42))
-            .expect("fenced live state")
-            .lock()
-            .expect("fenced live state lock")
-            .phase,
-        DraftPhase::Complete
+        provider
+            .recover_finalizing()
+            .await
+            .expect("nothing left for READY recovery"),
+        0
     );
-    provider
-        .hydrate()
-        .await
-        .expect("READY hydration leaves finalizing row for recovery");
-    provider
-        .recover_finalizing()
-        .await
-        .expect("final-pick fence rolls back to interactive Draft");
-    let reopened = persistence
-        .load_all()
-        .expect("load reopened row")
-        .pop()
-        .expect("reopened row");
+}
+
+/// A draft one pick from completion: captain 2 picks player 10 last.
+async fn final_pick_fixture() -> (
+    FastTestDatabase,
+    LobbyRegistrationProvider,
+    MatchLobbyPort,
+    DraftRegistrationProvider,
+    Arc<DraftStateManager>,
+    Arc<SqliteDraftStatePersistence>,
+    u64,
+) {
+    let (database, lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "BOMB_POT_CHANCE" => Some("0".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::Drafting;
+    state.current_pick_index = 7;
+    state.current_round_first_captain_id = Some(1);
+    state.radiant_player_ids = vec![1, 3, 5, 7, 9];
+    state.dire_player_ids = vec![2, 4, 6, 8];
+    state.radiant_hero_pick_order = Some(1);
+    state.dire_hero_pick_order = Some(2);
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let mut requested = state.to_snapshot().envelope(1);
+    requested.deadline_at = Some(unix_now().saturating_add(120));
+    let persisted = persistence
+        .create_envelope(&requested)
+        .expect("create durable final-pick draft");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies.clone(),
+        Arc::clone(&drafts),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+    provider.hydrate().await.expect("hydrate final-pick draft");
+    (
+        database,
+        lobby,
+        lobbies,
+        provider,
+        drafts,
+        persistence,
+        persisted.session_id,
+    )
+}
+
+fn final_pick_request(session_id: u64, interaction_id: u64) -> InteractionRequest {
+    InteractionRequest::Component {
+        interaction_id,
+        custom_id: format!("draft:{session_id}:pick:10"),
+        user_id: 2,
+        user_display_name: "Captain".to_owned(),
+        guild_id: Some(42),
+        channel_id: Some(777),
+        member_permissions: None,
+        values: Vec::new(),
+    }
+}
+
+fn assert_final_pick_reopened(
+    provider: &DraftRegistrationProvider,
+    drafts: &DraftStateManager,
+    persistence: &SqliteDraftStatePersistence,
+) {
+    let rows = persistence.load_all().expect("load reopened row");
+    assert_eq!(rows.len(), 1);
+    let reopened = &rows[0];
     assert!(!reopened.finalizing);
     assert_eq!(reopened.pending_match_id, None);
-    assert_eq!(reopened.state.as_state().phase, DraftPhase::Drafting);
-    assert!(reopened.state.as_state().current_pick_index < DRAFT_TOTAL_PICKS);
+    assert!(reopened.deadline_at.is_some());
+    let durable = reopened.state.as_state();
+    assert_eq!(durable.phase, DraftPhase::Drafting);
+    assert_eq!(durable.current_pick_index, 7);
+    assert!(!durable.dire_player_ids.contains(&10));
+    let live = drafts
+        .get_state(Some(42))
+        .expect("reopened live draft")
+        .lock()
+        .expect("reopened live draft lock")
+        .clone();
+    assert_eq!(live.phase, DraftPhase::Drafting);
+    assert_eq!(live.session_id, reopened.session_id);
+    assert_eq!(live.current_captain_id(), Some(2));
+    assert!(
+        lock_recover(&provider.handler.timeout_tasks).contains_key(&42),
+        "the reopened draft must have its picking timer armed"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_pick_lobby_lock_timeout_reopens_the_draft_for_another_pick() {
+    let (database, _lobby, lobbies, provider, drafts, persistence, session_id) =
+        final_pick_fixture().await;
+    let mut builder = RegistryBuilder::default();
+    provider.register(&mut builder).expect("register draft");
+    let handler = builder
+        .build()
+        .component_handler("draft")
+        .expect("component handler");
+    // A lobby join holding the scope lock across slow Discord calls.
+    let lobby_lock = lobbies.operation_lock(42, AppLobbyKind::Open);
+    let lobby_guard = lobby_lock.lock().await;
+    let responder = Arc::new(TestResponder::default());
+    handler
+        .handle(final_pick_request(session_id, 98), responder.clone())
+        .await
+        .expect("final pick answers after the lock wait");
+
+    assert_final_pick_reopened(&provider, &drafts, &persistence);
+    assert!(
+        responder
+            .responses
+            .lock()
+            .expect("responses")
+            .iter()
+            .any(|response| response.content.contains("last pick was undone"))
+    );
+
+    // Once the lobby is free the same captain can finish the draft.
+    drop(lobby_guard);
+    let retry = Arc::new(TestResponder::default());
+    handler
+        .handle(final_pick_request(session_id, 99), retry.clone())
+        .await
+        .expect("retried final pick");
+    assert!(persistence.load_all().expect("load rows").is_empty());
+    assert!(!drafts.has_active_draft(Some(42)));
+    assert_eq!(
+        Connection::open(database.path())
+            .expect("open draft database")
+            .query_row("SELECT COUNT(*) FROM pending_matches", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count pending matches"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn draft_resume_reopens_a_saved_final_pick_that_never_created_a_match() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "ADMIN_USER_IDS" => Some("9001".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::Complete;
+    state.current_pick_index = DRAFT_TOTAL_PICKS;
+    state.current_round_first_captain_id = Some(1);
+    state.radiant_player_ids = vec![1, 3, 5, 7, 9];
+    state.dire_player_ids = vec![2, 4, 6, 8, 10];
+    state.radiant_hero_pick_order = Some(1);
+    state.dire_hero_pick_order = Some(2);
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let mut requested = state.to_snapshot().envelope(1);
+    requested.finalizing = true;
+    persistence
+        .create_envelope(&requested)
+        .expect("create unlinked final-pick fence");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies.clone(),
+        Arc::clone(&drafts),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+    assert!(!drafts.has_active_draft(Some(42)));
+
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .resume_saved_completion(42, 9001, None, responder.clone())
+        .await
+        .expect("resume");
+
+    assert!(
+        responder.responses.lock().expect("responses")[0]
+            .content
+            .contains("Draft reopened")
+    );
+    assert_final_pick_reopened(&provider, &drafts, &persistence);
+    // The reopened pool is reserved again for the live draft.
+    assert!(
+        !lobbies
+            .reserve_players(42, AppLobbyKind::Open, &BTreeSet::from([10]))
+            .await
+    );
+}
+
+/// Let any timer that fired finish its durable cleanup before asserting.
+async fn settle_timers() {
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn winner_side_choice_restarts_the_pre_draft_timer_for_the_other_captain() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::WinnerChoice;
+    state.radiant_captain_id = None;
+    state.dire_captain_id = None;
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let mut requested = state.to_snapshot().envelope(1);
+    requested.deadline_at = Some(unix_now().saturating_add(PRE_DRAFT_TIMEOUT_SECONDS as i64));
+    let session_id = persistence
+        .create_envelope(&requested)
+        .expect("create pre-draft envelope")
+        .session_id;
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies,
+        Arc::clone(&drafts),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+    provider.hydrate().await.expect("hydrate pre-draft");
+    let mut builder = RegistryBuilder::default();
+    provider.register(&mut builder).expect("register draft");
+    let handler = builder
+        .build()
+        .component_handler("draft")
+        .expect("component handler");
+    let click = |interaction_id: u64, action: &str| InteractionRequest::Component {
+        interaction_id,
+        custom_id: format!("draft:{session_id}:{action}"),
+        user_id: 1,
+        user_display_name: "Captain".to_owned(),
+        guild_id: Some(42),
+        channel_id: Some(777),
+        member_permissions: None,
+        values: Vec::new(),
+    };
+    let phase = || {
+        drafts
+            .get_state(Some(42))
+            .map(|state| state.lock().expect("draft state").phase)
+    };
+
+    handler
+        .handle(
+            click(201, "choice_side"),
+            Arc::new(TestResponder::default()),
+        )
+        .await
+        .expect("winner chooses to pick a side");
+    assert_eq!(phase(), Some(DraftPhase::WinnerSideChoice));
+    // Let the spawned timer start its sleep at the time of the click.
+    settle_timers().await;
+    tokio::time::advance(Duration::from_secs(PRE_DRAFT_TIMEOUT_SECONDS - 10)).await;
+    handler
+        .handle(
+            click(202, "side:radiant"),
+            Arc::new(TestResponder::default()),
+        )
+        .await
+        .expect("winner picks a side near the deadline");
+    assert_eq!(phase(), Some(DraftPhase::LoserChoice));
+    settle_timers().await;
+
+    // The first choice's deadline passes; the other captain keeps a full window.
+    tokio::time::advance(Duration::from_secs(20)).await;
+    settle_timers().await;
+    assert_eq!(phase(), Some(DraftPhase::LoserChoice));
+    assert!(!persistence.load_all().expect("load envelope").is_empty());
+
+    tokio::time::advance(Duration::from_secs(PRE_DRAFT_TIMEOUT_SECONDS - 20)).await;
+    settle_timers().await;
+    assert_eq!(phase(), None, "the restarted timer still expires the draft");
+}
+
+#[tokio::test]
+async fn draft_start_names_a_missing_captain_without_exposing_the_id() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    discord
+        .member_names
+        .lock()
+        .expect("member names")
+        .insert(4242, "Away_Captain".to_owned());
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        _ => None,
+    })
+    .expect("config");
+    let provider = DraftRegistrationProvider::new(
+        database.path(),
+        &config,
+        lobbies,
+        Arc::clone(&drafts),
+        discord,
+    )
+    .expect("draft provider");
+    let mut builder = RegistryBuilder::default();
+    provider.register(&mut builder).expect("register draft");
+    let handler = builder
+        .build()
+        .command_handler("draft")
+        .expect("draft handler");
+    let reply = Arc::new(TestResponder::default());
+    handler
+        .handle(
+            InteractionRequest::Command {
+                interaction_id: 301,
+                name: "draft".to_owned(),
+                user_id: 1,
+                user_display_name: "User 1".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(777),
+                member_permissions: None,
+                options: vec![InteractionOption {
+                    name: "start".to_owned(),
+                    value: InteractionValue::Subcommand(vec![InteractionOption {
+                        name: "captain1".to_owned(),
+                        value: InteractionValue::User {
+                            id: 4242,
+                            display_name: None,
+                            is_bot: None,
+                        },
+                    }]),
+                }],
+            },
+            reply.clone(),
+        )
+        .await
+        .expect("draft start");
+
+    assert!(!drafts.has_active_draft(Some(42)));
+    let responses = reply.responses.lock().expect("responses");
+    let message = responses
+        .iter()
+        .find(|response| response.content.contains("is not in the lobby"))
+        .expect("missing captain reply");
+    assert!(message.content.contains("Away\\_Captain"));
+    assert!(!message.content.contains("4242"));
 }
 
 #[tokio::test(start_paused = true)]
