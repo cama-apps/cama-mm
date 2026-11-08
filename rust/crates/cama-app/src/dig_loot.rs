@@ -2197,9 +2197,8 @@ pub fn artifact_display_label(artifact_id: &str, with_stats: bool) -> String {
         .map(|rest| rest.split(':').collect::<Vec<_>>())
         .filter(|parts| parts.len() >= 2)
     {
-        use crate::dig_bosses::{
-            PINNACLE_RELIC_STATS, PINNACLE_RELIC_SUFFIX_POOL, pinnacle_suffix_from_stats,
-        };
+        use crate::dig_bosses::{PINNACLE_RELIC_STATS, pinnacle_suffix_from_stats};
+        use cama_domain::dig_gear::PINNACLE_RELIC_SUFFIX_POOL;
         let stats = parts[2..]
             .iter()
             .filter_map(|id| PINNACLE_RELIC_STATS.iter().find(|stat| stat.id == *id))

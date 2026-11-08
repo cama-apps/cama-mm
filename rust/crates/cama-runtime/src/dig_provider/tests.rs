@@ -9932,7 +9932,7 @@ async fn pending_route_dig_reopens_the_junction_and_one_click_locks_the_route() 
         )
         .await
         .expect("route click");
-    let locked = click.original_edits.lock().expect("route edits");
+    let locked = click.original_edits.lock().expect("route edits").clone();
     assert_eq!(locked.len(), 1);
     assert_eq!(
         locked[0].embeds[0].title.as_deref(),
@@ -9942,7 +9942,6 @@ async fn pending_route_dig_reopens_the_junction_and_one_click_locks_the_route() 
         locked[0].components.is_empty(),
         "the route buttons are removed"
     );
-    drop(locked);
     assert_eq!(selected_route(&database).as_deref(), Some("old_supports"));
 
     // A second click on the same view is acknowledged but settles nothing.
