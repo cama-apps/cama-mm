@@ -257,6 +257,42 @@ impl LowPriorityRepository {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Return the requested IDs whose active assignment applies to one
+    /// pending match: it started before that match was created. This is the
+    /// same watermark rule match recording uses to count low-priority wins,
+    /// so a player placed after the shuffle is neither progressed nor
+    /// penalised by that match.
+    pub fn get_active_ids_for_pending_match(
+        &self,
+        discord_ids: &[i64],
+        guild_id: Option<i64>,
+        pending_match_id: i64,
+    ) -> Result<HashSet<i64>, LowPriorityRepositoryError> {
+        if discord_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let placeholders = std::iter::repeat_n("?", discord_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT discord_id
+             FROM low_priority_state
+             WHERE guild_id = ? AND active = 1 AND wins_remaining > 0
+               AND (start_pending_match_id IS NULL OR ? > start_pending_match_id)
+               AND discord_id IN ({placeholders})"
+        );
+        let mut parameters = Vec::with_capacity(discord_ids.len() + 2);
+        parameters.push(Value::Integer(Self::normalize_guild_id(guild_id)));
+        parameters.push(Value::Integer(pending_match_id));
+        parameters.extend(discord_ids.iter().copied().map(Value::Integer));
+
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(parameters.iter()), |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Active low-priority Discord IDs for one guild.
     ///
     /// Shaped as a `BTreeSet` so the economy paths that already gate a

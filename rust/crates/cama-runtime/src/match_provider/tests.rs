@@ -14,6 +14,7 @@ use cama_app::dedicated_lobby_channel::{
 use cama_db::betting_service_repository::{BettingServiceRepositoryError, PlaceBetRequest};
 use cama_db::guild_config_repository::GuildConfigRepository;
 use cama_domain::guild_config::GuildConfigStore;
+use chrono::Duration as ChronoDuration;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -4869,6 +4870,136 @@ fn test_final_low_priority_win_boosts_both_rating_gains_before_release() {
             .expect("read released low-priority state"),
         (0, 0)
     );
+}
+
+#[test]
+fn test_low_priority_set_after_the_shuffle_does_not_shrink_that_matchs_gain() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let target = pending.state.radiant_team_ids[0];
+    // An admin placement after the shuffle takes the current pending match as
+    // its watermark, so this match was not shaped by it.
+    Connection::open(fixture.database.path())
+        .expect("open late low-priority fixture")
+        .execute(
+            "INSERT INTO low_priority_state (
+                discord_id,guild_id,wins_required,wins_remaining,
+                start_pending_match_id,active,set_by
+             ) VALUES (?1,?2,2,2,?3,1,901)",
+            params![target, GUILD, pending.pending_match_id],
+        )
+        .expect("seed post-shuffle low priority");
+
+    let recorded = fixture
+        .provider
+        .handler
+        .record_match_blocking(&pending, "radiant", None)
+        .expect("record win after late low priority");
+
+    let connection = Connection::open(fixture.database.path()).expect("inspect late placement");
+    let multiplier: f64 = connection
+        .query_row(
+            "SELECT low_priority_gain_multiplier FROM rating_history
+             WHERE guild_id=?1 AND match_id=?2 AND discord_id=?3",
+            params![GUILD, recorded.match_id, target],
+            |row| row.get(0),
+        )
+        .expect("read recording-time gain multiplier");
+    assert!((multiplier - 1.0).abs() < 1e-12);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT active,wins_remaining FROM low_priority_state
+                 WHERE guild_id=?1 AND discord_id=?2",
+                params![GUILD, target],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("read untouched low-priority state"),
+        (1, 2),
+        "the same watermark keeps this win from counting toward release"
+    );
+}
+
+#[test]
+fn test_recovery_retry_counts_the_recorded_win_streak_once() {
+    let fixture = MatchRuntimeFixture::new_durable();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let winner = pending.state.radiant_team_ids[0];
+    let connection = Connection::open(fixture.database.path()).expect("open streak fixture");
+    connection
+        .execute_batch("PRAGMA foreign_keys=OFF")
+        .expect("use migrated legacy foreign-key policy");
+    for match_id in 1..=4_i64 {
+        connection
+            .execute(
+                "INSERT INTO matches(
+                     match_id,team1_players,team2_players,winning_team,guild_id
+                 ) VALUES(?1,'[]','[]',1,?2)",
+                params![match_id, GUILD],
+            )
+            .expect("insert prior win");
+        connection
+            .execute(
+                "INSERT INTO rating_history(discord_id,guild_id,match_id,won)
+                 VALUES(?1,?2,?3,1)",
+                params![winner, GUILD, match_id],
+            )
+            .expect("insert prior win history");
+    }
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_streak_retry_bonus
+             BEFORE UPDATE OF jopacoin_balance ON players
+             WHEN EXISTS (
+                 SELECT 1 FROM economy_ledger_context
+                 WHERE id=1 AND source='match_win_bonus'
+             )
+             BEGIN
+               SELECT RAISE(ABORT,'injected streak retry failure');
+             END;",
+        )
+        .expect("install post-core failure");
+
+    let error = fixture
+        .provider
+        .handler
+        .record_match_blocking(&pending, "radiant", None)
+        .expect_err("post-core failure leaves the match to recovery");
+    assert!(error.contains("match bonus payout failed"));
+    let match_id = recorded_match_id_for_pending(&fixture, pending.pending_match_id);
+    connection
+        .execute("DROP TRIGGER fail_streak_retry_bonus", [])
+        .expect("remove post-core failure");
+
+    let recovered = fixture
+        .provider
+        .handler
+        .record_match_blocking(&pending, "radiant", None)
+        .expect("recovery retry completes the match");
+    assert_eq!(recovered.match_id, match_id);
+    assert_eq!(
+        recovered.easter_eggs.win_streak_records,
+        vec![WinStreakRecord {
+            discord_id: winner,
+            current_streak: 5,
+            previous_best: 0,
+        }]
+    );
+    assert_eq!(
+        PlayerRepository::new(fixture.database.path())
+            .get_personal_best_win_streak(winner, Some(GUILD))
+            .expect("read recovered personal best"),
+        5
+    );
+    let recorded_streak: i64 = connection
+        .query_row(
+            "SELECT streak_length FROM rating_history
+             WHERE guild_id=?1 AND match_id=?2 AND discord_id=?3",
+            params![GUILD, match_id, winner],
+            |row| row.get(0),
+        )
+        .expect("read committed streak length");
+    assert_eq!(recorded_streak, 5);
 }
 
 #[test]

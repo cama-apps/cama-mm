@@ -33,8 +33,7 @@ use cama_domain::dig_gear::{
     GearSlot as DomainGearSlot, apply_gear_to_combat, drop_tier_at_depth, tier_table, unique_gear,
 };
 use cama_domain::dig_stats::survival_roll_bonus;
-use cama_domain::game_date::game_date_for_timestamp;
-use cama_domain::mana::ManaEffects;
+use cama_domain::mana::{ManaEffects, mana_day_label_at};
 use cama_domain::pet::{PetMood as DomainPetMood, PetStage as DomainPetStage, get_species};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -72,6 +71,7 @@ use crate::dig_relic_rework::{SHIFTING_IDOL_PLAYER_HIT_CEILING, ShiftingIdolBonu
 use crate::dig_service::{BOSS_REST_PENDING_KEY, DIG_STARTING_STAT_POINTS};
 use crate::economy_event_service::EconomyEventConfig;
 use crate::economy_event_sqlite::SqliteEconomyEventService;
+use crate::mana_effects_service::color_for_land;
 use crate::service_container::PersistentVanityTaxService;
 use crate::vanity_tax_service::VanityTaxService;
 
@@ -654,7 +654,7 @@ impl SqliteBossCombatPreparation {
     }
 
     fn mana_effects(&self, key: PlayerKey, now: i64) -> ManaEffects {
-        let Ok(today) = game_date_for_timestamp(now as f64) else {
+        let Some(today) = mana_day_label_at(now) else {
             return ManaEffects::default();
         };
         match ManaRepository::new(&self.database_path).get_mana(key.player_id, Some(key.guild_id.0))
@@ -896,14 +896,7 @@ impl BossCombatPreparationPort for SqliteBossCombatPreparation {
 }
 
 fn mana_effects_for_land(land: &str) -> ManaEffects {
-    let color = match land {
-        "Mountain" => Some("Red"),
-        "Island" => Some("Blue"),
-        "Forest" => Some("Green"),
-        "Plains" => Some("White"),
-        "Swamp" => Some("Black"),
-        _ => None,
-    };
+    let color = color_for_land(land);
     ManaEffects::for_color(color, color.map(|_| land))
 }
 

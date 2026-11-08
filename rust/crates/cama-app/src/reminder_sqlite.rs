@@ -13,8 +13,7 @@ use cama_db::mana_service_repository::ManaRepository;
 use cama_db::notifications::{NotificationKind, NotificationPreferences, NotificationRepository};
 use cama_db::pet_repository::PetRepository;
 use cama_db::reminder_repository::{DigReminderAnchor, ReminderRepository};
-use cama_domain::game_date::get_game_date;
-use cama_domain::mana::ManaEffects;
+use cama_domain::mana::{ManaEffects, mana_day_label_at};
 use cama_domain::pet::UNHATCHED_SPECIES;
 use rusqlite::types::Value;
 
@@ -66,7 +65,7 @@ impl SqliteReminderStore {
             .into_iter()
             .map(|row| (row.discord_id, row.mana))
             .collect::<BTreeMap<_, _>>();
-        let today = get_game_date();
+        let today = mana_day_label_at(now);
 
         Ok(user_ids
             .iter()
@@ -79,7 +78,7 @@ impl SqliteReminderStore {
                         let mana_reduction = mana
                             .get(&user_id.value())
                             .filter(|row| {
-                                row.assigned_date == today
+                                today.as_deref() == Some(row.assigned_date.as_str())
                                     && !row.consumed_today
                                     && row.current_land == "Forest"
                             })

@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use chrono::TimeZone;
-
 use super::*;
 
 const GUILD: i64 = 9_001;
@@ -343,41 +341,6 @@ fn service(
     protection: MockProtection,
 ) -> ManaService<MockStore, MockData, ScriptedEntropy, MockProtection> {
     ManaService::new(store, data, entropy, protection)
-}
-
-fn la_time(hour: u32, minute: u32) -> DateTime<FixedOffset> {
-    FixedOffset::west_opt(7 * 60 * 60)
-        .expect("valid Pacific offset")
-        .with_ymd_and_hms(2025, 6, 15, hour, minute, 0)
-        .single()
-        .expect("valid test timestamp")
-}
-
-#[test]
-fn test_after_reset_hour_returns_today() {
-    assert_eq!(mana_day_label(la_time(10, 0)), TODAY);
-}
-
-#[test]
-fn test_before_reset_hour_returns_yesterday() {
-    assert_eq!(mana_day_label(la_time(2, 0)), "2025-06-14");
-}
-
-#[test]
-fn test_exactly_at_reset_hour_returns_today() {
-    assert_eq!(mana_day_label(la_time(4, 0)), TODAY);
-}
-
-#[test]
-fn test_mana_day_start_timestamp_observes_four_am_boundary() {
-    assert_eq!(
-        mana_day_start_timestamp(la_time(2, 30)),
-        la_time(4, 0).timestamp() - 86_400
-    );
-    assert_eq!(
-        mana_day_start_timestamp(la_time(10, 30)),
-        la_time(4, 0).timestamp()
-    );
 }
 
 #[test]

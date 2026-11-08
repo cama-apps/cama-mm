@@ -5,6 +5,44 @@
 //! unknown color or land rather than rejecting it, while known values activate
 //! the corresponding modifiers.
 
+use chrono::{DateTime, NaiveDate, TimeZone, Timelike, Utc};
+use chrono_tz::America::Los_Angeles;
+
+/// Wall-clock hour in America/Los_Angeles at which the mana day rolls over.
+pub const MANA_DAY_RESET_HOUR: u32 = 4;
+
+fn mana_day_date(timestamp: i64) -> Option<NaiveDate> {
+    let local = DateTime::<Utc>::from_timestamp(timestamp, 0)?.with_timezone(&Los_Angeles);
+    let date = local.date_naive();
+    if local.hour() < MANA_DAY_RESET_HOUR {
+        date.pred_opt()
+    } else {
+        Some(date)
+    }
+}
+
+/// The `YYYY-MM-DD` mana day containing a Unix timestamp.
+///
+/// Mana days roll over at 4 AM America/Los_Angeles wall-clock time and follow
+/// daylight-saving time. Every writer and reader of a mana `assigned_date`
+/// must use this label. It is deliberately not the fixed UTC-8 game day in
+/// [`crate::game_date`], which never moves for daylight-saving time.
+/// `None` only for a timestamp outside chrono's range.
+#[must_use]
+pub fn mana_day_label_at(timestamp: i64) -> Option<String> {
+    mana_day_date(timestamp).map(|date| date.format("%Y-%m-%d").to_string())
+}
+
+/// The Unix timestamp at which the mana day containing `timestamp` began.
+#[must_use]
+pub fn mana_day_start_at(timestamp: i64) -> Option<i64> {
+    let start = mana_day_date(timestamp)?.and_hms_opt(MANA_DAY_RESET_HOUR, 0, 0)?;
+    Los_Angeles
+        .from_local_datetime(&start)
+        .earliest()
+        .map(|start| start.timestamp())
+}
+
 /// The complete immutable effect snapshot for one player's active mana.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ManaEffects {
@@ -521,6 +559,94 @@ mod tests {
     fn active_effects(color: Option<&str>, land: Option<&str>, consumed: bool) -> ManaEffects {
         let assignment = color.map(|color| ManaAssignment::new(Some(color), land, consumed));
         effects_from_assignment(assignment.as_ref())
+    }
+
+    fn utc(text: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .expect("valid RFC 3339 instant")
+            .timestamp()
+    }
+
+    #[test]
+    fn mana_day_rolls_at_four_am_los_angeles_in_summer_and_winter() {
+        use super::{mana_day_label_at, mana_day_start_at};
+        // 03:59 / 04:00 PDT (UTC-7).
+        assert_eq!(
+            mana_day_label_at(utc("2026-07-18T10:59:59Z")).as_deref(),
+            Some("2026-07-17")
+        );
+        assert_eq!(
+            mana_day_label_at(utc("2026-07-18T11:00:00Z")).as_deref(),
+            Some("2026-07-18")
+        );
+        assert_eq!(
+            mana_day_start_at(utc("2026-07-18T11:30:00Z")),
+            Some(utc("2026-07-18T11:00:00Z"))
+        );
+        // 03:59 / 04:00 PST (UTC-8).
+        assert_eq!(
+            mana_day_label_at(utc("2026-01-15T11:59:59Z")).as_deref(),
+            Some("2026-01-14")
+        );
+        assert_eq!(
+            mana_day_label_at(utc("2026-01-15T12:00:00Z")).as_deref(),
+            Some("2026-01-15")
+        );
+        assert_eq!(
+            mana_day_start_at(utc("2026-01-15T11:00:00Z")),
+            Some(utc("2026-01-14T12:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn mana_day_follows_daylight_saving_transitions() {
+        use super::{mana_day_label_at, mana_day_start_at};
+        // Spring forward, 2026-03-08: 02:00 PST becomes 03:00 PDT. At 03:30
+        // PDT the day still belongs to Saturday, which began at 04:00 PST.
+        let spring_early = utc("2026-03-08T10:30:00Z");
+        assert_eq!(
+            mana_day_label_at(spring_early).as_deref(),
+            Some("2026-03-07")
+        );
+        assert_eq!(
+            mana_day_start_at(spring_early),
+            Some(utc("2026-03-07T12:00:00Z"))
+        );
+        let spring_day = utc("2026-03-08T11:00:00Z");
+        assert_eq!(mana_day_label_at(spring_day).as_deref(), Some("2026-03-08"));
+        assert_eq!(mana_day_start_at(spring_day), Some(spring_day));
+        // Fall back, 2026-11-01: 02:00 PDT becomes 01:00 PST. Saturday began at
+        // 04:00 PDT and lasts 25 hours; Sunday begins at 04:00 PST.
+        let fall_early = utc("2026-11-01T11:30:00Z");
+        assert_eq!(mana_day_label_at(fall_early).as_deref(), Some("2026-10-31"));
+        assert_eq!(
+            mana_day_start_at(fall_early),
+            Some(utc("2026-10-31T11:00:00Z"))
+        );
+        let fall_day = utc("2026-11-01T12:00:00Z");
+        assert_eq!(mana_day_label_at(fall_day).as_deref(), Some("2026-11-01"));
+        assert_eq!(mana_day_start_at(fall_day), Some(fall_day));
+    }
+
+    #[test]
+    fn mana_day_and_game_day_differ_only_in_the_daylight_hour() {
+        use super::mana_day_label_at;
+        use crate::game_date::game_date_for_timestamp;
+        // 04:30 PDT is 03:30 in the fixed UTC-8 game clock: the mana day has
+        // rolled, the game day has not.
+        let summer = utc("2026-07-18T11:30:00Z");
+        assert_eq!(mana_day_label_at(summer).as_deref(), Some("2026-07-18"));
+        assert_eq!(
+            game_date_for_timestamp(summer as f64).expect("game day"),
+            "2026-07-17"
+        );
+        // In winter both clocks are UTC-8 and agree.
+        let winter = utc("2026-01-15T12:30:00Z");
+        assert_eq!(mana_day_label_at(winter).as_deref(), Some("2026-01-15"));
+        assert_eq!(
+            game_date_for_timestamp(winter as f64).expect("game day"),
+            "2026-01-15"
+        );
     }
 
     #[derive(Clone)]
