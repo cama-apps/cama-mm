@@ -1931,11 +1931,15 @@ async fn retried_bankrupt_pardon_forgives_the_loss_exactly_once() {
     .await;
     assert_eq!(after_failure, [100, 1_000, 500, 0]);
     assert_eq!(after_retry, after_failure);
-    assert!(
-        !PlayerRepository::new(database.path())
-            .get_wheel_pardon(7, Some(42))
-            .expect("read pardon")
-    );
+    let pardon_armed: i64 = Connection::open(database.path())
+        .expect("open pardon state")
+        .query_row(
+            "SELECT COALESCE(has_wheel_pardon,0) FROM players WHERE discord_id=7 AND guild_id=42",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read pardon");
+    assert_eq!(pardon_armed, 0, "the pardon is consumed exactly once");
     let logged: i64 = Connection::open(database.path())
         .expect("open pardon history")
         .query_row(
