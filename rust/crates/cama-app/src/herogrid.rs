@@ -644,8 +644,11 @@ pub fn draw_hero_grid(
     let draw_player_labels = |raster: &mut Raster, left: usize| {
         for (player_index, player_id) in player_ids.iter().enumerate() {
             let row_y = layout.player_row_y(player_index);
-            let fallback = format!("Player {player_id}");
-            let name = names.get(player_id).copied().unwrap_or(&fallback);
+            let name = names
+                .get(player_id)
+                .copied()
+                .and_then(readable_player_name)
+                .unwrap_or(UNKNOWN_PLAYER);
             raster.draw_text(
                 i32::try_from(left).unwrap_or(i32::MAX),
                 i32::try_from(row_y + 18).unwrap_or(i32::MAX),

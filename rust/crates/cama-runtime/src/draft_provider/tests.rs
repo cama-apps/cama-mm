@@ -819,6 +819,28 @@ fn draft_render_state_uses_cached_discord_render_names() {
     assert_eq!(state.player_pool_data[&1].name, "P1");
 }
 
+#[test]
+fn draft_team_field_never_names_a_player_by_id() {
+    let mut state = state_for_draft();
+    state.player_pool_data.remove(&3);
+    state
+        .player_pool_data
+        .get_mut(&4)
+        .expect("pooled player")
+        .name = "<@4>".to_owned();
+
+    let field = team_field(&state, &[1, 3, 4]);
+
+    assert_eq!(
+        field.lines().collect::<Vec<_>>(),
+        [
+            "👑 P1 (1501)",
+            "⠀⠀ Unknown player (1500)",
+            "⠀⠀ Unknown player (1504)"
+        ]
+    );
+}
+
 type PersistentCompletionFixture = (
     FastTestDatabase,
     DraftRegistrationProvider,
