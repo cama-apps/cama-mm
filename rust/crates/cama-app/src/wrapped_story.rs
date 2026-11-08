@@ -1,11 +1,9 @@
 //! Adapter-neutral Cama Wrapped story policies.
 //!
-//! These pure aggregation, selection, immutable purchase-history, and layout
-//! contracts are shared by the native live runtime and adapter-neutral tests.
+//! These pure aggregation, selection, and layout contracts are shared by the
+//! native live runtime and adapter-neutral tests.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
+use std::collections::BTreeMap;
 
 include!("wrapped_story/flavor_catalog.rs");
 
@@ -79,34 +77,6 @@ pub struct PersonalSummaryWrapped {
     pub unique_heroes_percentile: f64,
     pub total_kda_percentile: f64,
     pub flavor_text: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PairwiseEntry {
-    pub discord_id: i64,
-    pub username: String,
-    pub games: i64,
-    pub wins: i64,
-    pub win_rate: f64,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PairwiseWrapped {
-    pub best_teammates: Vec<PairwiseEntry>,
-    pub most_played_with: Vec<PairwiseEntry>,
-    pub nemesis: Option<PairwiseEntry>,
-    pub punching_bag: Option<PairwiseEntry>,
-    pub most_played_against: Vec<PairwiseEntry>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PackageDealWrapped {
-    pub times_bought: usize,
-    pub times_bought_on_you: usize,
-    pub unique_buyers: usize,
-    pub jc_spent: i64,
-    pub jc_spent_on_you: i64,
-    pub total_games_committed: i64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -279,116 +249,6 @@ pub fn personal_summary(input: &PersonalSummaryInput) -> Option<PersonalSummaryW
         ),
         flavor_text: get_flavor(flavor_key, 0, &[]),
     })
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PairwiseRaw {
-    pub peer_id: i64,
-    pub games: i64,
-    pub wins: i64,
-    pub win_rate: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct PairwiseInput {
-    pub best_teammates: Vec<PairwiseRaw>,
-    pub most_played_with: Vec<PairwiseRaw>,
-    pub worst_matchups: Vec<PairwiseRaw>,
-    pub best_matchups: Vec<PairwiseRaw>,
-    pub most_played_against: Vec<PairwiseRaw>,
-}
-
-pub fn pairwise_player_ids(input: &PairwiseInput) -> Vec<i64> {
-    let mut seen = BTreeSet::new();
-    input
-        .best_teammates
-        .iter()
-        .chain(&input.most_played_with)
-        .chain(&input.worst_matchups)
-        .chain(&input.best_matchups)
-        .chain(&input.most_played_against)
-        .filter_map(|entry| seen.insert(entry.peer_id).then_some(entry.peer_id))
-        .collect()
-}
-
-fn resolve_pairwise(rows: &[PairwiseRaw], names: &BTreeMap<i64, String>) -> Vec<PairwiseEntry> {
-    rows.iter()
-        .map(|row| PairwiseEntry {
-            discord_id: row.peer_id,
-            username: names
-                .get(&row.peer_id)
-                .and_then(|name| readable_player_name(name))
-                .unwrap_or(UNKNOWN_PLAYER)
-                .to_owned(),
-            games: row.games,
-            wins: row.wins,
-            win_rate: row.win_rate,
-        })
-        .collect()
-}
-
-pub fn pairwise_wrapped(
-    input: Option<&PairwiseInput>,
-    names: &BTreeMap<i64, String>,
-) -> Option<PairwiseWrapped> {
-    let input = input?;
-    if input.best_teammates.is_empty()
-        && input.most_played_with.is_empty()
-        && input.worst_matchups.is_empty()
-        && input.best_matchups.is_empty()
-        && input.most_played_against.is_empty()
-    {
-        return None;
-    }
-    Some(PairwiseWrapped {
-        best_teammates: resolve_pairwise(&input.best_teammates, names),
-        most_played_with: resolve_pairwise(&input.most_played_with, names),
-        nemesis: resolve_pairwise(&input.worst_matchups, names)
-            .into_iter()
-            .next(),
-        punching_bag: resolve_pairwise(&input.best_matchups, names)
-            .into_iter()
-            .next(),
-        most_played_against: resolve_pairwise(&input.most_played_against, names),
-    })
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PackageDealPurchase {
-    pub id: i64,
-    pub guild_id: i64,
-    pub buyer_discord_id: i64,
-    pub partner_discord_id: i64,
-    pub games_committed: i64,
-    pub games_remaining: i64,
-    pub jc_spent: i64,
-    pub year: i32,
-}
-
-pub fn package_deal_wrapped<'a>(
-    player_id: i64,
-    purchases: impl Iterator<Item = &'a PackageDealPurchase>,
-) -> Option<PackageDealWrapped> {
-    let purchases: Vec<_> = purchases.collect();
-    if purchases.is_empty() {
-        return None;
-    }
-    let mut result = PackageDealWrapped::default();
-    let mut buyers = BTreeSet::new();
-    for purchase in purchases {
-        result.total_games_committed += purchase.games_committed;
-        if purchase.buyer_discord_id == player_id {
-            result.times_bought += 1;
-            result.jc_spent += purchase.jc_spent;
-        }
-        if purchase.partner_discord_id == player_id {
-            result.times_bought_on_you += 1;
-            result.jc_spent_on_you += purchase.jc_spent;
-            buyers.insert(purchase.buyer_discord_id);
-        }
-    }
-    result.unique_buyers = buyers.len();
-    Some(result)
 }
 
 pub fn hero_spotlight(

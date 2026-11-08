@@ -186,8 +186,11 @@ fn dig_chapter_spotlights_the_most_fought_boss_and_feuds() {
     assert_eq!(dig.stat_value, "1,284");
     assert_eq!(dig.stat_label, "blocks dug. Deepest: 412 in Magma.");
     assert_eq!(dig.badge, "Dug more than 92% of the server");
-    assert!(dig.lines[0].contains("37 cave-ins"));
-    assert!(dig.lines[1].contains("3 artifacts, one before anyone else"));
+    // The card leads with an everyday dig joke; 92% is not the top 5%.
+    assert_eq!(dig.lines[0], dig.headline);
+    assert_eq!(dig.headline, side_joke("dig", Tier::Notable, SEED));
+    assert!(dig.lines[1].contains("37 cave-ins"));
+    assert!(dig.lines[2].contains("3 artifacts, one before anyone else"));
     let boss = &cards[1];
     assert_eq!(boss.art, CardArt::BossEncounter("grothak".into()));
     assert_eq!(boss.title, "Boss you fought most");
@@ -352,18 +355,37 @@ fn pet_chapter_stars_the_living_pet_and_mourns_the_rest() {
     };
     assert_eq!(star.art, CardArt::ActivePet);
     assert_eq!(star.headline, "Sir Fluff");
-    assert_eq!(star.stat_value, "421 meals");
-    assert_eq!(star.stat_label, "served across 4 pets");
-    assert_eq!(star.badge, "4,120 JC on pet care");
+    // This year's spending, not the pets' lifetime feedings.
+    assert_eq!(star.stat_value, "4,120 JC");
+    assert_eq!(star.stat_label, "on pet care across 4 pets this year");
+    assert_eq!(star.badge, "");
     assert_eq!(
         star.lines,
         [
+            side_joke("pet", Tier::Notable, SEED).as_str(),
             "Brawls: 12 won, 3 lost. Rival: Player 5's pet.",
             "Brought you 2 keepsakes."
         ]
     );
     assert_eq!(grave.stat_value, "2");
-    assert_eq!(grave.lines, ["Old Timer starved. Biscuit got eaten."]);
+    assert_eq!(grave.headline, side_joke("pet_lost", Tier::Notable, SEED));
+    assert_eq!(
+        grave.lines,
+        [
+            grave.headline.as_str(),
+            "Old Timer starved. Biscuit got eaten."
+        ]
+    );
+    let ranked = pet_cards(
+        &PetYear {
+            rank: Some(ServerRank { rank: 1, of: 30 }),
+            ..year.clone()
+        },
+        &everyone,
+        SEED,
+    );
+    assert_eq!(ranked[0].badge, "#1 pet parent on the server");
+    assert_eq!(ranked[0].lines[0], side_joke("pet", Tier::Extreme, SEED));
 
     assert!(pet_cards(&PetYear::default(), &everyone, SEED).is_empty());
     let lonely = PetYear {
@@ -373,6 +395,9 @@ fn pet_chapter_stars_the_living_pet_and_mourns_the_rest() {
     let cards = pet_cards(&lonely, &everyone, SEED);
     assert_eq!(cards[0].art, CardArt::None, "no living pet, no portrait");
     assert_eq!(cards[0].headline, "Ghost");
+    // Without spending this year, feedings are labeled for what they are.
+    assert_eq!(cards[0].stat_value, "3 meals");
+    assert_eq!(cards[0].stat_label, "served, lifetime");
 }
 
 #[test]
@@ -411,7 +436,13 @@ fn mafia_chapter_tiles_only_what_happened() {
             "MVP awards"
         ]
     );
-    assert_eq!(tiles.lines, ["40% of your votes targeted Mafia."]);
+    assert_eq!(
+        tiles.lines,
+        [
+            side_joke("mafia", Tier::Notable, SEED).as_str(),
+            "40% of your votes targeted Mafia."
+        ]
+    );
     assert_eq!(victim.headline, "You targeted Player 8 most often.");
     assert_eq!(victim.stat_value, "6");
 
@@ -482,4 +513,41 @@ fn persona_skips_same_family_runner_ups_and_handles_one_activity() {
     assert_eq!(casual.stat_value, "Pet keeper");
     assert!(persona_card(&[]).is_none());
     assert!(persona_card(&[signal(PersonaActivity::Dig, f64::NAN, "d")]).is_none());
+}
+
+#[test]
+fn side_jokes_get_loud_only_at_the_top_of_the_server() {
+    assert_eq!(side_tier(None), Tier::Notable);
+    assert_eq!(
+        side_tier(Some(ServerRank { rank: 1, of: 1 })),
+        Tier::Notable
+    );
+    assert_eq!(
+        side_tier(Some(ServerRank { rank: 1, of: 2 })),
+        Tier::Extreme
+    );
+    assert_eq!(
+        side_tier(Some(ServerRank { rank: 2, of: 40 })),
+        Tier::Extreme
+    );
+    assert_eq!(
+        side_tier(Some(ServerRank { rank: 3, of: 40 })),
+        Tier::Notable
+    );
+    for key in ["dig", "pet", "pet_lost", "mafia"] {
+        for seed in 0..64 {
+            let beat = side_game_copy(key, Tier::Extreme, seed);
+            let joke = side_joke(key, Tier::Extreme, seed);
+            // A setup that trails off with a comma runs into its punchline.
+            let punch = if beat.setup.ends_with(',') {
+                let mut letters = beat.punch.chars();
+                letters.next().map_or_else(String::new, |first| {
+                    first.to_lowercase().chain(letters).collect()
+                })
+            } else {
+                beat.punch.to_owned()
+            };
+            assert_eq!(joke, format!("{} {punch}", beat.setup));
+        }
+    }
 }

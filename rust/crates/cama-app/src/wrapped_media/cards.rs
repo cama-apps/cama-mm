@@ -180,6 +180,10 @@ fn cover(stage: &mut Stage<'_>) {
 
 /// A card gets one heading; its statistics carry the rest of the story.
 fn heading(stage: &mut Stage<'_>) -> i32 {
+    heading_within(stage, COLUMN)
+}
+
+fn heading_within(stage: &mut Stage<'_>, width: i32) -> i32 {
     let slide = stage.slide;
     let value = if slide.title.is_empty() {
         &slide.headline
@@ -188,7 +192,7 @@ fn heading(stage: &mut Stage<'_>) -> i32 {
     };
     stage.block(
         value,
-        (MARGIN, TOP, COLUMN, 146),
+        (MARGIN, TOP, width, 146),
         66.0,
         Face::Black,
         stage.palette.fg,
@@ -262,10 +266,34 @@ fn big_number(stage: &mut Stage<'_>) {
 
 fn top_list(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
-    let mut y = heading(stage);
+    // The main hero's render stands in a tile beside the heading, which
+    // narrows to make room.
+    let art = stage
+        .art
+        .as_ref()
+        .map(|art| (art.width as i32, art.height as i32));
+    let (width, mut art_bottom) = (
+        art.map_or(COLUMN, |(art_width, _)| COLUMN - art_width - 16),
+        0,
+    );
+    if let Some((art_width, art_height)) = art {
+        let enter = stage.ease(0.0, 0.3);
+        let left =
+            WIDTH - MARGIN - art_width + ((1.0 - enter) * (art_width + MARGIN) as f32) as i32;
+        let top = TOP - 12;
+        let tile = (left, top, left + art_width, top + art_height);
+        stage.canvas.rounded_rect(
+            (tile.0 as f32, tile.1 as f32, tile.2 as f32, tile.3 as f32),
+            26.0,
+            p.soft,
+        );
+        super::artwork::draw(stage, left, top, tile, 26.0);
+        art_bottom = top + art_height + 16;
+    }
+    let mut y = heading_within(stage, width);
     y = stage.block(
         &slide.stat_label,
-        (MARGIN, y, COLUMN, 44),
+        (MARGIN, y, width, if art.is_some() { 76 } else { 44 }),
         28.0,
         Face::Medium,
         p.fg,
@@ -273,8 +301,9 @@ fn top_list(stage: &mut Stage<'_>) {
         (0.1, 0.34),
     ) + 12;
     if !slide.badge.is_empty() {
-        y = stage.pill(&slide.badge, MARGIN, y, COLUMN, 26.0, p.fg, p.bg, 0.8) + 14;
+        y = stage.pill(&slide.badge, MARGIN, y, width, 26.0, p.fg, p.bg, 0.8) + 14;
     }
+    y = y.max(art_bottom);
     let rows = card_rows(slide);
     let rows = &rows[..rows.len().min(5)];
     if rows.is_empty() {

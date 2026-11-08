@@ -252,7 +252,7 @@ fn default_style(kind: &str) -> (WrappedLayout, WrappedTheme) {
         "story_intro" => (WrappedLayout::Cover, WrappedTheme::Cover),
         "story_finale" => (WrappedLayout::Recap, WrappedTheme::Recap),
         "story_games" | "story_playtime" => (WrappedLayout::BigNumber, WrappedTheme::Queue),
-        "story_moment" | "story_packages" => (WrappedLayout::BigNumber, WrappedTheme::QueueAlt),
+        "story_moment" => (WrappedLayout::BigNumber, WrappedTheme::QueueAlt),
         "story_identity" => (WrappedLayout::Persona, WrappedTheme::Persona),
         "story_superlative" => (WrappedLayout::Award, WrappedTheme::Awards),
         "story_hero" => (WrappedLayout::TopList, WrappedTheme::Heroes),

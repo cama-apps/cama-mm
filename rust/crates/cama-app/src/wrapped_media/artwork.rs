@@ -14,6 +14,8 @@ pub(super) const RECAP_ROW_FRAME: (usize, usize) = (80, 45);
 pub(super) const BEAT_FRAME: (usize, usize) = (384, 216);
 /// The open letterbox of a Cinema punchline: full width, cut from a 16:9 still.
 pub(super) const CINEMA_FRAME: (usize, usize) = (720, 332);
+/// The main hero's render beside the top-heroes heading.
+pub(super) const TOP_HERO_FRAME: (usize, usize) = (220, 220);
 
 fn battlefield() -> Option<&'static DecodedPng> {
     static IMAGE: OnceLock<Option<DecodedPng>> = OnceLock::new();
@@ -52,6 +54,15 @@ pub(super) fn prepare(slide: &WrappedSlideData) -> Option<PreparedArt> {
             let (width, height) = fit_within(&image, SPOTLIGHT_FRAME);
             resample(&image, width, height)
         }),
+        // Trusted hero renders arrive at full size; show the head and torso.
+        WrappedLayout::TopList => slide
+            .art_png
+            .as_deref()
+            .and_then(decode_art_png)
+            .map(|image| {
+                let region = hero_region(&image, TOP_HERO_FRAME, 0.45);
+                resample_region(&image, region, TOP_HERO_FRAME)
+            }),
         WrappedLayout::BigNumber => {
             let kind = character(slide.artwork)?;
             Some(resample(kind, CHARACTER_FRAME.0, CHARACTER_FRAME.1))

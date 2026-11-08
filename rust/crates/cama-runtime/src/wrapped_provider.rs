@@ -13,22 +13,19 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use cama_app::wrapped_media::{
-    WrappedArtwork, WrappedAvatar, WrappedLayout, WrappedRenderedMedia, WrappedRow,
-    WrappedSlideData, WrappedTheme, render_wrapped_media, render_wrapped_slide,
+    WrappedArtwork, WrappedLayout, WrappedRenderedMedia, WrappedRow, WrappedSlideData,
+    WrappedTheme, render_wrapped_media, render_wrapped_slide,
 };
 use cama_app::wrapped_story::chapters::{months_card, story_seed};
 use cama_app::wrapped_story::{
-    HeroRow, MatchDetails, MatchStatsRow, PairwiseEntry, PairwiseInput, PairwiseRaw,
-    PersonalMoment, PersonalMomentMatch, PersonalSummaryInput, PersonalSummaryWrapped,
-    YearMatchRow, flavor_pool, get_flavor, hero_spotlight, package_deal_wrapped,
-    pairwise_player_ids, pairwise_wrapped, personal_moments, personal_summary,
-    personal_superlatives, role_breakdown, year_timestamps,
+    HeroRow, MatchDetails, MatchStatsRow, PersonalMoment, PersonalMomentMatch,
+    PersonalSummaryInput, PersonalSummaryWrapped, YearMatchRow, flavor_pool, get_flavor,
+    hero_spotlight, personal_moments, personal_summary, personal_superlatives, role_breakdown,
+    year_timestamps,
 };
 use cama_db::gambling_stats_repository::{
     GamblingOutcome, GamblingStatsRepository, GamblingStatsService,
 };
-use cama_db::package_deal_repository::PackageDealRepository;
-use cama_db::pairings_repository::PairingsRepository;
 use cama_db::pet_repository::PetRepository;
 use cama_db::wrapped_activity::{WrappedActivityRepository, YearWindow};
 use cama_db::wrapped_live::{
@@ -38,6 +35,7 @@ use cama_db::wrapped_live::{
 };
 use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::hero_catalog::hero_name;
+use cama_domain::wrapped_distinct::{DistinctMatch, DistinctPlayer, people_year};
 use chrono::{Datelike, Utc};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tracing::warn;
@@ -53,11 +51,13 @@ use crate::registration::{
 };
 
 mod activity;
+mod distinct;
 
 use activity::{
     ActivityData, ArtSources, activity_cards, card_slide, persona_signals, persona_slide,
     recap_numbers,
 };
+use distinct::{MIN_STORIES, cave_in_slide, distinct_slides, stonks};
 
 const COMPONENT_PREFIX: &str = "wrapped:";
 const STORY_TIMEOUT: Duration = Duration::from_secs(600);
@@ -187,8 +187,6 @@ impl StorySession {
 #[derive(Clone)]
 struct WrappedSources {
     wrapped: WrappedLiveRepository,
-    pairings: PairingsRepository,
-    packages: PackageDealRepository,
     gambling: GamblingStatsService<GamblingStatsRepository>,
     activity: WrappedActivityRepository,
     pets: PetRepository,
@@ -204,8 +202,6 @@ impl WrappedSources {
     fn with_art(path: &Path, art: ArtSources) -> Self {
         Self {
             wrapped: WrappedLiveRepository::new(path),
-            pairings: PairingsRepository::new(path),
-            packages: PackageDealRepository::new(path),
             gambling: GamblingStatsService::new(GamblingStatsRepository::new(path)),
             activity: WrappedActivityRepository::new(path),
             pets: PetRepository::new(path),
@@ -261,53 +257,9 @@ impl WrappedSources {
             .player_year_matches(target_id, guild_id, start_ts, end_ts)
             .map_err(|error| error.to_string())?;
 
-        let pairwise = PairwiseInput {
-            best_teammates: teammate_rows(
-                self.pairings
-                    .get_best_teammates(target_id, Some(guild_id), 3, 3)
-                    .map_err(|error| error.to_string())?,
-            ),
-            most_played_with: teammate_rows(
-                self.pairings
-                    .get_most_played_with(target_id, Some(guild_id), 3, 3)
-                    .map_err(|error| error.to_string())?,
-            ),
-            worst_matchups: opponent_rows(
-                self.pairings
-                    .get_worst_matchups(target_id, Some(guild_id), 3, 1)
-                    .map_err(|error| error.to_string())?,
-            ),
-            best_matchups: opponent_rows(
-                self.pairings
-                    .get_best_matchups(target_id, Some(guild_id), 3, 1)
-                    .map_err(|error| error.to_string())?,
-            ),
-            most_played_against: opponent_rows(
-                self.pairings
-                    .get_most_played_against(target_id, Some(guild_id), 3, 3)
-                    .map_err(|error| error.to_string())?,
-            ),
-        };
-        let pairwise_ids = pairwise_player_ids(&pairwise);
-        let pairwise_names = pairwise_ids
-            .iter()
-            .map(|id| {
-                self.wrapped
-                    .player_name(*id, guild_id)
-                    .map(|name| {
-                        (
-                            *id,
-                            name.unwrap_or_else(|| {
-                                cama_domain::discord_content::UNKNOWN_PLAYER.to_owned()
-                            }),
-                        )
-                    })
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let package_purchases = self
-            .packages
-            .get_purchases_involving_player(Some(guild_id), target_id, start_ts, end_ts)
+        let (year_rows, year_players) = self
+            .wrapped
+            .guild_year_rows(guild_id, start_ts, end_ts)
             .map_err(|error| error.to_string())?;
         let rating_history = self
             .wrapped
@@ -328,6 +280,16 @@ impl WrappedSources {
                 end: end_ts,
             },
         )?;
+        // Gold graphs are read only for the story that draws one.
+        let repository = self.wrapped.clone();
+        let gold: GoldLookup = Box::new(move |match_id| {
+            repository
+                .gold_advantage(guild_id, match_id)
+                .unwrap_or_else(|error| {
+                    warn!(%error, match_id, "failed to fetch Wrapped gold advantage");
+                    None
+                })
+        });
 
         Ok(Some(WrappedRawData {
             summary,
@@ -339,13 +301,14 @@ impl WrappedSources {
             bets_against,
             bankruptcies,
             matches,
-            pairwise,
-            pairwise_names,
-            package_purchases,
+            year_rows,
+            year_players,
             rating_history,
             gamba_stats,
             activity,
             hero_art,
+            art: self.art.clone(),
+            gold,
         }))
     }
 
@@ -372,27 +335,8 @@ impl WrappedSources {
     }
 }
 
-fn teammate_rows(rows: Vec<cama_db::pairings_repository::TeammatePairing>) -> Vec<PairwiseRaw> {
-    rows.into_iter()
-        .map(|row| PairwiseRaw {
-            peer_id: row.teammate_id,
-            games: row.games_together,
-            wins: row.wins_together,
-            win_rate: row.win_rate,
-        })
-        .collect()
-}
-
-fn opponent_rows(rows: Vec<cama_db::pairings_repository::OpponentPairing>) -> Vec<PairwiseRaw> {
-    rows.into_iter()
-        .map(|row| PairwiseRaw {
-            peer_id: row.opponent_id,
-            games: row.games_against,
-            wins: row.wins_against,
-            win_rate: row.win_rate,
-        })
-        .collect()
-}
+/// A match's radiant gold advantage per minute, read on demand.
+type GoldLookup = Box<dyn Fn(i64) -> Option<Vec<f64>> + Send>;
 
 struct WrappedRawData {
     summary: WrappedServerSummary,
@@ -404,14 +348,17 @@ struct WrappedRawData {
     bets_against: Vec<WrappedBetsAgainst>,
     bankruptcies: Vec<WrappedBankruptcy>,
     matches: Vec<WrappedYearMatch>,
-    pairwise: PairwiseInput,
-    pairwise_names: BTreeMap<i64, String>,
-    package_purchases: Vec<cama_db::package_deal_repository::PackageDealPurchase>,
+    /// Every registered player's games in the guild this year.
+    year_rows: Vec<DistinctMatch>,
+    year_players: Vec<DistinctPlayer>,
     rating_history: Vec<WrappedRatingPoint>,
     gamba_stats: Option<cama_db::gambling_stats_repository::GambaStats>,
     activity: ActivityData,
     /// Cached Steam portraits for the player's top heroes, by hero id.
     hero_art: BTreeMap<i64, Vec<u8>>,
+    /// Hero art for the distinct stories, which are chosen later.
+    art: ArtSources,
+    gold: GoldLookup,
 }
 
 #[async_trait]
@@ -511,11 +458,10 @@ impl WrappedHandler {
                 .map_err(response_error);
         };
 
-        let (mut profile_ids, avatar_ids) =
-            prefetch_ids(&raw, self.minimum_games, self.minimum_bets);
-        profile_ids.insert(signed_target);
+        let profile_ids = prefetch_ids(&raw, signed_target, self.minimum_games, self.minimum_bets);
+        // No story card shows an avatar, so none are downloaded.
         let profiles = self
-            .prefetch_profiles(guild_id, profile_ids, avatar_ids)
+            .prefetch_profiles(guild_id, profile_ids, BTreeSet::new())
             .await;
         let minimum_games = self.minimum_games;
         let minimum_bets = self.minimum_bets;
@@ -1063,24 +1009,33 @@ fn number_chapters(slides: &mut [WrappedSlideData]) {
     }
 }
 
+/// Everyone the story might name: the player, award winners, this year's
+/// people, and the side games' rivals.
 fn prefetch_ids(
     raw: &WrappedRawData,
+    target_id: i64,
     minimum_games: usize,
     minimum_bets: i64,
-) -> (BTreeSet<i64>, BTreeSet<i64>) {
-    let award_ids = generate_awards(raw, minimum_games, minimum_bets)
+) -> BTreeSet<i64> {
+    let mut profile_ids = generate_awards(raw, minimum_games, minimum_bets)
         .into_iter()
         .map(|award| award.discord_id)
         .collect::<BTreeSet<_>>();
-    let avatar_ids = pairwise_player_ids(&raw.pairwise)
+    profile_ids.insert(target_id);
+    let people = people_year(&raw.year_rows, target_id);
+    profile_ids.extend(
+        [
+            people.duo,
+            people.cursed_duo,
+            people.nemesis,
+            people.punching_bag,
+        ]
         .into_iter()
-        .collect::<BTreeSet<_>>();
-    let mut profile_ids = award_ids
-        .union(&avatar_ids)
-        .copied()
-        .collect::<BTreeSet<_>>();
+        .flatten()
+        .map(|pair| pair.discord_id),
+    );
     profile_ids.extend(raw.activity.person_ids());
-    (profile_ids, avatar_ids)
+    profile_ids
 }
 
 #[derive(Clone, Debug)]
@@ -1092,8 +1047,8 @@ struct StoryAward {
     flavor: String,
 }
 
-/// Personal moments shown in the story; the rest of the evidence lives in the
-/// detailed stats.
+/// Personal moments a thin deck borrows; the rest of the evidence lives in
+/// the detailed stats.
 const STORY_MOMENTS: usize = 2;
 const MOMENT_THEMES: [WrappedTheme; 4] = [
     WrappedTheme::QueueAlt,
@@ -1102,23 +1057,19 @@ const MOMENT_THEMES: [WrappedTheme; 4] = [
     WrappedTheme::Months,
 ];
 /// The story's running order. The recap always closes it.
-const STORY_ORDER: [&str; 21] = [
+const STORY_ORDER: [&str; 17] = [
     "story_intro",
     "story_games",
     "story_playtime",
     "story_hero",
-    "story_months",
-    "story_identity",
-    "story_moment",
-    "story_teammates",
-    "story_rivals",
-    "story_packages",
-    "chart_rating",
+    "story_distinct",
+    "story_people",
     "chart_gamba",
     "story_gamba",
     "story_dig",
     "story_dig_boss",
     "story_dig_feud",
+    "story_dig_cave_in",
     "story_pet",
     "story_pet_grave",
     "story_mafia",
@@ -1131,13 +1082,20 @@ fn is_detail_page(kind: &str) -> bool {
     kind.starts_with("records_")
         || matches!(
             kind,
-            "awards" | "story_summary" | "server_summary" | "story_lanes" | "chart_rating"
+            "awards"
+                | "story_summary"
+                | "server_summary"
+                | "story_lanes"
+                | "story_months"
+                | "chart_rating"
         )
 }
 
 fn story_position(kind: &str) -> usize {
     match kind {
         "story_mafia_accuser" => story_position("story_mafia_victim"),
+        // A thin deck's borrowed cards stand in for the distinct stories.
+        "story_moment" | "story_superlative" => story_position("story_distinct"),
         _ => STORY_ORDER
             .iter()
             .position(|candidate| *candidate == kind)
@@ -1387,6 +1345,22 @@ fn build_slides(
         .collect::<Vec<_>>();
     let stories = personal_moments(&moment_rows);
     let superlatives = personal_superlatives(&moment_rows);
+    let seed = story_seed(target_id, year);
+    let deck = distinct_slides(
+        &raw.year_rows,
+        &raw.year_players,
+        target_id,
+        minimum_games,
+        &readable_name,
+        &raw.art,
+        &*raw.gold,
+        seed,
+        target_display_name,
+        &year_label,
+    );
+    // Too few distinct stories, as for a player below the minimum: keep the
+    // personal moments and awards so the deck still says something.
+    let thin = deck.stories.len() < MIN_STORIES;
     if let Some(time) = &stories.playtime {
         slides.push(moment_slide(
             time,
@@ -1395,14 +1369,9 @@ fn build_slides(
             &year_label,
         ));
     }
-    if let Some(identity) = &stories.identity {
-        let mut slide = moment_slide(identity, "story_identity", target_display_name, &year_label);
-        slide.layout = WrappedLayout::BigNumber;
-        slide.theme = WrappedTheme::Squad;
-        slides.push(slide);
-    }
+    slides.extend(deck.stories);
     for (index, moment) in stories.moments.iter().enumerate() {
-        let kind = if index < STORY_MOMENTS {
+        let kind = if thin && index < STORY_MOMENTS {
             "story_moment"
         } else {
             "records_moments"
@@ -1412,6 +1381,17 @@ fn build_slides(
         slide.theme = MOMENT_THEMES[index % MOMENT_THEMES.len()];
         slides.push(slide);
     }
+    if thin {
+        for award in &superlatives {
+            slides.push(moment_slide(
+                award,
+                "story_superlative",
+                target_display_name,
+                &year_label,
+            ));
+        }
+    }
+    slides.extend(deck.people);
 
     if raw.matches.len() >= minimum_games {
         for (kind, title, lines, accent) in record_slides(&raw.matches) {
@@ -1430,7 +1410,7 @@ fn build_slides(
 
     let hero = hero_spotlight(target_id, &app_heroes, |id| Some(hero_name(id)));
     if let Some(hero) = &hero {
-        slides.push(hero_slide(
+        let mut slide = hero_slide(
             hero,
             &app_heroes,
             &raw.hero_art,
@@ -1438,7 +1418,12 @@ fn build_slides(
             target_id,
             target_display_name,
             &year_label,
-        ));
+        );
+        // The main hero as a full render cutout, when startup cached one.
+        slide.art_png = top_heroes(&app_heroes, target_id)
+            .first()
+            .and_then(|row| raw.art.hero_render(row.hero_id));
+        slides.push(slide);
     }
 
     let match_dates = raw
@@ -1446,7 +1431,7 @@ fn build_slides(
         .iter()
         .filter_map(|row| row.match_date.as_deref())
         .collect::<Vec<_>>();
-    if let Some(card) = months_card(&match_dates, story_seed(target_id, year)) {
+    if let Some(card) = months_card(&match_dates, seed) {
         slides.push(card_slide(
             card,
             &raw.activity,
@@ -1479,55 +1464,6 @@ fn build_slides(
             }
         }
         slide.accent = [155, 89, 182];
-        slides.push(slide);
-    }
-
-    if let Some(pairwise) = pairwise_wrapped(Some(&raw.pairwise), &raw.pairwise_names) {
-        push_pairwise_slides(&mut slides, &pairwise, profiles, target_display_name);
-    }
-
-    let app_purchases = raw
-        .package_purchases
-        .iter()
-        .enumerate()
-        .map(
-            |(index, purchase)| cama_app::wrapped_story::PackageDealPurchase {
-                id: index as i64 + 1,
-                guild_id: 0,
-                buyer_discord_id: purchase.buyer_discord_id,
-                partner_discord_id: purchase.partner_discord_id,
-                games_committed: purchase.games_committed,
-                games_remaining: 0,
-                jc_spent: purchase.jc_spent,
-                year,
-            },
-        )
-        .collect::<Vec<_>>();
-    if let Some(package) = package_deal_wrapped(target_id, app_purchases.iter()) {
-        let mut slide = base_slide(
-            "story_packages",
-            "Package Deals",
-            target_display_name,
-            &year_label,
-        );
-        slide.headline = "Who you queued with by package deal".to_owned();
-        slide.stat_value = format!("{}", package.times_bought + package.times_bought_on_you);
-        slide.stat_label = "package deals signed".to_owned();
-        slide.theme = WrappedTheme::Squad;
-        slide.lines = vec![
-            format!(
-                "{} bought by you - {} JC",
-                package.times_bought, package.jc_spent
-            ),
-            format!(
-                "{} bought on you - {} JC",
-                package.times_bought_on_you, package.jc_spent_on_you
-            ),
-            format!("{} unique buyers", package.unique_buyers),
-            format!("{} games committed", package.total_games_committed),
-            random_flavor("package_deal"),
-        ];
-        slide.accent = [241, 196, 15];
         slides.push(slide);
     }
 
@@ -1612,13 +1548,18 @@ fn build_slides(
         target_id,
         year,
     ) {
-        slides.push(card_slide(
-            card,
-            &raw.activity,
-            target_display_name,
-            &year_label,
-        ));
+        let mut slide = card_slide(card, &raw.activity, target_display_name, &year_label);
+        if slide.kind == "chart_gamba" {
+            stonks(&mut slide, &raw.activity.gamba, seed);
+        }
+        slides.push(slide);
     }
+    slides.extend(cave_in_slide(
+        &raw.activity.dig,
+        seed,
+        target_display_name,
+        &year_label,
+    ));
 
     let signals = persona_signals(
         personal.as_ref(),
@@ -1630,7 +1571,13 @@ fn build_slides(
         &raw.activity,
         minimum_games,
     );
-    let persona = persona_slide(&signals, &raw.activity, target_display_name, &year_label);
+    let persona = persona_slide(
+        &signals,
+        deck.persona.as_ref(),
+        &raw.activity,
+        target_display_name,
+        &year_label,
+    );
 
     let mut finale = base_slide(
         "story_finale",
@@ -1660,9 +1607,14 @@ fn build_slides(
             ranked
         })
         .collect();
+    let highlights = [deck.best_popoff, deck.best_roast]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     finale.lines = recap_numbers(
         personal.as_ref(),
         stories.playtime.as_ref().map(|time| time.value.as_str()),
+        &highlights,
         &raw.activity,
     );
     if finale.lines.is_empty() {
@@ -1672,24 +1624,6 @@ fn build_slides(
         slides.push(persona);
     }
     slides.sort_by_key(|slide| story_position(&slide.kind));
-    // Space personal awards between chapters, keeping the opening and closing
-    // identity intact. Detail pages must not consume space between reveals.
-    let chapter_positions = slides
-        .iter()
-        .enumerate()
-        .filter(|(_, slide)| {
-            !is_detail_page(&slide.kind)
-                && !matches!(slide.kind.as_str(), "story_intro" | "story_persona")
-        })
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    for (index, award) in superlatives.iter().enumerate() {
-        let slide = moment_slide(award, "story_superlative", target_display_name, &year_label);
-        let chapter =
-            ((index + 1) * chapter_positions.len() / (superlatives.len() + 1)).saturating_sub(1);
-        let position = chapter_positions.get(chapter).copied().unwrap_or(0) + index + 1;
-        slides.insert(position, slide);
-    }
     slides.push(finale);
     slides
 }
@@ -1793,7 +1727,11 @@ fn moment_slide(
     slide.headline = moment.headline.to_owned();
     slide.stat_value = moment.value.clone();
     slide.stat_label = moment.label.to_owned();
-    slide.lines = vec![moment.detail.clone(), moment.coverage.clone()];
+    slide.lines = vec![moment.detail.clone()];
+    // Coverage fine print stays on the detail pages.
+    if is_detail_page(kind) {
+        slide.lines.push(moment.coverage.clone());
+    }
     slide.artwork = match moment.key {
         "wards" | "pings" => WrappedArtwork::Ward,
         "couriers" | "playtime" => WrappedArtwork::Courier,
@@ -1886,124 +1824,6 @@ fn push_personal_slides(
         ));
     }
     slides.push(stats);
-}
-
-fn push_pairwise_slides(
-    slides: &mut Vec<WrappedSlideData>,
-    pairwise: &cama_app::wrapped_story::PairwiseWrapped,
-    profiles: &BTreeMap<i64, WrappedDiscordProfile>,
-    target_name: &str,
-) {
-    let mut teammate_entries = pairwise
-        .best_teammates
-        .iter()
-        .take(3)
-        .enumerate()
-        .map(|(index, entry)| PairwiseSlideEntry {
-            entry,
-            section: if index == 0 {
-                "Highest win rate together"
-            } else {
-                "Teammate"
-            },
-        })
-        .collect::<Vec<_>>();
-    let seen_teammates = teammate_entries
-        .iter()
-        .map(|entry| entry.entry.discord_id)
-        .collect::<BTreeSet<_>>();
-    let teammate_slots = 4_usize.saturating_sub(teammate_entries.len());
-    teammate_entries.extend(
-        pairwise
-            .most_played_with
-            .iter()
-            .filter(|entry| !seen_teammates.contains(&entry.discord_id))
-            .take(teammate_slots)
-            .map(|entry| PairwiseSlideEntry {
-                entry,
-                section: "Most played with",
-            }),
-    );
-    if !teammate_entries.is_empty() {
-        let mut slide = base_slide("story_teammates", "Your teammates", target_name, "All-Time");
-        add_pairwise_entries(&mut slide, &teammate_entries, profiles);
-        slide.accent = [46, 204, 113];
-        slides.push(slide);
-    }
-    let mut rivals = Vec::<PairwiseSlideEntry<'_>>::new();
-    if let Some(entry) = pairwise.nemesis.as_ref() {
-        rivals.push(PairwiseSlideEntry {
-            entry,
-            section: "Lowest win rate against",
-        });
-    }
-    if let Some(entry) = pairwise.punching_bag.as_ref() {
-        rivals.push(PairwiseSlideEntry {
-            entry,
-            section: "Highest win rate against",
-        });
-    }
-    let seen_rivals = rivals
-        .iter()
-        .map(|entry| entry.entry.discord_id)
-        .collect::<BTreeSet<_>>();
-    let rival_slots = 4_usize.saturating_sub(rivals.len());
-    rivals.extend(
-        pairwise
-            .most_played_against
-            .iter()
-            .filter(|entry| !seen_rivals.contains(&entry.discord_id))
-            .take(rival_slots)
-            .map(|entry| PairwiseSlideEntry {
-                entry,
-                section: "Most faced",
-            }),
-    );
-    if !rivals.is_empty() {
-        let mut slide = base_slide("story_rivals", "Your rivals", target_name, "All-Time");
-        add_pairwise_entries(&mut slide, &rivals, profiles);
-        slide.accent = [237, 66, 69];
-        slides.push(slide);
-    }
-}
-
-struct PairwiseSlideEntry<'a> {
-    entry: &'a PairwiseEntry,
-    section: &'static str,
-}
-
-fn add_pairwise_entries(
-    slide: &mut WrappedSlideData,
-    entries: &[PairwiseSlideEntry<'_>],
-    profiles: &BTreeMap<i64, WrappedDiscordProfile>,
-) {
-    for item in entries {
-        let entry = item.entry;
-        let losses = entry.games - entry.wins;
-        let name = profiles
-            .get(&entry.discord_id)
-            .map(|profile| profile.display_name.as_str())
-            .and_then(readable_player_name)
-            .unwrap_or(UNKNOWN_PLAYER);
-        slide.rows.push(WrappedRow::new(
-            name,
-            format!(
-                "{} · {}W {}L in {} games ({:.0}%)",
-                item.section,
-                entry.wins,
-                losses,
-                entry.games,
-                entry.win_rate * 100.0,
-            ),
-        ));
-        slide.avatars.push(WrappedAvatar {
-            discord_id: entry.discord_id,
-            png: profiles
-                .get(&entry.discord_id)
-                .and_then(|profile| profile.avatar_png.clone())
-                .unwrap_or_default(),
-        });
-    }
 }
 
 fn record_slides(

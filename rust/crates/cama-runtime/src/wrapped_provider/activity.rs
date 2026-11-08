@@ -97,8 +97,6 @@ impl ArtSources {
 
     /// The hero's full render when startup has already cached it. Never
     /// downloads; callers fall back to the portrait.
-    // Read by the beat-art selection in the next change.
-    #[allow(dead_code)]
     pub(super) fn hero_render(&self, hero_id: i64) -> Option<Vec<u8>> {
         let url = self.heroes.image_url(hero_id, HeroImageSize::Render)?;
         let path = TriviaImageCache::new(&self.hero_cache)
@@ -419,12 +417,16 @@ pub(super) fn persona_signals(
             },
         });
     }
-    let meals = activity.pets.lifetime_meals();
-    if meals >= 5 {
+    // Pets rank by this year's spending; their feedings are lifetime totals.
+    let pets = &activity.pets;
+    if pets.jc_spent > 0 {
         signals.push(PersonaSignal {
             activity: PersonaActivity::Pets,
-            strength: strength(activity.pets.rank),
-            evidence: (format_grouped(meals), "pet meals served".to_owned()),
+            strength: strength(pets.rank),
+            evidence: (
+                format!("{} JC", format_grouped(pets.jc_spent)),
+                "on pet care".to_owned(),
+            ),
         });
     }
     let events = &activity.gamba.events;
@@ -458,19 +460,38 @@ pub(super) fn persona_signals(
     signals
 }
 
+/// The Cama type: a persona title from the distinct stories when there are
+/// any, over each activity's evidence.
 pub(super) fn persona_slide(
     signals: &[PersonaSignal],
+    persona: Option<&(String, String)>,
     activity: &ActivityData,
     username: &str,
     year_label: &str,
 ) -> Option<WrappedSlideData> {
-    persona_card(signals).map(|card| card_slide(card, activity, username, year_label))
+    let card = persona_card(signals).map(|card| card_slide(card, activity, username, year_label));
+    let Some((title, subtitle)) = persona else {
+        return card;
+    };
+    let mut slide = card.unwrap_or_else(|| {
+        let mut slide = base_slide("story_persona", "", username, year_label);
+        slide.layout = WrappedLayout::Persona;
+        slide.theme = WrappedTheme::Persona;
+        slide
+    });
+    slide.title = "Your Cama type".to_owned();
+    slide.stat_value.clone_from(title);
+    slide.headline.clone_from(subtitle);
+    slide.lines = vec![subtitle.clone()];
+    Some(slide)
 }
 
-/// The share card's "numbers" column: `value|label` pairs, most personal first.
+/// The share card's "numbers" column: `value|label` pairs, most personal
+/// first. `highlights` are the best popoff and roast, already in that form.
 pub(super) fn recap_numbers(
     personal: Option<&PersonalSummaryWrapped>,
     playtime: Option<&str>,
+    highlights: &[String],
     activity: &ActivityData,
 ) -> Vec<String> {
     let mut numbers = Vec::new();
@@ -483,6 +504,7 @@ pub(super) fn recap_numbers(
     if let Some(time) = playtime {
         numbers.push(format!("{time}|in recorded matches"));
     }
+    numbers.extend(highlights.iter().cloned());
     if activity.dig.digs >= 5 {
         let (value, label) = dig_headline_number(&activity.dig);
         numbers.push(format!("{value}|{label}"));
@@ -502,9 +524,11 @@ pub(super) fn recap_numbers(
             format_grouped(activity.mafia.games)
         ));
     }
-    let meals = activity.pets.lifetime_meals();
-    if meals >= 5 {
-        numbers.push(format!("{}|pet meals", format_grouped(meals)));
+    if activity.pets.jc_spent > 0 {
+        numbers.push(format!(
+            "{} JC|on pet care",
+            format_grouped(activity.pets.jc_spent)
+        ));
     }
     numbers.truncate(5);
     numbers

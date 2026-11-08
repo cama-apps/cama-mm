@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::*;
 
 fn stats(
@@ -73,15 +75,6 @@ fn populated_summary_input() -> PersonalSummaryInput {
     }
 }
 
-fn pair(peer_id: i64, games: i64, wins: i64, win_rate: f64) -> PairwiseRaw {
-    PairwiseRaw {
-        peer_id,
-        games,
-        wins,
-        win_rate,
-    }
-}
-
 #[test]
 fn test_returns_string_from_pool() {
     let value = get_flavor("games_played_high", 0, &[]);
@@ -95,6 +88,17 @@ fn test_returns_string_from_pool() {
 #[test]
 fn test_unknown_key_returns_empty() {
     assert_eq!(get_flavor("nonexistent_key_xyz", 0, &[]), "");
+}
+
+#[test]
+fn package_deal_pool_is_gone() {
+    assert!(flavor_pool("package_deal").is_none());
+    assert!(
+        FLAVOR_POOLS
+            .iter()
+            .flat_map(|(_, pool)| pool.iter())
+            .all(|line| !line.to_lowercase().contains("package deal"))
+    );
 }
 
 #[test]
@@ -172,30 +176,6 @@ fn test_personal_summary_wrapped() {
 }
 
 #[test]
-fn test_pairwise_entry() {
-    let entry = PairwiseEntry {
-        discord_id: 1,
-        username: "A".to_owned(),
-        games: 10,
-        wins: 7,
-        win_rate: 0.7,
-    };
-    assert_eq!(entry.win_rate, 0.7);
-}
-
-#[test]
-fn test_no_arg_dataclass_defaults_pairwise_wrapped() {
-    let value = PairwiseWrapped::default();
-    assert!(value.best_teammates.is_empty());
-    assert!(value.nemesis.is_none());
-}
-
-#[test]
-fn test_no_arg_dataclass_defaults_package_deal_wrapped() {
-    assert_eq!(PackageDealWrapped::default(), PackageDealWrapped::default());
-}
-
-#[test]
 fn test_no_arg_dataclass_defaults_hero_spotlight_wrapped() {
     let value = HeroSpotlightWrapped::default();
     assert!(value.top_hero_name.is_empty());
@@ -243,85 +223,6 @@ fn test_returns_summary_with_correct_stats() {
     assert_eq!(summary.unique_heroes, 3);
     assert_eq!(summary.avg_game_duration, 2_400);
     assert!(!summary.flavor_text.is_empty());
-}
-
-#[test]
-fn test_returns_none_without_pairings_repo() {
-    assert!(pairwise_wrapped(None, &BTreeMap::new()).is_none());
-}
-
-#[test]
-fn test_returns_none_when_no_pairwise_data() {
-    assert!(pairwise_wrapped(Some(&PairwiseInput::default()), &BTreeMap::new()).is_none());
-}
-
-fn full_pairwise_input() -> PairwiseInput {
-    PairwiseInput {
-        best_teammates: vec![pair(222, 10, 8, 0.8)],
-        most_played_with: vec![pair(333, 15, 7, 0.47)],
-        worst_matchups: vec![pair(444, 8, 2, 0.25)],
-        best_matchups: vec![pair(555, 6, 5, 0.83)],
-        most_played_against: vec![pair(666, 12, 6, 0.5)],
-    }
-}
-
-#[test]
-fn test_returns_pairwise_data_with_resolved_names() {
-    let input = full_pairwise_input();
-    let names = BTreeMap::from([
-        (222, "Alice".to_owned()),
-        (333, "Bob".to_owned()),
-        (444, "Charlie".to_owned()),
-        (555, "Diana".to_owned()),
-        (666, "Eve".to_owned()),
-    ]);
-    let result = pairwise_wrapped(Some(&input), &names).unwrap();
-    assert_eq!(result.best_teammates[0].username, "Alice");
-    assert_eq!(
-        (
-            result.best_teammates[0].games,
-            result.best_teammates[0].wins
-        ),
-        (10, 8)
-    );
-    assert_eq!(result.most_played_with[0].username, "Bob");
-    assert_eq!(result.nemesis.unwrap().username, "Charlie");
-    assert_eq!(result.punching_bag.unwrap().username, "Diana");
-    assert_eq!(result.most_played_against[0].username, "Eve");
-    assert_eq!(pairwise_player_ids(&input), vec![222, 333, 444, 555, 666]);
-}
-
-#[test]
-fn test_pairwise_names_never_fall_back_to_ids_or_mentions() {
-    let input = full_pairwise_input();
-    let names = BTreeMap::from([(222, "Alice".to_owned()), (333, "<@333>".to_owned())]);
-    let result = pairwise_wrapped(Some(&input), &names).unwrap();
-    assert_eq!(result.best_teammates[0].username, "Alice");
-    assert_eq!(result.most_played_with[0].username, "Unknown player");
-    assert_eq!(result.nemesis.unwrap().username, "Unknown player");
-    assert_eq!(result.punching_bag.unwrap().username, "Unknown player");
-    assert_eq!(result.most_played_against[0].username, "Unknown player");
-}
-
-#[test]
-fn test_pairwise_name_lookup_deduplicates_overlapping_players() {
-    let input = PairwiseInput {
-        best_teammates: vec![pair(222, 10, 8, 0.8)],
-        most_played_with: vec![pair(222, 12, 9, 0.75)],
-        most_played_against: vec![pair(222, 6, 3, 0.5)],
-        ..PairwiseInput::default()
-    };
-    assert_eq!(pairwise_player_ids(&input), vec![222]);
-    let result =
-        pairwise_wrapped(Some(&input), &BTreeMap::from([(222, "Alice".to_owned())])).unwrap();
-    assert!(
-        result
-            .best_teammates
-            .iter()
-            .chain(&result.most_played_with)
-            .chain(&result.most_played_against)
-            .all(|entry| entry.username == "Alice")
-    );
 }
 
 #[test]

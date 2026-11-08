@@ -718,22 +718,6 @@ impl WrappedLiveRepository {
             });
         Ok(series)
     }
-
-    pub fn player_name(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<Option<String>, WrappedLiveRepositoryError> {
-        let connection = open_runtime_connection(&self.path)?;
-        connection
-            .query_row(
-                "SELECT discord_username FROM players WHERE discord_id = ?1 AND guild_id = ?2",
-                params![discord_id, guild_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(Into::into)
-    }
 }
 
 #[cfg(test)]

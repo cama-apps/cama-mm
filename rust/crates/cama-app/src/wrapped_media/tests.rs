@@ -40,7 +40,7 @@ fn gamba_slide() -> WrappedSlideData {
     slide
 }
 
-const ALL_KINDS: [&str; 17] = [
+const ALL_KINDS: [&str; 16] = [
     "story_intro",
     "story_identity",
     "story_superlative",
@@ -55,7 +55,6 @@ const ALL_KINDS: [&str; 17] = [
     "story_lanes",
     "story_teammates",
     "story_rivals",
-    "story_packages",
     "chart_rating",
     "chart_gamba",
 ];
@@ -681,6 +680,47 @@ fn top_heroes_show_portraits_and_keep_slots_for_missing_ones() {
         row.image_png = None;
     }
     assert_eq!(count(&slide), 0);
+}
+
+#[test]
+fn top_heroes_stand_the_main_hero_render_beside_the_heading() {
+    let mut slide = WrappedSlideData::new("story_hero", "Your heroes");
+    slide.stat_label = "12 heroes across 120 recorded picks".to_owned();
+    slide.badge = "#1 by Anti-Mage games (40 players)".to_owned();
+    slide.rows = (1..=5)
+        .map(|index| WrappedRow::new(format!("Hero {index}"), "10 games · 60% wins"))
+        .collect();
+    let green = encode_png(&Canvas::new(256, 144, Rgba::rgb(0, 200, 0)));
+    slide.rows[0].image_png = Some(green);
+    let plain = stage::render_still(&slide);
+    slide.art_png = Some(full_render());
+    let prepared = stage::Stage::new(&slide);
+    let art = prepared.art.as_ref().expect("the full render decodes");
+    assert_eq!(
+        (art.width, art.height),
+        super::artwork::TOP_HERO_FRAME,
+        "one head-and-shoulders tile"
+    );
+    let framed = stage::render_still(&slide);
+    // The tile sits in the top-right corner, clear of the left text column.
+    let changed = |left: usize, top: usize, right: usize, bottom: usize| {
+        (top..bottom)
+            .flat_map(|y| (left..right).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let offset = (y * framed.width + x) * 4;
+                framed.pixels[offset..offset + 4] != plain.pixels[offset..offset + 4]
+            })
+            .count()
+    };
+    assert!(changed(470, 90, 670, 280) > 200 * 190 / 2);
+    // The portrait rows still have room for their pictures.
+    let portrait = framed
+        .pixels
+        .chunks_exact(4)
+        .filter(|pixel| pixel[..3] == [0, 200, 0])
+        .count();
+    assert!(portrait > 128 * 72 * 9 / 10, "{portrait}");
+    assert!(render_wrapped_media(&slide, true).is_ok());
 }
 
 #[test]
