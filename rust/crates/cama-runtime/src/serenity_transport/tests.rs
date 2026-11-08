@@ -1038,6 +1038,54 @@ fn interaction_user_display_name_prefers_nickname_then_global_name_then_username
 }
 
 #[test]
+fn user_option_display_name_prefers_resolved_nickname_then_global_name_then_username() {
+    let user_id = UserId::new(7);
+    let mut user = User::default();
+    user.id = user_id;
+    user.name = "account_handle".to_owned();
+    user.global_name = Some("Global Display Name".to_owned());
+    let mut resolved = CommandDataResolved::default();
+    resolved.users.insert(user_id, user);
+    resolved.members.insert(
+        user_id,
+        serde_json::from_value(serde_json::json!({ "roles": [], "nick": "Server Nickname" }))
+            .expect("resolved partial member"),
+    );
+
+    assert_eq!(
+        resolved_user_display_name(&resolved, user_id).as_deref(),
+        Some("Server Nickname")
+    );
+    resolved
+        .members
+        .get_mut(&user_id)
+        .expect("resolved member")
+        .nick = None;
+    assert_eq!(
+        resolved_user_display_name(&resolved, user_id).as_deref(),
+        Some("Global Display Name")
+    );
+    // Options used outside a guild resolve the user without a member.
+    resolved.members.clear();
+    resolved
+        .users
+        .get_mut(&user_id)
+        .expect("resolved user")
+        .global_name = None;
+    assert_eq!(
+        resolved_user_display_name(&resolved, user_id).as_deref(),
+        Some("account_handle")
+    );
+    resolved
+        .users
+        .get_mut(&user_id)
+        .expect("resolved user")
+        .name = "123456789012345678".to_owned();
+    assert_eq!(resolved_user_display_name(&resolved, user_id), None);
+    assert_eq!(resolved_user_display_name(&resolved, UserId::new(8)), None);
+}
+
+#[test]
 fn nickname_snapshot_includes_only_requested_cached_members() {
     let mut requested = Member::default();
     requested.guild_id = GuildId::new(42);

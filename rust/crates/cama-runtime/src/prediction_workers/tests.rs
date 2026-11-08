@@ -96,6 +96,9 @@ struct MockPredictionDiscord {
     edits: Mutex<Vec<(i64, i64, DiscordMessage)>>,
     summaries: Mutex<Vec<(i64, DiscordMessage)>>,
     failing_threads: Mutex<BTreeSet<i64>>,
+    /// Threads Discord reports deleted: deliveries fail and the status probe
+    /// proves them undeliverable.
+    deleted_threads: Mutex<BTreeSet<i64>>,
     live_guilds: Mutex<Vec<i64>>,
 }
 
@@ -105,12 +108,30 @@ impl Default for MockPredictionDiscord {
             edits: Mutex::new(Vec::new()),
             summaries: Mutex::new(Vec::new()),
             failing_threads: Mutex::new(BTreeSet::new()),
+            deleted_threads: Mutex::new(BTreeSet::new()),
             live_guilds: Mutex::new(vec![GUILD, OTHER_GUILD]),
         }
     }
 }
 
 impl MockPredictionDiscord {
+    fn delivery_fails(&self, thread_id: i64) -> bool {
+        self.failing_threads
+            .lock()
+            .expect("prediction failures lock")
+            .contains(&thread_id)
+            || self
+                .deleted_threads
+                .lock()
+                .expect("prediction deleted-thread lock")
+                .contains(&thread_id)
+    }
+
+    /// Player 77 has a live server nickname; nobody else can be named.
+    fn names() -> GuildPlayerNameDirectory {
+        GuildPlayerNameDirectory::new(Some(BTreeMap::from([(77, "Server Nick".to_owned())])))
+    }
+
     fn edits(&self) -> Vec<(i64, i64, DiscordMessage)> {
         self.edits.lock().expect("prediction edit lock").clone()
     }
@@ -145,12 +166,7 @@ impl PredictionDiscordPort for MockPredictionDiscord {
             .lock()
             .expect("prediction edit lock")
             .push((thread_id, message_id, message));
-        if self
-            .failing_threads
-            .lock()
-            .expect("prediction failures lock")
-            .contains(&thread_id)
-        {
+        if self.delivery_fails(thread_id) {
             Err("mock prediction edit failure".to_owned())
         } else {
             Ok(())
@@ -166,15 +182,36 @@ impl PredictionDiscordPort for MockPredictionDiscord {
             .lock()
             .expect("prediction summary lock")
             .push((thread_id, message));
-        if self
-            .failing_threads
-            .lock()
-            .expect("prediction failures lock")
-            .contains(&thread_id)
-        {
+        if self.delivery_fails(thread_id) {
             Err("mock prediction summary failure".to_owned())
         } else {
             Ok(())
+        }
+    }
+
+    async fn prediction_market_text(&self, _guild_id: i64, text: &str) -> String {
+        let names = Self::names();
+        resolve_and_neutralize_discord_mentions(text, |id| Some(names.resolve(id)), |_| None)
+    }
+
+    async fn prediction_player_names(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> GuildPlayerNameDirectory {
+        Self::names()
+    }
+
+    async fn prediction_thread_status(&self, thread_id: i64) -> DiscordDestinationStatus {
+        if self
+            .deleted_threads
+            .lock()
+            .expect("prediction deleted-thread lock")
+            .contains(&thread_id)
+        {
+            DiscordDestinationStatus::Undeliverable
+        } else {
+            DiscordDestinationStatus::Unknown
         }
     }
 }
@@ -183,6 +220,10 @@ impl PredictionDiscordPort for MockPredictionDiscord {
 struct MockDigestDiscord {
     sends: Mutex<Vec<(u64, DiscordMessage)>>,
     outcomes: Mutex<BTreeMap<u64, VecDeque<Result<(), String>>>>,
+    /// Stored last-seen names for players the live cache cannot name.
+    last_seen: BTreeMap<u64, String>,
+    /// Channels Discord reports deleted or inaccessible.
+    undeliverable_channels: BTreeSet<u64>,
 }
 
 impl MockDigestDiscord {
@@ -325,6 +366,29 @@ impl DiscordTransport for MockDigestDiscord {
             }))
         } else {
             Err("member lookup unavailable".to_owned())
+        }
+    }
+
+    fn last_seen_player_names(
+        &self,
+        _guild_id: u64,
+        user_ids: &[u64],
+    ) -> crate::discord_transport::DiscordGuildMemberRenderNames {
+        user_ids
+            .iter()
+            .filter_map(|user_id| {
+                self.last_seen
+                    .get(user_id)
+                    .map(|name| (*user_id, name.clone()))
+            })
+            .collect()
+    }
+
+    async fn destination_status(&self, channel_id: u64) -> DiscordDestinationStatus {
+        if self.undeliverable_channels.contains(&channel_id) {
+            DiscordDestinationStatus::Undeliverable
+        } else {
+            DiscordDestinationStatus::Unknown
         }
     }
 }
@@ -616,7 +680,10 @@ async fn refresh_discord_failure_after_commit_retries_without_second_refresh() {
         .insert(700 + prediction_id);
     let first = refresh_worker(&fixture.path, failing, NOW, Duration::ZERO);
     let (_shutdown, context) = worker_context();
-    assert!(first.wake_once(&context).await.is_err());
+    first
+        .wake_once(&context)
+        .await
+        .expect("a delivery failure stays pending without failing the wake");
     assert_eq!(fixture.pending_refreshes(), 1);
     assert_eq!(
         PredictionRepository::new(&fixture.path)
@@ -657,7 +724,10 @@ async fn refresh_failure_isolated_per_market() {
         .insert(700 + first_id);
     let worker = refresh_worker(&fixture.path, discord.clone(), NOW, Duration::ZERO);
     let (_shutdown, context) = worker_context();
-    assert!(worker.wake_once(&context).await.is_err());
+    worker
+        .wake_once(&context)
+        .await
+        .expect("a delivery failure stays pending without failing the wake");
     assert_eq!(discord.edits().len(), 2);
     assert_eq!(fixture.pending_refreshes(), 1);
     let pending = PredictionWorkerRepository::new(&fixture.path)
@@ -690,7 +760,10 @@ async fn refresh_trade_summary_is_live_and_not_acknowledged_when_thread_send_fai
         .insert(700 + prediction_id);
     let worker = refresh_worker(&fixture.path, discord.clone(), NOW, Duration::ZERO);
     let (_shutdown, context) = worker_context();
-    assert!(worker.wake_once(&context).await.is_err());
+    worker
+        .wake_once(&context)
+        .await
+        .expect("a delivery failure stays pending without failing the wake");
     assert_eq!(discord.summaries().len(), 1);
     assert!(
         discord.summaries()[0]
@@ -819,7 +892,10 @@ async fn digest_failure_after_queue_retries_and_other_guild_still_posts() {
         Duration::ZERO,
     );
     let (_shutdown, context) = worker_context();
-    assert!(first.wake_once(&context).await.is_err());
+    first
+        .wake_once(&context)
+        .await
+        .expect("a delivery failure stays pending without failing the wake");
     assert_eq!(fixture.pending_digests(), 1);
     assert_eq!(
         discord
@@ -982,4 +1058,161 @@ fn digest_embed_stops_before_discord_rejects_it() {
             .is_some_and(|footer| footer.contains("more")),
         "the skipped markets are reported in the footer"
     );
+}
+
+fn record_trade(fixture: &Fixture, prediction_id: i64, trader: i64) {
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO prediction_trades
+                 (prediction_id,discord_id,action,contracts,jopacoins,vwap_x100,
+                  last_fill_price,trade_time)
+             VALUES (?1,?2,'buy_yes',4,20,5300,53,?3)",
+            params![prediction_id, trader, NOW - 10],
+        )
+        .expect("record trade");
+}
+
+#[tokio::test]
+async fn refresh_publications_to_a_deleted_thread_are_acknowledged_without_failing_the_wake() {
+    let fixture = Fixture::migrated();
+    let prediction_id = fixture.market(GUILD, NOW - 200);
+    record_trade(&fixture, prediction_id, 77);
+    let discord = Arc::new(MockPredictionDiscord::default());
+    discord
+        .deleted_threads
+        .lock()
+        .unwrap()
+        .insert(700 + prediction_id);
+    let worker = refresh_worker(&fixture.path, discord.clone(), NOW, Duration::ZERO);
+    let (_shutdown, context) = worker_context();
+
+    worker
+        .wake_once(&context)
+        .await
+        .expect("an undeliverable thread does not fail the wake");
+    assert_eq!(discord.edits().len(), 1);
+    assert_eq!(discord.summaries().len(), 1);
+    assert_eq!(
+        fixture.pending_refreshes(),
+        0,
+        "the market embed and thread summary are acknowledged undelivered"
+    );
+
+    worker
+        .wake_once(&context)
+        .await
+        .expect("the next wake keeps the normal cadence");
+    assert_eq!(discord.edits().len(), 1, "nothing is redelivered");
+    assert_eq!(discord.summaries().len(), 1, "nothing is redelivered");
+}
+
+#[tokio::test]
+async fn refresh_market_embed_renders_player_names_instead_of_ids_or_mentions() {
+    let fixture = Fixture::migrated();
+    let prediction_id = fixture.market(GUILD, NOW - 200);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE predictions SET question=?1 WHERE prediction_id=?2",
+            params!["Will <@77> beat <@!88>?", prediction_id],
+        )
+        .unwrap();
+    record_trade(&fixture, prediction_id, 77);
+    record_trade(&fixture, prediction_id, 88);
+    let discord = Arc::new(MockPredictionDiscord::default());
+    let worker = refresh_worker(&fixture.path, discord.clone(), NOW, Duration::ZERO);
+    let (_shutdown, context) = worker_context();
+
+    worker.wake_once(&context).await.expect("refresh wake");
+
+    let edits = discord.edits();
+    let embed = &edits[0].2.response.embeds[0];
+    assert_eq!(
+        embed.description.as_deref(),
+        Some("\"Will @Server Nick beat @Unknown player?\"")
+    );
+    let recent = embed
+        .fields
+        .iter()
+        .find(|field| field.name == "Recent")
+        .expect("recent trades field");
+    assert!(
+        recent.value.contains("Server Nick bought"),
+        "{}",
+        recent.value
+    );
+    assert!(
+        recent.value.contains("Unknown player bought"),
+        "{}",
+        recent.value
+    );
+    for rendered in [
+        embed.description.as_deref().unwrap_or_default(),
+        &recent.value,
+    ] {
+        assert!(!rendered.contains("<@"), "{rendered}");
+        assert!(!rendered.contains("77"), "{rendered}");
+        assert!(!rendered.contains("88"), "{rendered}");
+    }
+    assert!(
+        edits[0].2.response.attachments[0]
+            .bytes
+            .starts_with(b"\x89PNG")
+    );
+}
+
+#[tokio::test]
+async fn prediction_text_falls_back_to_last_seen_names_and_never_to_ids() {
+    let discord = MockDigestDiscord {
+        last_seen: BTreeMap::from([(88, "Last Seen Name".to_owned())]),
+        ..MockDigestDiscord::default()
+    };
+
+    let rendered = resolve_prediction_text(
+        &discord,
+        GUILD,
+        "<@77> vs <@!88> vs <@99> for <@&5>",
+        |_| Some("Role".to_owned()),
+    )
+    .await;
+
+    assert_eq!(
+        rendered,
+        "@Server Nick vs @Last Seen Name vs @Unknown player for @Role"
+    );
+    assert_eq!(
+        unresolved_prediction_text("<@77> for <@&5>"),
+        "@Unknown player for @unknown-role"
+    );
+}
+
+#[tokio::test]
+async fn digest_to_an_inaccessible_channel_is_acknowledged_without_failing_the_wake() {
+    let fixture = Fixture::migrated();
+    fixture.market(GUILD, NOW - 200);
+    let discord = Arc::new(MockDigestDiscord {
+        undeliverable_channels: BTreeSet::from([GAMBA as u64]),
+        ..MockDigestDiscord::default()
+    });
+    discord.fail_once(GAMBA as u64);
+    discord.fail_once(GAMBA as u64);
+    let worker = digest_worker(
+        &fixture.path,
+        vec![GambaDestination {
+            guild_id: GUILD,
+            channel_id: GAMBA,
+        }],
+        discord.clone(),
+        NOW,
+        Duration::ZERO,
+    );
+    let (_shutdown, context) = worker_context();
+
+    worker
+        .wake_once(&context)
+        .await
+        .expect("an undeliverable digest does not fail the wake");
+    assert!(!discord.sends().is_empty());
+    assert_eq!(fixture.pending_digests(), 0);
 }

@@ -26,7 +26,7 @@ pub const MANA_AUTO_ASSIGN_WORKER_NAME: &str = "mana_auto_assign";
 pub const MANA_AUTO_ASSIGN_WAKE_INTERVAL: Duration = Duration::from_secs(900);
 
 /// Cold-cache deferrals tolerated per guild before escalating to a warning:
-/// more than this many consecutive empty member lists (over an hour at the
+/// more than this many consecutive incomplete member lists (over an hour at the
 /// 900-second cadence) means the cache is not merely cold — the members intent
 /// may be revoked or chunking broken — and operators should see it.
 const COLD_CACHE_WARN_DEFERRALS: u32 = 4;
@@ -104,14 +104,14 @@ impl ManaAutoAssignWorker {
         Ok(boards)
     }
 
-    /// Assign one guild's daily mana. Returns `Ok(None)` without claiming when
-    /// the guild's member list is empty: every guild has at least one member,
-    /// so an empty list means Serenity's member cache has not warmed up yet,
-    /// and claiming now would permanently bake `is_ash_fan = false` into the
-    /// day's weighting (the claim is idempotent per day and cannot
-    /// self-correct). A later wake retries once members are visible;
+    /// Assign one guild's daily mana. Returns `Ok(None)` without claiming
+    /// unless the guild's whole member list is cached: a cold cache is empty,
+    /// and a partially chunked large guild is missing its offline Ash role
+    /// holders. Claiming then would permanently bake `is_ash_fan = false`
+    /// into the day's weighting (the claim is idempotent per day and cannot
+    /// self-correct). A later wake retries once the list is complete;
     /// deferrals persisting past [`COLD_CACHE_WARN_DEFERRALS`] consecutive
-    /// wakes escalate to a warning so a structurally empty member list
+    /// wakes escalate to a warning so a structurally incomplete member list
     /// (revoked members intent, broken chunking) stays visible to operators.
     async fn assign_guild(
         &self,
@@ -119,8 +119,11 @@ impl ManaAutoAssignWorker {
         today: &str,
         moment: ManaMoment,
     ) -> Result<Option<AssignmentBoard>, String> {
-        let members = self.discord.mana_guild_members(guild_id)?;
-        if members.is_empty() {
+        let members = self
+            .discord
+            .mana_complete_guild_members(guild_id)?
+            .filter(|members| !members.is_empty());
+        let Some(members) = members else {
             let streak = {
                 let mut streaks = self
                     .cold_cache_deferrals
@@ -134,17 +137,18 @@ impl ManaAutoAssignWorker {
                 warn!(
                     guild_id,
                     consecutive_deferrals = streak,
-                    "guild member list has stayed empty for over an hour; daily mana remains \
-                     deferred (members intent revoked or member chunking broken?)"
+                    "guild member list has stayed incomplete for over an hour; daily mana \
+                     remains deferred (members intent revoked or member chunking broken?)"
                 );
             } else {
                 info!(
                     guild_id,
-                    "guild member cache is empty (cold cache); deferring daily mana auto-assign"
+                    "guild member cache is incomplete (cold or still chunking); deferring daily \
+                     mana auto-assign"
                 );
             }
             return Ok(None);
-        }
+        };
         self.cold_cache_deferrals
             .lock()
             .map_err(|_| "cold-cache deferral lock was poisoned".to_owned())?

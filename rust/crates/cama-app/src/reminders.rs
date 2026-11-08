@@ -813,7 +813,6 @@ pub struct ReminderService<S, C> {
     store: S,
     clock: C,
     tasks: BTreeMap<ReminderTaskKey, ScheduledReminder>,
-    cancelled_tasks: BTreeSet<TaskId>,
     next_task_id: u64,
     dig_reconcile_versions: BTreeMap<ReminderTaskKey, u64>,
     dig_reference_times: BTreeMap<ReminderTaskKey, i64>,
@@ -832,7 +831,6 @@ where
             store,
             clock,
             tasks: BTreeMap::new(),
-            cancelled_tasks: BTreeSet::new(),
             next_task_id: 0,
             dig_reconcile_versions: BTreeMap::new(),
             dig_reference_times: BTreeMap::new(),
@@ -865,11 +863,6 @@ where
     #[must_use]
     pub fn task(&self, key: ReminderTaskKey) -> Option<&ScheduledReminder> {
         self.tasks.get(&key)
-    }
-
-    #[must_use]
-    pub fn was_cancelled(&self, task_id: TaskId) -> bool {
-        self.cancelled_tasks.contains(&task_id)
     }
 
     #[must_use]
@@ -1089,7 +1082,6 @@ where
         let mut changed = Vec::with_capacity(old_keys.len() * 2);
         for key in old_keys {
             let task = self.tasks.remove(&key).expect("collected pending task");
-            self.cancelled_tasks.insert(task.id);
             changed.push(key);
             let replacement = ReminderTaskKey {
                 user_id: new,
@@ -1496,9 +1488,7 @@ where
     }
 
     fn cancel_task(&mut self, key: ReminderTaskKey) -> Option<TaskId> {
-        let task_id = self.tasks.remove(&key).map(|task| task.id)?;
-        self.cancelled_tasks.insert(task_id);
-        Some(task_id)
+        self.tasks.remove(&key).map(|task| task.id)
     }
 
     fn cancel_stale_dig_for_recovery(

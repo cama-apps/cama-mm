@@ -317,6 +317,25 @@ impl PredictionDiscordPort for FakeMarketDiscord {
             .push((thread_id, message));
         Ok(())
     }
+
+    async fn prediction_market_text(&self, _guild_id: i64, text: &str) -> String {
+        text.replace("<@100>", "Trader")
+    }
+
+    async fn prediction_player_names(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> crate::discord_transport::GuildPlayerNameDirectory {
+        crate::discord_transport::GuildPlayerNameDirectory::default()
+    }
+
+    async fn prediction_thread_status(
+        &self,
+        _thread_id: i64,
+    ) -> crate::discord_transport::DiscordDestinationStatus {
+        crate::discord_transport::DiscordDestinationStatus::Unknown
+    }
 }
 
 #[derive(Default)]
@@ -791,6 +810,11 @@ async fn create_persists_only_real_surface_ids_and_installs_exact_persistent_but
     assert_eq!(
         market_message.allowed_mentions,
         DiscordAllowedMentions::None
+    );
+    assert_eq!(
+        market_message.response.embeds[0].description.as_deref(),
+        Some("\"Will Trader win this market?\""),
+        "the market text shows display names, not mention markup"
     );
     assert_eq!(market_message.response.components.len(), 1);
     assert_eq!(
