@@ -1,6 +1,7 @@
 use std::sync::Mutex as StdMutex;
 
 use cama_app::wheel::wheel_window_start_at;
+use chrono::DateTime;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -100,10 +101,7 @@ struct FixedClock;
 
 impl ManaClock for FixedClock {
     fn moment(&self) -> Result<ManaMoment, String> {
-        Ok(ManaMoment {
-            now: NOW,
-            la_offset_seconds: -7 * 3_600,
-        })
+        Ok(ManaMoment { now: NOW })
     }
 }
 
@@ -808,12 +806,17 @@ fn wheel_unlock_at(now: i64, last: Option<i64>) -> i64 {
 fn board_component_round_trip_and_pacific_clock_cover_dst_boundaries() {
     assert_eq!(parse_board_component("mana:board:42:3"), Ok((42, 3)));
     assert!(parse_board_component("mana:board:42").is_err());
-    let winter = DateTime::parse_from_rfc3339("2026-01-11T12:00:00Z")
-        .expect("winter timestamp")
-        .timestamp();
-    let summer = DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
-        .expect("summer timestamp")
-        .timestamp();
-    assert_eq!(pacific_offset_seconds(winter), Ok(-8 * 3_600));
-    assert_eq!(pacific_offset_seconds(summer), Ok(-7 * 3_600));
+    let day = |instant: &str| {
+        ManaMoment {
+            now: DateTime::parse_from_rfc3339(instant)
+                .expect("valid instant")
+                .timestamp(),
+        }
+        .today()
+    };
+    // 4 AM PST is 12:00 UTC in winter; 4 AM PDT is 11:00 UTC in summer.
+    assert_eq!(day("2026-01-11T11:59:59Z").as_deref(), Ok("2026-01-10"));
+    assert_eq!(day("2026-01-11T12:00:00Z").as_deref(), Ok("2026-01-11"));
+    assert_eq!(day("2026-07-11T10:59:59Z").as_deref(), Ok("2026-07-10"));
+    assert_eq!(day("2026-07-11T11:00:00Z").as_deref(), Ok("2026-07-11"));
 }

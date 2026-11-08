@@ -52,7 +52,6 @@ use cama_db::soft_avoid_repository::{SoftAvoidPurchaseFailureReason, SoftAvoidRe
 use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::guild_config::GuildConfigStore;
-use chrono::{DateTime, Utc};
 use serde_json::json;
 use thiserror::Error;
 use tracing::{debug, error, warn};
@@ -60,6 +59,7 @@ use tracing::{debug, error, warn};
 use crate::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::ids::signed_id;
+use crate::match_provider::pacific_mana_day;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
@@ -3283,45 +3283,6 @@ fn hostile_totals(
                 absorbed.saturating_add(outcome.absorbed),
             )
         })
-}
-
-fn pacific_mana_day(timestamp: i64) -> Result<String, String> {
-    use chrono::{Datelike, Duration as ChronoDuration, NaiveDate, Timelike, Weekday};
-
-    let utc = DateTime::<Utc>::from_timestamp(timestamp, 0)
-        .ok_or_else(|| format!("invalid Unix timestamp {timestamp}"))?;
-    let year = utc.year();
-    let nth_weekday = |month: u32, weekday: Weekday, occurrence: u32| -> NaiveDate {
-        let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid fixed month");
-        let delta = (7 + i64::from(weekday.num_days_from_sunday())
-            - i64::from(first.weekday().num_days_from_sunday()))
-            % 7;
-        first + ChronoDuration::days(delta + 7 * i64::from(occurrence.saturating_sub(1)))
-    };
-    let start = nth_weekday(3, Weekday::Sun, 2)
-        .and_hms_opt(10, 0, 0)
-        .expect("valid DST transition")
-        .and_utc()
-        .timestamp();
-    let end = nth_weekday(11, Weekday::Sun, 1)
-        .and_hms_opt(9, 0, 0)
-        .expect("valid DST transition")
-        .and_utc()
-        .timestamp();
-    let offset = if (start..end).contains(&timestamp) {
-        -7 * 3_600
-    } else {
-        -8 * 3_600
-    };
-    let local = DateTime::<Utc>::from_timestamp(timestamp.saturating_add(offset), 0)
-        .ok_or_else(|| format!("invalid Pacific timestamp {timestamp}"))?
-        .naive_utc();
-    let effective = if local.hour() < 4 {
-        local - ChronoDuration::days(1)
-    } else {
-        local
-    };
-    Ok(effective.format("%Y-%m-%d").to_string())
 }
 
 async fn respond_ephemeral(

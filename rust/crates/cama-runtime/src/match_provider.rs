@@ -97,7 +97,7 @@ use cama_domain::shuffler::{
     BalancedShuffler, PackageDeal, PoolOptions, ShuffleConstraints, SoftAvoid,
 };
 use cama_domain::team::Team;
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Timelike, Utc, Weekday};
+use chrono::{DateTime, Utc};
 use rusqlite::types::Value as SqlValue;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1372,41 +1372,10 @@ pub(crate) fn match_economy_config(config: &ApplicationConfig) -> EconomyEventCo
     .normalized()
 }
 
+/// The mana day for a timestamp, as a provider-facing `Result`.
 pub(crate) fn pacific_mana_day(timestamp: i64) -> Result<String, String> {
-    let utc = DateTime::<Utc>::from_timestamp(timestamp, 0)
-        .ok_or_else(|| format!("invalid Unix timestamp {timestamp}"))?;
-    let year = utc.year();
-    let nth_weekday = |month: u32, weekday: Weekday, occurrence: u32| -> NaiveDate {
-        let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid fixed month");
-        let delta = (7 + i64::from(weekday.num_days_from_sunday())
-            - i64::from(first.weekday().num_days_from_sunday()))
-            % 7;
-        first + ChronoDuration::days(delta + 7 * i64::from(occurrence.saturating_sub(1)))
-    };
-    let start = nth_weekday(3, Weekday::Sun, 2)
-        .and_hms_opt(10, 0, 0)
-        .expect("valid DST transition")
-        .and_utc()
-        .timestamp();
-    let end = nth_weekday(11, Weekday::Sun, 1)
-        .and_hms_opt(9, 0, 0)
-        .expect("valid DST transition")
-        .and_utc()
-        .timestamp();
-    let offset = if (start..end).contains(&timestamp) {
-        -7 * 3_600
-    } else {
-        -8 * 3_600
-    };
-    let local = DateTime::<Utc>::from_timestamp(timestamp.saturating_add(offset), 0)
-        .ok_or_else(|| format!("invalid Pacific timestamp {timestamp}"))?
-        .naive_utc();
-    let effective = if local.hour() < 4 {
-        local - ChronoDuration::days(1)
-    } else {
-        local
-    };
-    Ok(effective.format("%Y-%m-%d").to_string())
+    cama_domain::mana::mana_day_label_at(timestamp)
+        .ok_or_else(|| format!("invalid Unix timestamp {timestamp}"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -4122,10 +4091,10 @@ impl MatchHandler {
             _ => return Err("winning_team must be 'radiant' or 'dire'.".to_owned()),
         };
         let matches = MatchRepository::new(&self.database_path);
-        if let Some(existing_match_id) = matches
+        let recorded_match_id = matches
             .match_id_for_pending_match(pending.guild_id, pending.pending_match_id)
-            .map_err(|error| error.to_string())?
-        {
+            .map_err(|error| error.to_string())?;
+        if let Some(existing_match_id) = recorded_match_id {
             let existing = matches
                 .get_match(existing_match_id, Some(pending.guild_id))
                 .map_err(|error| error.to_string())?
@@ -4180,12 +4149,37 @@ impl MatchHandler {
             return Err("Could not load every participant's rating state.".to_owned());
         }
         let matches = MatchRepository::new(&self.database_path);
-        let recent = matches
-            .get_player_recent_outcomes_bulk(&participant_ids, Some(pending.guild_id), 20)
-            .map_err(|error| error.to_string())?;
+        // A recovery retry runs after the core committed this match's own
+        // history rows. Read only the outcomes before it so the streak is the
+        // one this match was recorded with, not one game longer.
+        let recent = match recorded_match_id {
+            Some(match_id) => matches.get_player_outcomes_before_match_bulk(
+                &participant_ids,
+                Some(pending.guild_id),
+                match_id,
+                20,
+            ),
+            None => matches.get_player_recent_outcomes_bulk(
+                &participant_ids,
+                Some(pending.guild_id),
+                20,
+            ),
+        }
+        .map_err(|error| error.to_string())?;
         let low_priority = self
             .low_priority
             .get_active_ids(&participant_ids, Some(pending.guild_id))
+            .map_err(|error| error.to_string())?;
+        // The reduced gain follows the same pending-match watermark as win
+        // progress: an assignment made after this match was shuffled did not
+        // shape it, so it neither counts this win nor shrinks its gain.
+        let low_priority_gain_ids = self
+            .low_priority
+            .get_active_ids_for_pending_match(
+                &participant_ids,
+                Some(pending.guild_id),
+                pending.pending_match_id,
+            )
             .map_err(|error| error.to_string())?;
         // Snapshot taxability before `record_match_core_atomic` below drains
         // the low-priority win counters. A player whose deciding win lands in
@@ -4282,7 +4276,7 @@ impl MatchHandler {
             );
             streak_multipliers.insert(*player_id, adjustment.multiplier);
             streak_data.insert(*player_id, adjustment);
-            if low_priority.contains(player_id) {
+            if low_priority_gain_ids.contains(player_id) {
                 gain_multipliers.insert(
                     *player_id,
                     self.openskill.config().low_priority_gain_multiplier,

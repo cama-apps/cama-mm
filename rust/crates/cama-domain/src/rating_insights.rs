@@ -22,9 +22,6 @@ pub const RATING_BUCKETS: [(&str, f64); 8] = [
     ("Herald", 0.0),
 ];
 
-/// OpenSkill sigma at or below this value is considered calibrated.
-pub const OPENSKILL_CALIBRATION_THRESHOLD: f64 = 4.0;
-
 /// One persisted rating-history row.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RatingHistoryEntry {
