@@ -231,6 +231,13 @@ fn entry(status: BossStatus, boss_id: &str) -> BossProgressValue {
     })
 }
 
+fn stored_boss_id(progress: &BossProgress, boundary: i32) -> Option<&str> {
+    match progress.get(&boundary.to_string()) {
+        Some(BossProgressValue::Entry(entry)) => entry.boss_id.as_deref(),
+        _ => None,
+    }
+}
+
 fn wounded_entry(
     status: BossStatus,
     boss_id: &str,
@@ -503,7 +510,7 @@ fn test_ensure_locks_on_first_call() {
         .repository
         .load_tunnel(key())
         .expect("tunnel remains");
-    assert_eq!(locked_boss_id(&stored.boss_progress, 25, 0), Some(first));
+    assert_eq!(stored_boss_id(&stored.boss_progress, 25), Some(first));
     let second = service
         .ensure_boss_locked(key(), 25)
         .expect("second lock succeeds")
@@ -526,10 +533,7 @@ fn test_rolls_when_locked_boss_id_is_empty() {
         .repository
         .load_tunnel(key())
         .expect("tunnel remains");
-    assert_eq!(
-        locked_boss_id(&stored.boss_progress, 25, 0),
-        Some("grothak")
-    );
+    assert_eq!(stored_boss_id(&stored.boss_progress, 25), Some("grothak"));
 }
 
 #[test]
@@ -608,18 +612,37 @@ fn test_reads_new_dict_format() {
 }
 
 #[test]
-fn test_get_locked_boss_id_legacy_fallback() {
-    let progress = BTreeMap::from([(
+fn test_ensure_boss_locked_rolls_for_legacy_progress() {
+    let mut service = test_service(0.99);
+    seed_at_first_boss(&mut service);
+    let mut progress = canonical_boss_progress();
+    progress.insert(
         "25".to_owned(),
         BossProgressValue::Legacy(BossStatus::Active),
-    )]);
-    assert_eq!(locked_boss_id(&progress, 25, 0), Some("grothak"));
+    );
+    set_progress(&mut service, progress, 24);
+    let boss = service
+        .ensure_boss_locked(key(), 25)
+        .expect("legacy progress is locked");
+    assert_eq!(boss.boss_id, "grothak");
+    let stored = service
+        .repository
+        .load_tunnel(key())
+        .expect("tunnel remains");
+    assert_eq!(stored_boss_id(&stored.boss_progress, 25), Some("grothak"));
 }
 
 #[test]
-fn test_get_locked_boss_id_from_new_format() {
-    let progress = BTreeMap::from([("25".to_owned(), entry(BossStatus::Active, "pudge"))]);
-    assert_eq!(locked_boss_id(&progress, 25, 0), Some("pudge"));
+fn test_ensure_boss_locked_keeps_new_format_boss() {
+    let mut service = test_service(0.99);
+    seed_at_first_boss(&mut service);
+    let mut progress = canonical_boss_progress();
+    progress.insert("25".to_owned(), entry(BossStatus::Active, "pudge"));
+    set_progress(&mut service, progress, 24);
+    let boss = service
+        .ensure_boss_locked(key(), 25)
+        .expect("stored lock is kept");
+    assert_eq!(boss.boss_id, "pudge");
 }
 
 #[test]
