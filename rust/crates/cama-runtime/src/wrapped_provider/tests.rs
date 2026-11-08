@@ -746,13 +746,13 @@ async fn personal_story_offers_still_mode_recap_and_separate_details() {
             .filter(|slide| matches!(slide.kind.as_str(), "story_teammates" | "story_rivals"))
             .all(|slide| slide.year_label == "All-Time")
     );
-    assert!(
-        session
-            .slides
-            .iter()
-            .filter(|slide| slide.kind == "chart_rating")
-            .all(|slide| slide.year_label.starts_with("Cama Wrapped "))
-    );
+    // The rating chart is a detail page and only covers the requested year.
+    let rating_chart = session
+        .details
+        .iter()
+        .find(|slide| slide.kind == "chart_rating")
+        .expect("fixture produces a rating chart detail page");
+    assert_eq!(rating_chart.year_label, "Cama Wrapped 2026");
     assert!(
         session
             .slides
