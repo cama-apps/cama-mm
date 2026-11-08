@@ -844,10 +844,54 @@ fn add_artifact(database: &NamedTempFile, artifact_id: &str, is_relic: bool) -> 
 }
 
 #[test]
-fn gift_transfers_one_relic_and_unequips_all_giver_copies() {
+fn gift_transfers_an_unequipped_copy_and_keeps_the_equipped_one() {
+    let database = fixture();
+    let equipped_id = add_artifact(&database, "mole_claws", true);
+    let spare_id = add_artifact(&database, "mole_claws", true);
+    let connection = Connection::open(database.path()).expect("unequip spare");
+    connection
+        .execute(
+            "UPDATE dig_artifacts SET equipped=0 WHERE id=?1",
+            params![spare_id],
+        )
+        .expect("unequip spare copy");
+    let outcome = DigSocialRuntimeRepository::new(database.path())
+        .gift_relic(HELPER, TARGET, GUILD, "mole_claws", NOW)
+        .expect("gift relic");
+    let DigGiftOutcome::Applied(receipt) = outcome else {
+        panic!("unexpected gift outcome: {outcome:?}");
+    };
+    assert_eq!(receipt.source_row_id, spare_id);
+    assert_eq!(receipt.artifact_id, "mole_claws");
+    let kept: Vec<(i64, i64)> = connection
+        .prepare(
+            "SELECT id,equipped FROM dig_artifacts
+             WHERE discord_id=?1 AND guild_id=?2 AND artifact_id='mole_claws'",
+        )
+        .unwrap()
+        .query_map(params![HELPER, GUILD], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(kept, vec![(equipped_id, 1)]);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM dig_artifacts
+                 WHERE id=?1 AND discord_id=?2 AND guild_id=?3 AND equipped=0",
+                params![receipt.receiver_row_id, TARGET, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn gift_of_one_equipped_duplicate_leaves_the_kept_copy_equipped() {
     let database = fixture();
     let source_id = add_artifact(&database, "mole_claws", true);
-    add_artifact(&database, "mole_claws", true);
+    let kept_id = add_artifact(&database, "mole_claws", true);
     let outcome = DigSocialRuntimeRepository::new(database.path())
         .gift_relic(HELPER, TARGET, GUILD, "mole_claws", NOW)
         .expect("gift relic");
@@ -855,18 +899,16 @@ fn gift_transfers_one_relic_and_unequips_all_giver_copies() {
         panic!("unexpected gift outcome: {outcome:?}");
     };
     assert_eq!(receipt.source_row_id, source_id);
-    assert_eq!(receipt.artifact_id, "mole_claws");
     let connection = Connection::open(database.path()).expect("verify gift");
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM dig_artifacts
-                 WHERE discord_id=?1 AND guild_id=?2 AND artifact_id='mole_claws' AND equipped=1",
-                params![HELPER, GUILD],
+                "SELECT equipped FROM dig_artifacts WHERE id=?1 AND discord_id=?2 AND guild_id=?3",
+                params![kept_id, HELPER, GUILD],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-        0
+        1
     );
     assert_eq!(
         connection

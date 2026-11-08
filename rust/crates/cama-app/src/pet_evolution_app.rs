@@ -188,10 +188,6 @@ where
         &self.pet_store
     }
 
-    pub const fn pet_store_mut(&mut self) -> &mut P {
-        &mut self.pet_store
-    }
-
     #[must_use]
     pub const fn clock(&self) -> &C {
         &self.clock

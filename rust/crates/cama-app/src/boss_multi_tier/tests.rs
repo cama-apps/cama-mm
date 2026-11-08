@@ -321,10 +321,20 @@ fn seed_paused(
         forced_no_wager_phase: false,
         echo_applied: false,
         echo_killer_id: None,
+        wager_escrowed: false,
     };
+    // A real pause always follows the boss lock at its boundary.
+    let mut tunnel = service
+        .repository
+        .load_tunnel(key())
+        .expect("test tunnel exists");
+    tunnel
+        .boss_progress
+        .insert("25".to_owned(), entry(BossStatus::Active, boss_id));
+    service.repository.insert_tunnel(key(), tunnel);
     service
         .repository
-        .save_active_duel(key(), duel)
+        .restore_claimed_duel(key(), duel)
         .expect("test duel saves");
 }
 
@@ -1531,4 +1541,79 @@ fn test_free_fight_loss_repair_bill_floors_at_live_balance() {
             .balance,
         0
     );
+}
+
+#[test]
+fn test_paused_wager_is_escrowed_and_a_drained_loss_takes_nothing_more() {
+    let mut service = test_service(0.99);
+    seed_at_first_boss(&mut service);
+    let StartBossDuelOutcome::Paused(paused) = service
+        .start_boss_duel(key(), RiskTier::Cautious, 40)
+        .expect("duel starts")
+    else {
+        panic!("expected the duel to pause on its mechanic");
+    };
+    assert!(paused.wager_escrowed);
+    let mut drained = service.repository.load_tunnel(key()).expect("tunnel");
+    assert_eq!(drained.balance, 460, "the stake is escrowed at the pause");
+    drained.balance = 0;
+    service.repository.insert_tunnel(key(), drained);
+    let resolved = service
+        .resume_boss_duel(key(), paused.pending_prompt.safe_option_index)
+        .expect("resume resolves");
+    assert!(!resolved.won);
+    assert_eq!(resolved.jc_delta, -40);
+    assert_eq!(
+        service
+            .repository
+            .load_tunnel(key())
+            .expect("tunnel")
+            .balance,
+        0
+    );
+}
+
+#[test]
+fn test_halving_curse_is_consumed_with_the_escrow_not_before() {
+    let mut service = test_service(0.99);
+    let mut cursed = tunnel(24, 0, 500);
+    cursed
+        .stinger_curse
+        .insert(CurseKind::HalveNextWager, "grothak");
+    service.repository.insert_tunnel(key(), cursed);
+    let StartBossDuelOutcome::Paused(paused) = service
+        .start_boss_duel(key(), RiskTier::Cautious, 41)
+        .expect("duel starts")
+    else {
+        panic!("expected the duel to pause on its mechanic");
+    };
+    assert_eq!(paused.wager, 21);
+    let after = service.repository.load_tunnel(key()).expect("tunnel");
+    assert_eq!(after.balance, 479);
+    assert!(!after.stinger_curse.contains(CurseKind::HalveNextWager));
+}
+
+#[test]
+fn test_resume_after_leaving_the_boundary_neither_restores_depth_nor_pays() {
+    let mut service = test_service(0.99);
+    seed_at_first_boss(&mut service);
+    let StartBossDuelOutcome::Paused(paused) = service
+        .start_boss_duel(key(), RiskTier::Cautious, 40)
+        .expect("duel starts")
+    else {
+        panic!("expected the duel to pause on its mechanic");
+    };
+    // The tunnel is reset while the prompt is open, as an abandon would.
+    let mut reset = service.repository.load_tunnel(key()).expect("tunnel");
+    reset.depth = 0;
+    reset.boss_progress = canonical_boss_progress();
+    service.repository.insert_tunnel(key(), reset);
+    assert_eq!(
+        service.resume_boss_duel(key(), paused.pending_prompt.safe_option_index),
+        Err(BossServiceError::NotAtBossBoundary)
+    );
+    let after = service.repository.load_tunnel(key()).expect("tunnel");
+    assert_eq!(after.depth, 0, "the depth is not restored");
+    assert_eq!(after.balance, 460, "the escrowed stake is not paid back");
+    assert!(service.repository.audits().is_empty());
 }
