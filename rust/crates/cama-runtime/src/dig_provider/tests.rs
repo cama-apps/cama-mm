@@ -6586,6 +6586,122 @@ async fn boss_default_risk_and_resume_live_path_sends_neon_after_primary_result(
     assert!(primary.is_some_and(|index| neon.is_some_and(|neon| index < neon)));
 }
 
+/// Python's victory embed carried the new junction (`add_route_choice_fields`
+/// plus a `RouteChoiceView`). A live tier-boss kill shows the offered routes
+/// and their buttons on the result, and a button locks the route.
+#[tokio::test]
+async fn tier_boss_victory_opens_the_next_route_junction() {
+    let (database, provider, _discord) = fixture();
+    Connection::open(database.path())
+        .expect("junction boss fixture DB")
+        .execute(
+            "INSERT INTO tunnels
+             (discord_id,guild_id,depth,max_depth,prestige_level,boss_progress,
+              boss_attempts,last_dig_at,luminosity,stat_points,tunnel_name)
+             VALUES (?1,?2,24,24,0,?3,0,0,50,5,'Junction Boss')",
+            params![
+                USER as i64,
+                GUILD as i64,
+                r#"{"25":{"boss_id":"grothak","status":"active","hp_remaining":1,"hp_max":4}}"#,
+            ],
+        )
+        .expect("junction boss tunnel");
+    provider.handler.state.boss_entropy.reseed(1);
+
+    let mut response = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(
+                format!("dig:boss:default:risk:cautious:{USER}:{GUILD}"),
+                Vec::new(),
+            ),
+            response.clone(),
+        )
+        .await
+        .expect("live boss selection path");
+    for _ in 0..4 {
+        let next = response
+            .followups
+            .lock()
+            .expect("boss followups")
+            .iter()
+            .flat_map(|followup| &followup.components)
+            .flat_map(|row| &row.buttons)
+            .find(|button| button.custom_id.starts_with("dig:boss:duel:"))
+            .map(|button| button.custom_id.clone());
+        let Some(next) = next else {
+            break;
+        };
+        response = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(component_request(next, Vec::new()), response.clone())
+            .await
+            .expect("live boss resume path");
+    }
+
+    let followups = response.followups.lock().expect("final followups").clone();
+    assert_eq!(followups.len(), 1, "the junction rides on the boss result");
+    let embed = &followups[0].embeds[0];
+    assert_eq!(embed.title.as_deref(), Some("Stone Junction"));
+    assert!(
+        embed
+            .description
+            .as_deref()
+            .is_some_and(|description| description.starts_with("Victory!"))
+    );
+    let field_names = embed
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(field_names.contains(&"Details"));
+    assert!(field_names.contains(&"The path splits toward Stone"));
+    let buttons = followups[0]
+        .components
+        .iter()
+        .flat_map(|row| &row.buttons)
+        .collect::<Vec<_>>();
+    assert_eq!(buttons.len(), 3);
+    assert!(
+        buttons
+            .iter()
+            .all(|button| button.custom_id.starts_with("dig_route_") && !button.disabled)
+    );
+    for button in &buttons {
+        assert!(field_names.contains(&button.label.as_str()));
+    }
+    let buttons = buttons
+        .into_iter()
+        .map(|button| button.custom_id.clone())
+        .collect::<Vec<_>>();
+
+    let route_responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(buttons[0].clone(), Vec::new()),
+            route_responder.clone(),
+        )
+        .await
+        .expect("route choice component");
+    let route_state: Option<String> = Connection::open(database.path())
+        .expect("route verify DB")
+        .query_row(
+            "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+            |row| row.get(0),
+        )
+        .expect("route state");
+    let status = cama_app::dig_routes::route_status(route_state.as_deref());
+    assert!(!status.choice_required);
+    assert_eq!(
+        status.active_route.map(|route| route.id),
+        buttons[0].rsplit(':').next()
+    );
+}
+
 #[test]
 fn prestige_view_owner_timeout_transition_and_claim_are_exact() {
     let (_database, provider, _discord) = fixture();

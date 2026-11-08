@@ -48,7 +48,7 @@ use cama_app::dig_neon::{
 use cama_app::dig_prestige_runtime::{
     DigPrestigePreview, DigPrestigeRequest, DigPrestigeResult, DigPrestigeRuntimeService,
 };
-use cama_app::dig_routes::{parse_route_state, route_by_id};
+use cama_app::dig_routes::{parse_route_state, route_by_id, route_status};
 use cama_app::dig_runtime::{
     DigAdminMutationOutcome, DigRuntimeBloodPactSnapshot, DigRuntimeConfig,
     DigRuntimeDeliveryContext, DigRuntimeDeliveryPart, DigRuntimeDeliverySnapshot,
@@ -1807,14 +1807,16 @@ impl DigInteractionHandler {
                 })
                 .flatten();
             if let (Some(view), Some(receipt)) = (timed_out, receipt) {
-                let response = route_choice_response(
+                // Disable only the buttons, like Python's `on_timeout`, so a
+                // boss result that carried the junction keeps its embed.
+                let response = InteractionResponse::message("").action_row(route_choice_buttons(
                     &view.choice,
                     &view_nonce,
                     view.owner_id,
                     view.guild_id,
                     &token,
                     true,
-                );
+                ));
                 let _ = responder.edit_message(receipt, response).await;
             }
         });
@@ -2576,12 +2578,12 @@ impl DigInteractionHandler {
         }
         let action_id = result.action_id;
         let neon_victory = boss_resume_neon_victory(&result);
+        let boss_defeated = neon_victory.is_some();
         let next_phase = boss_resume_has_next_phase(&result);
         let media = Arc::clone(&self.state.media);
-        responder
-            .followup(blocking(move || Ok(boss_resume_response(&result, &media))).await?)
-            .await
-            .map_err(|error| error.to_string())?;
+        let response = blocking(move || Ok(boss_resume_response(&result, &media))).await?;
+        self.send_boss_result(user_id, guild_id, boss_defeated, response, &responder)
+            .await?;
         self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
             .await;
         if next_phase {
@@ -3619,14 +3621,13 @@ impl DigInteractionHandler {
                 }
                 let action_id = result.action_id;
                 let neon_victory = boss_start_neon_victory(&result);
+                let boss_defeated = neon_victory.is_some();
                 let media = Arc::clone(&self.state.media);
                 let response =
                     blocking(move || Ok(boss_start_response(&result, user_id, guild_id, &media)))
                         .await?;
-                responder
-                    .followup(response)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                self.send_boss_result(user_id, guild_id, boss_defeated, response, &responder)
+                    .await?;
                 self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
                     .await;
                 return Ok(());
@@ -3697,13 +3698,12 @@ impl DigInteractionHandler {
             }
             let action_id = result.action_id;
             let neon_victory = boss_resume_neon_victory(&result);
+            let boss_defeated = neon_victory.is_some();
             let next_phase = boss_resume_has_next_phase(&result);
             let media = Arc::clone(&self.state.media);
             let response = blocking(move || Ok(boss_resume_response(&result, &media))).await?;
-            responder
-                .followup(response)
-                .await
-                .map_err(|error| error.to_string())?;
+            self.send_boss_result(user_id, guild_id, boss_defeated, response, &responder)
+                .await?;
             self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
                 .await;
             if next_phase {
@@ -3942,14 +3942,13 @@ impl DigInteractionHandler {
         }
         let action_id = result.action_id;
         let neon_victory = boss_start_neon_victory(&result);
+        let boss_defeated = neon_victory.is_some();
         let next_phase = boss_start_has_next_phase(&result);
         let media = Arc::clone(&self.state.media);
         let response =
             blocking(move || Ok(boss_start_response(&result, user_id, guild_id, &media))).await?;
-        responder
-            .followup(response)
-            .await
-            .map_err(|error| error.to_string())?;
+        self.send_boss_result(user_id, guild_id, boss_defeated, response, &responder)
+            .await?;
         self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
             .await;
         if next_phase {
@@ -4313,6 +4312,80 @@ impl DigInteractionHandler {
         Ok(info.and_then(|info| route_choice_from_state(info.route_state.as_deref())))
     }
 
+    /// Send a boss result. After a tier-boss kill the result carries the next
+    /// junction, like Python's `add_route_choice_fields` and the
+    /// `RouteChoiceView` on the victory message; `/dig go` still reopens it.
+    async fn send_boss_result(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        boss_defeated: bool,
+        response: InteractionResponse,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let choice = if boss_defeated {
+            self.pending_route_choice(user_id, guild_id).await
+        } else {
+            None
+        };
+        let Some(choice) = choice else {
+            return responder
+                .followup(response)
+                .await
+                .map_err(|error| error.to_string());
+        };
+        let token = self.create_route_view(user_id, guild_id, choice.clone(), unix_now())?;
+        let response = boss_result_with_route_choice(
+            response,
+            &choice,
+            &self.state.view_nonce,
+            user_id,
+            guild_id,
+            &token,
+        );
+        match responder.followup_with_receipt(response).await {
+            Ok(receipt) => {
+                self.schedule_route_view_timeout(token, Arc::clone(responder), receipt);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.retire_route_view(&token);
+                Err(error.to_string())
+            }
+        }
+    }
+
+    /// The junction a just-committed boss kill left waiting, if any. A failed
+    /// read only drops the attachment; the boss result is still sent.
+    async fn pending_route_choice(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+    ) -> Option<DigRouteChoiceView> {
+        let path = self.state.database_path.clone();
+        let info = blocking(move || {
+            cama_app::dig_runtime::DigRuntimeService::sqlite(&path)
+                .tunnel_info(user_id, guild_id)
+                .map_err(|error| error.to_string())
+        })
+        .await;
+        match info {
+            Ok(info) => info
+                .and_then(|info| info.route_state)
+                .filter(|raw| route_status(Some(raw)).choice_required)
+                .and_then(|raw| route_choice_from_state(Some(&raw))),
+            Err(error) => {
+                warn!(
+                    %error,
+                    user_id,
+                    guild_id,
+                    "dig route choice lookup after boss victory failed"
+                );
+                None
+            }
+        }
+    }
+
     async fn send_route_choice_view(
         &self,
         token: String,
@@ -4322,14 +4395,8 @@ impl DigInteractionHandler {
         current_channel_id: Option<i64>,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        let response = route_choice_response(
-            &choice,
-            &self.state.view_nonce,
-            owner_id,
-            guild_id,
-            &token,
-            false,
-        );
+        let response =
+            route_choice_response(&choice, &self.state.view_nonce, owner_id, guild_id, &token);
         let target = self.public_channel(guild_id, current_channel_id).await?;
         if let Some(target) = target.filter(|target| Some(*target) != current_channel_id)
             && self
@@ -9422,7 +9489,6 @@ fn route_choice_response(
     owner_id: i64,
     guild_id: i64,
     token: &str,
-    disabled: bool,
 ) -> InteractionResponse {
     let mut embed = InteractionEmbed::titled(format!("{} Junction", choice.layer))
         .description(format!(
@@ -9434,25 +9500,68 @@ fn route_choice_response(
         embed = embed.field(&route.name, &route.description, false);
     }
     embed = embed.footer("No rerolls. If this view expires, use /dig go to reopen it.");
-    let buttons = choice
-        .offered_routes
-        .iter()
-        .map(|route| {
-            InteractionButton::new(
-                route_component_id(view_nonce, owner_id, guild_id, token, &route.id),
-                &route.name,
-            )
-            .style(if route.layer.is_none() {
-                InteractionButtonStyle::Secondary
-            } else {
-                InteractionButtonStyle::Primary
-            })
-            .disabled(disabled)
-        })
-        .collect();
     InteractionResponse::message("")
         .embed(embed)
-        .action_row(InteractionActionRow::buttons(buttons))
+        .action_row(route_choice_buttons(
+            choice, view_nonce, owner_id, guild_id, token, false,
+        ))
+}
+
+fn route_choice_buttons(
+    choice: &DigRouteChoiceView,
+    view_nonce: &str,
+    owner_id: i64,
+    guild_id: i64,
+    token: &str,
+    disabled: bool,
+) -> InteractionActionRow {
+    InteractionActionRow::buttons(
+        choice
+            .offered_routes
+            .iter()
+            .map(|route| {
+                InteractionButton::new(
+                    route_component_id(view_nonce, owner_id, guild_id, token, &route.id),
+                    &route.name,
+                )
+                .style(if route.layer.is_none() {
+                    InteractionButtonStyle::Secondary
+                } else {
+                    InteractionButtonStyle::Primary
+                })
+                .disabled(disabled)
+            })
+            .collect(),
+    )
+}
+
+/// Python's `add_route_choice_fields`: the victory embed becomes the junction
+/// and lists the offered routes above that junction's buttons.
+fn boss_result_with_route_choice(
+    mut response: InteractionResponse,
+    choice: &DigRouteChoiceView,
+    view_nonce: &str,
+    owner_id: i64,
+    guild_id: i64,
+    token: &str,
+) -> InteractionResponse {
+    if let Some(embed) = response.embeds.pop() {
+        let mut embed = embed
+            .color(cama_app::dig_view_supplements::layer_color(&choice.layer))
+            .field(
+                format!("The path splits toward {}", choice.layer),
+                "Choose one route below. It remains active until another junction replaces it.",
+                false,
+            );
+        embed.title = Some(format!("{} Junction", choice.layer));
+        for route in &choice.offered_routes {
+            embed = embed.field(&route.name, &route.description, false);
+        }
+        response.embeds.push(embed);
+    }
+    response.action_row(route_choice_buttons(
+        choice, view_nonce, owner_id, guild_id, token, false,
+    ))
 }
 
 fn locked_route_response(layer: &str, route: &DigRouteOfferView) -> InteractionResponse {
