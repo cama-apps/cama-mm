@@ -5,36 +5,25 @@ use serde_json::json;
 
 use super::*;
 
-const GUILD_ID: GuildId = 12_345;
-const DISCORD_ID: DiscordId = 10_001;
-const NOW: i64 = 1_000_000;
-
-type TestService = TunnelService<InMemoryTunnelRepository, SplitMixEntropy>;
-
-fn key() -> TunnelKey {
-    TunnelKey::new(DISCORD_ID, GUILD_ID)
+/// Deterministic SplitMix64 entropy for the corruption policy.
+struct SplitMixEntropy {
+    state: u64,
 }
 
-fn tunnel_with_balance(balance: i64) -> Tunnel {
-    let mut tunnel = Tunnel::new(key(), "Amber Descent", balance);
-    tunnel.last_dig_at = Some(NOW);
-    tunnel
-}
-
-fn ready_tunnel(prestige_level: i32) -> Tunnel {
-    let mut tunnel = tunnel_with_balance(500);
-    tunnel.prestige_level = prestige_level;
-    tunnel.depth = i64::from(PINNACLE_DEPTH);
-    for boundary in BOSS_BOUNDARIES.into_iter().chain([PINNACLE_DEPTH]) {
-        tunnel.boss_progress.insert(boundary, BossStatus::Defeated);
+impl SplitMixEntropy {
+    const fn new(seed: u64) -> Self {
+        Self { state: seed }
     }
-    tunnel
 }
 
-fn service_with(tunnel: Tunnel) -> TestService {
-    let mut repository = InMemoryTunnelRepository::default();
-    repository.insert(tunnel);
-    TunnelService::new(repository, SplitMixEntropy::new(42))
+impl EntropyPort for SplitMixEntropy {
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut value = self.state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
 }
 
 fn number_effect(effects: &BTreeMap<&'static str, EffectValue>, key: &str) -> Option<f64> {
@@ -47,158 +36,6 @@ fn assert_near(left: f64, right: f64) {
 
 fn perk_ids(perks: &[&str]) -> Vec<String> {
     perks.iter().map(|perk| (*perk).to_owned()).collect()
-}
-
-#[test]
-fn test_prestige_resets_depth() {
-    let original = ready_tunnel(0);
-    let mut service = service_with(original.clone());
-    service.repository_mut().fail_next_atomic();
-    assert!(service.prestige(key(), "advance_boost", None, NOW).is_err());
-    assert_eq!(service.repository().tunnel(key()), Some(&original));
-
-    let result = service
-        .prestige(key(), "advance_boost", None, NOW)
-        .expect("prestige should commit");
-    assert_eq!(result.prestige_level, 1);
-    assert_eq!(service.repository().tunnel(key()).unwrap().depth, 0);
-    assert_eq!(service.repository().actions().len(), 1);
-}
-
-#[test]
-fn test_prestige_keeps_pickaxe() {
-    let mut tunnel = ready_tunnel(0);
-    tunnel.pickaxe_tier = 1;
-    let mut service = service_with(tunnel);
-    service.prestige(key(), "advance_boost", None, NOW).unwrap();
-    assert_eq!(service.repository().tunnel(key()).unwrap().pickaxe_tier, 1);
-}
-
-#[test]
-fn test_prestige_adds_perk() {
-    let mut service = service_with(ready_tunnel(0));
-    let result = service.prestige(key(), "advance_boost", None, NOW).unwrap();
-    assert_eq!(result.perk_chosen, "advance_boost");
-    assert_eq!(
-        service.repository().tunnel(key()).unwrap().prestige_perks,
-        ["advance_boost"]
-    );
-}
-
-#[test]
-fn test_prestige_max() {
-    let mut service = service_with(ready_tunnel(MAX_PRESTIGE));
-    assert_eq!(
-        service.prestige(key(), "advance_boost", None, NOW),
-        Err(TunnelError::MaximumPrestige)
-    );
-}
-
-#[test]
-fn test_prestige_can_advance_beyond_p10_10_11() {
-    let mut service = service_with(ready_tunnel(10));
-    let result = service.prestige(key(), "advance_boost", None, NOW).unwrap();
-    assert_eq!(result.prestige_level, 11);
-    assert_eq!(
-        service.repository().tunnel(key()).unwrap().prestige_level,
-        11
-    );
-}
-
-#[test]
-fn test_prestige_can_advance_beyond_p10_19_20() {
-    let mut service = service_with(ready_tunnel(19));
-    let result = service.prestige(key(), "advance_boost", None, NOW).unwrap();
-    assert_eq!(result.prestige_level, 20);
-    assert_eq!(
-        service.repository().tunnel(key()).unwrap().prestige_level,
-        20
-    );
-}
-
-#[test]
-fn test_prestige_bosses_respawn() {
-    let mut service = service_with(ready_tunnel(0));
-    service.prestige(key(), "advance_boost", None, NOW).unwrap();
-    let progress = &service.repository().tunnel(key()).unwrap().boss_progress;
-    assert_eq!(progress.len(), BOSS_BOUNDARIES.len());
-    assert!(
-        progress
-            .values()
-            .all(|status| *status == BossStatus::Active)
-    );
-    assert!(!progress.contains_key(&PINNACLE_DEPTH));
-}
-
-#[test]
-fn test_prestige_grants_jc_and_relic() {
-    assert_eq!(PRESTIGE_RELICS.len(), 24);
-    assert!(PRESTIGE_RELICS.iter().all(|relic| {
-        matches!(relic.rarity, RelicRarity::Rare | RelicRarity::Legendary)
-            && !TROPHY_RELIC_IDS.contains(&relic.id)
-    }));
-    let mut service = service_with(ready_tunnel(0));
-    let balance_before = service.repository().tunnel(key()).unwrap().balance;
-    let artifacts_before = service.repository().tunnel(key()).unwrap().artifacts.len();
-    let result = service.prestige(key(), "advance_boost", None, NOW).unwrap();
-    let tunnel = service.repository().tunnel(key()).unwrap();
-    assert_eq!(
-        tunnel.balance - balance_before,
-        scale_positive_dig_jc(1_000)
-    );
-    assert_eq!(result.prestige_grant.jc, scale_positive_dig_jc(1_000));
-    assert!(matches!(
-        result.prestige_grant.relic.unwrap().rarity,
-        RelicRarity::Rare | RelicRarity::Legendary
-    ));
-    assert_eq!(tunnel.artifacts.len(), artifacts_before + 1);
-}
-
-#[test]
-fn test_abandon_refunds_10_percent() {
-    let mut tunnel = tunnel_with_balance(100);
-    tunnel.depth = 50;
-    let mut service = service_with(tunnel);
-    let before = service.repository().tunnel(key()).unwrap().balance;
-    let result = service.abandon(key(), NOW).unwrap();
-    let after = service.repository().tunnel(key()).unwrap().balance;
-    assert_eq!(result.refund, scale_positive_dig_jc(5));
-    assert_eq!(after - before, scale_positive_dig_jc(5));
-    assert_eq!(
-        service.repository().actions()[0].kind,
-        TunnelActionKind::Abandon
-    );
-}
-
-#[test]
-fn test_abandon_min_depth_10() {
-    let mut tunnel = tunnel_with_balance(100);
-    tunnel.depth = 5;
-    let mut service = service_with(tunnel);
-    assert_eq!(
-        service.abandon(key(), NOW),
-        Err(TunnelError::TooShallowToAbandon)
-    );
-    assert_eq!(service.repository().tunnel(key()).unwrap().depth, 5);
-}
-
-#[test]
-fn test_abandon_keeps_prestige() {
-    let mut tunnel = tunnel_with_balance(100);
-    tunnel.depth = 50;
-    tunnel.prestige_level = 2;
-    let mut service = service_with(tunnel);
-    service.abandon(key(), NOW).unwrap();
-    let tunnel = service.repository().tunnel(key()).unwrap();
-    assert_eq!(tunnel.prestige_level, 2);
-    assert_eq!(tunnel.depth, 0);
-}
-
-#[test]
-fn test_get_flex_data_returns_tunnel_name() {
-    let service = service_with(tunnel_with_balance(100));
-    let result = service.flex_data(key()).unwrap();
-    assert_eq!(result.tunnel_name, "Amber Descent");
 }
 
 #[test]
@@ -574,16 +411,6 @@ fn test_crowns_for_all_levels() {
 }
 
 #[test]
-fn test_get_tunnel_returns_int_types() {
-    let service = service_with(tunnel_with_balance(200));
-    let tunnel = service.repository().tunnel(key()).unwrap();
-    let depth: i64 = tunnel.depth;
-    let luminosity: i64 = tunnel.luminosity;
-    let last_dig_at: i64 = tunnel.last_dig_at.unwrap();
-    assert_eq!((depth, luminosity, last_dig_at), (0, 100, NOW));
-}
-
-#[test]
 fn test_get_ascension_effects_level_0() {
     assert!(ascension_effects(0).is_empty());
 }
@@ -698,23 +525,6 @@ fn test_corruption_weird_ratio() {
 }
 
 #[test]
-fn test_roll_mutations_returns_forced_and_choices() {
-    let mut entropy = SplitMixEntropy::new(42);
-    let rolled = roll_mutations_for_prestige(None, &mut entropy);
-    assert!(!rolled.forced.id.is_empty());
-    assert!(!rolled.forced.name.is_empty());
-    assert!(!rolled.forced.description.is_empty());
-    assert_eq!(rolled.choices.len(), 3);
-    assert!(
-        rolled
-            .choices
-            .iter()
-            .all(|choice| !choice.id.is_empty() && !choice.name.is_empty())
-    );
-    assert!(!rolled.choices.contains(&rolled.forced));
-}
-
-#[test]
 fn test_apply_mutation_effects() {
     let effects = mutation_effects(&[
         mutation_by_id("cave_in_loot").unwrap(),
@@ -751,143 +561,4 @@ fn test_get_mutations_parses_json() {
     let result = mutations_from_json(Some(r#"[{"id": "cave_in_loot", "name": "Lucky Rubble"}]"#));
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].id, "cave_in_loot");
-}
-
-#[test]
-fn test_mutations_stored_in_prestige() {
-    let mut service = service_with(ready_tunnel(7));
-    let result = service.prestige(key(), "advance_boost", None, NOW).unwrap();
-    assert_eq!(result.prestige_level, 8);
-    assert!(result.mutations.is_some());
-    assert!(
-        !service
-            .repository()
-            .tunnel(key())
-            .unwrap()
-            .mutations
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_calculate_run_score_basic() {
-    let mut tunnel = tunnel_with_balance(100);
-    tunnel.depth = 100;
-    tunnel.boss_progress.insert(25, BossStatus::Defeated);
-    tunnel.boss_progress.insert(50, BossStatus::Defeated);
-    tunnel.current_run_jc = 40;
-    tunnel.current_run_events = 5;
-    assert_eq!(calculate_run_score(&tunnel), 270);
-}
-
-#[test]
-fn test_score_multiplier_at_higher_prestige() {
-    let mut tunnel = tunnel_with_balance(100);
-    tunnel.depth = 50;
-    tunnel.boss_progress.insert(25, BossStatus::Defeated);
-    tunnel.current_run_jc = 20;
-    tunnel.current_run_artifacts = 1;
-    tunnel.current_run_events = 3;
-    let score_p0 = calculate_run_score(&tunnel);
-    tunnel.prestige_level = 5;
-    let score_p5 = calculate_run_score(&tunnel);
-    assert!(score_p5 > score_p0);
-    assert_eq!(score_p5, (score_p0 as f64 * 1.5) as i64);
-}
-
-#[test]
-fn test_score_multiplier_p10_includes_ascension() {
-    let mut tunnel = tunnel_with_balance(100);
-    tunnel.depth = 100;
-    tunnel.prestige_level = 10;
-    assert_eq!(calculate_run_score(&tunnel), 400);
-}
-
-#[test]
-fn test_prestige_stores_run_score() {
-    let mut tunnel = ready_tunnel(0);
-    tunnel.current_run_jc = 50;
-    tunnel.current_run_artifacts = 3;
-    tunnel.current_run_events = 10;
-    let mut service = service_with(tunnel);
-    let result = service.prestige(key(), "advance_boost", None, NOW).unwrap();
-    assert!(result.run_score > 0);
-    assert!(result.best_run_score > 0);
-    let tunnel = service.repository().tunnel(key()).unwrap();
-    assert_eq!(tunnel.current_run_jc, 0);
-    assert_eq!(tunnel.current_run_artifacts, 0);
-    assert_eq!(tunnel.current_run_events, 0);
-}
-
-#[test]
-fn test_hall_of_fame_empty_guild() {
-    let service = TunnelService::new(
-        InMemoryTunnelRepository::default(),
-        SplitMixEntropy::new(42),
-    );
-    assert!(service.hall_of_fame(GUILD_ID).is_empty());
-}
-
-#[test]
-fn test_hall_of_fame_after_prestige() {
-    let mut tunnel = ready_tunnel(0);
-    tunnel.current_run_jc = 30;
-    tunnel.current_run_artifacts = 2;
-    tunnel.current_run_events = 5;
-    let mut service = service_with(tunnel);
-    service.prestige(key(), "advance_boost", None, NOW).unwrap();
-    let entries = service.hall_of_fame(GUILD_ID);
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].discord_id, DISCORD_ID);
-    assert!(entries[0].best_run_score > 0);
-}
-
-#[test]
-fn test_same_attempt_rolls_the_same_mutations() {
-    let seed = prestige_mutation_seed(4_242, 99, 8);
-    let mut first_entropy = SplitMixEntropy::new(1);
-    let mut second_entropy = SplitMixEntropy::new(999);
-    let first = roll_mutations_for_prestige(Some(&seed), &mut first_entropy);
-    let second = roll_mutations_for_prestige(Some(&seed), &mut second_entropy);
-    assert_eq!(first, second);
-}
-
-#[test]
-fn test_different_players_and_levels_roll_independently() {
-    let seeds = [
-        prestige_mutation_seed(4_242, 99, 8),
-        prestige_mutation_seed(4_243, 99, 8),
-        prestige_mutation_seed(4_242, 99, 9),
-    ];
-    let rolls: Vec<_> = seeds
-        .iter()
-        .map(|seed| {
-            let mut entropy = SplitMixEntropy::new(0);
-            let rolled = roll_mutations_for_prestige(Some(seed), &mut entropy);
-            (
-                rolled.forced.id,
-                rolled
-                    .choices
-                    .iter()
-                    .map(|choice| choice.id)
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect();
-    assert_ne!(rolls[0], rolls[1]);
-    assert_ne!(rolls[0], rolls[2]);
-    assert_ne!(rolls[1], rolls[2]);
-}
-
-#[test]
-fn test_unseeded_roll_still_varies() {
-    let mut entropy = SplitMixEntropy::new(7);
-    let mut forced_ids = Vec::new();
-    for _ in 0..40 {
-        let forced = roll_mutations_for_prestige(None, &mut entropy).forced.id;
-        if !forced_ids.contains(&forced) {
-            forced_ids.push(forced);
-        }
-    }
-    assert!(forced_ids.len() > 1);
 }

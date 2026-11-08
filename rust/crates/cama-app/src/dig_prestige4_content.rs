@@ -1,12 +1,11 @@
 //! Typed, Discord-neutral prestige-four Dig content policy.
 //!
 //! Existing boss, phase, mechanic, stinger, and artifact catalogs are reused
-//! where they already match Python. This module adds signature-trophy metadata
-//! and the ordinary artifact-roll staging used by Dig.
+//! where they already match Python. This module adds the ordinary artifact-roll
+//! staging used by Dig.
 
 use std::collections::BTreeSet;
 
-use crate::dig_bosses::{BossDefinition, boss_by_id};
 use crate::dig_loot::{ArtifactDef, Rarity, artifact_catalog};
 use crate::dig_service::layer_at;
 
@@ -32,14 +31,6 @@ pub const PRESTIGE_FOUR_MECHANIC_IDS: [&str; 6] = [
 #[cfg(test)]
 pub const PRESTIGE_FOUR_STINGER_IDS: [&str; 3] =
     ["blightcoil_venom", "rimebound_soulchill", "spineback_rend"];
-pub const TROPHY_RELIC_IDS: [&str; 6] = [
-    "weeping_fang",
-    "runebitten_shard",
-    "aching_spine",
-    "listening_shard",
-    "hateborn_ember",
-    "deaths_door",
-];
 #[cfg(test)]
 pub const PRESTIGE_FOUR_TROPHY_IDS: [&str; 5] = [
     "weeping_fang",
@@ -74,28 +65,6 @@ pub fn artifact_rate_modifier(
         * ascension_factor.max(0.0)
         * (1.0 + treasure_bonus).max(0.0)
         * post_pinnacle_factor.max(0.0)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PrestigeBossContent {
-    pub boss: &'static BossDefinition,
-    pub trophy_relic_id: &'static str,
-}
-
-#[must_use]
-pub fn prestige_boss_content(boss_id: &str) -> Option<PrestigeBossContent> {
-    let trophy_relic_id = match boss_id {
-        "blightcoil" => "weeping_fang",
-        "rimebound_king" => "runebitten_shard",
-        "spineback" => "aching_spine",
-        "xalatath" => "listening_shard",
-        "lilith" => "hateborn_ember",
-        _ => return None,
-    };
-    Some(PrestigeBossContent {
-        boss: boss_by_id(boss_id)?,
-        trophy_relic_id,
-    })
 }
 
 #[must_use]

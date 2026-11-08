@@ -4113,6 +4113,65 @@ fn catastrophic_cave_in_keeps_the_route_loss_cap_above_the_milestone() {
     );
 }
 
+/// Python's `_effective_cave_in_loss_cap` keeps the tightest active cap; a
+/// looser weather cap never overrides a stricter route cap.
+#[test]
+fn cave_in_loss_caps_combine_to_the_tightest_one() {
+    assert_eq!(
+        super::effective_cave_in_loss_cap(&[Some(9), Some(6)]),
+        Some(6)
+    );
+    assert_eq!(
+        super::effective_cave_in_loss_cap(&[Some(3), Some(7)]),
+        Some(3)
+    );
+    assert_eq!(super::effective_cave_in_loss_cap(&[None, Some(7)]), Some(7));
+    assert_eq!(super::effective_cave_in_loss_cap(&[None, None]), None);
+}
+
+/// Python passed the reinforcement cap into the catastrophic rollback, so a
+/// reinforced tunnel loses at most 8 blocks instead of falling to the
+/// milestone.
+#[test]
+fn reinforcement_bounds_a_live_catastrophic_rollback() {
+    let actor = 62_391;
+    let guild = 62_392;
+    let seed_now = 1_900_096_000;
+    let roll = find_live_cave_roll(actor, guild, seed_now, 240, Some(true), None, false);
+    let database = fast_migrated_database();
+    seed_live_cave_in_fixture(
+        &database, actor, guild, seed_now, roll.now, 240, 100, None, None,
+    );
+    Connection::open(database.path())
+        .expect("reinforced cave connection")
+        .execute(
+            "UPDATE tunnels SET reinforced_until=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![roll.now + 3_600, actor, guild],
+        )
+        .expect("seed reinforcement");
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: roll.now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("reinforced catastrophic Dig");
+    let detail = serde_json::from_str::<Value>(
+        outcome
+            .cave_in_detail
+            .as_deref()
+            .expect("reinforced cave detail"),
+    )
+    .expect("reinforced cave detail JSON");
+    assert!(outcome.success && outcome.cave_in);
+    assert_eq!(detail["type"], "catastrophic");
+    assert_eq!(detail["depth_after"], 232);
+    assert_eq!(outcome.depth_after, 232);
+}
+
 /// Run one non-cave Dig at depth 180 under neutral weather, optionally on a
 /// selected route.
 fn live_route_plain_dig(route_id: Option<&str>, now: i64) -> super::DigRuntimeOutcome {
@@ -4148,6 +4207,151 @@ fn live_route_plain_dig(route_id: Option<&str>, now: i64) -> super::DigRuntimeOu
         .expect("route plain Dig");
     assert!(outcome.success && !outcome.cave_in, "{:?}", outcome.error);
     outcome
+}
+
+/// Python's `choose_route`: one guarded claim per junction, audited once with
+/// the route and layer. Repeating the chosen route is a no-op, another route
+/// is refused, and another guild's junction for the same signed ID is untouched.
+#[test]
+fn route_choice_is_claimed_once_audited_and_guild_scoped() {
+    let (actor, guild, other_guild, now) = (-62_395, 62_396, -62_397, 1_900_097_000);
+    let pending = r#"{"end_depth": 50, "layer": "Stone", "offered": ["shored_passage", "old_supports", "fossil_seam"], "selected": null, "start_depth": 25}"#;
+    let database = fast_migrated_database();
+    for guild_id in [guild, other_guild] {
+        seed_live_runtime_tunnel(&database, actor, guild_id, now, 30, 1, Some(now - 7_200));
+        seed_route_state(&database, actor, guild_id, pending);
+    }
+    let runtime = DigRuntimeService::sqlite(database.path());
+
+    let chosen = runtime
+        .choose_route(actor, guild, "old_supports", now)
+        .expect("route choice");
+    assert!(chosen.success, "{:?}", chosen.error);
+    assert!(chosen.action_id.is_some());
+    let repeated = runtime
+        .choose_route(actor, guild, "old_supports", now + 1)
+        .expect("repeated route choice");
+    assert!(repeated.success && repeated.action_id.is_none());
+    let switched = runtime
+        .choose_route(actor, guild, "fossil_seam", now + 2)
+        .expect("switched route choice");
+    assert!(!switched.success);
+    assert!(
+        switched
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("already locked in"))
+    );
+    let unoffered = runtime
+        .choose_route(actor, other_guild, "lava_tube", now + 3)
+        .expect("unoffered route choice");
+    assert!(!unoffered.success);
+
+    let connection = Connection::open(database.path()).expect("route choice verify DB");
+    let details = connection
+        .prepare(
+            "SELECT detail FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='route_choice'",
+        )
+        .expect("route choice audit query")
+        .query_map(params![actor, guild], |row| row.get::<_, String>(0))
+        .expect("route choice audit rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("route choice audit details");
+    assert_eq!(details.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&details[0]).expect("route choice detail JSON"),
+        serde_json::json!({"route_id": "old_supports", "layer": "Stone"})
+    );
+    let route_state = |guild_id: i64| {
+        connection
+            .query_row(
+                "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+                params![actor, guild_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .expect("route state")
+    };
+    assert_eq!(
+        crate::dig_routes::route_status(route_state(guild).as_deref())
+            .active_route
+            .map(|route| route.id),
+        Some("old_supports")
+    );
+    assert_eq!(route_state(other_guild).as_deref(), Some(pending));
+}
+
+/// Run one non-cave Dig at `depth` under neutral weather, with or without an
+/// equipped Pathfinder's Spur, and return its advance.
+fn live_pathfinder_advance(depth: i64, equipped: bool, now: i64) -> i64 {
+    let (actor, guild) = (62_393, 62_394);
+    let database = fast_migrated_database();
+    seed_live_runtime_tunnel(&database, actor, guild, now, depth, 1, Some(now - 7_200));
+    let connection = Connection::open(database.path()).expect("pathfinder connection");
+    if equipped {
+        connection
+            .execute(
+                "INSERT INTO dig_artifacts(
+                     discord_id,guild_id,artifact_id,found_at,is_relic,equipped
+                 ) VALUES(?1,?2,'pathfinders_spur',?3,1,1)",
+                params![actor, guild, now - 5_000],
+            )
+            .expect("equip Pathfinder's Spur");
+    }
+    let today = game_date_for_timestamp(now as f64).expect("pathfinder Dig date");
+    connection
+        .execute(
+            "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES (?1,?2,?3,'pathfinder_neutral'),
+                        (?1,?2,'Dirt','pathfinder_neutral_other')",
+            params![guild, today, super::layer_at(depth).name],
+        )
+        .expect("seed neutral pathfinder weather");
+    drop(connection);
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("pathfinder Dig");
+    assert!(outcome.success && !outcome.cave_in, "{:?}", outcome.error);
+    outcome.advance
+}
+
+/// Python's `dig_core_mixin`: Pathfinder's Spur adds one advance per Dig that
+/// starts at depth 150 or deeper.
+#[test]
+fn pathfinders_spur_adds_one_advance_from_depth_150() {
+    let (actor, guild) = (62_393, 62_394);
+    let now = (1_900_096_000..1_900_196_000)
+        .find(|candidate| {
+            let mut entropy = SeededLootEntropy::new(super::seed_for(
+                DigRuntimeRequest {
+                    discord_id: actor,
+                    guild_id: guild,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                },
+                0,
+            ));
+            entropy.unit() > 0.8
+        })
+        .expect("deterministic non-cave seed");
+    for depth in [150, 180] {
+        assert_eq!(
+            live_pathfinder_advance(depth, true, now),
+            live_pathfinder_advance(depth, false, now) + 1,
+            "depth {depth}"
+        );
+    }
+    assert_eq!(
+        live_pathfinder_advance(140, true, now),
+        live_pathfinder_advance(140, false, now)
+    );
 }
 
 #[test]

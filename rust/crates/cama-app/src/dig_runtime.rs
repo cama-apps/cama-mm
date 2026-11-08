@@ -727,8 +727,9 @@ pub use delivery::{
 use effects::{
     CaveInLootRng, DigPrestige4Entropy, LootRelicEntropy, active_buff_effects,
     active_curse_effects, active_curse_summary, active_pickaxe_tier, apply_mana_base_yield,
-    bonus_basis_points, event_chance_factor, gear_effects, luminosity_jc_multiplier,
-    multiplier_millionths, proportional_mana_yield_tax, weather_code, weather_effects,
+    bonus_basis_points, effective_cave_in_loss_cap, event_chance_factor, gear_effects,
+    luminosity_jc_multiplier, multiplier_millionths, proportional_mana_yield_tax, weather_code,
+    weather_effects,
 };
 pub use effects::{DigWeatherEffects, apply_cave_in_gear_ticks, catastrophic_cave_in_depth};
 pub use store::SqliteDigRuntimeStore;
@@ -2218,6 +2219,8 @@ where
                 + curse_fx.advance_bonus
                 + gear_fx.advance_bonus
                 + buff_fx.advance_bonus
+                // Pathfinder's Spur: +1 advance in the deep layers.
+                + i64::from(depth_before >= 150 && relics.contains("pathfinders_spur"))
                 + if layer_at(depth_before).name == "The Hollow" {
                     perk_fx.get("hollow_advance_bonus").copied().unwrap_or(0.0) as i64
                 } else {
@@ -2254,11 +2257,12 @@ where
             } else {
                 weather_fx.cave_in_loss_bonus + route_number("cave_in_loss_bonus") as i64
             },
-            cave_in_loss_cap: weather_fx.cave_in_loss_cap.or_else(|| {
+            cave_in_loss_cap: effective_cave_in_loss_cap(&[
+                weather_fx.cave_in_loss_cap,
                 active_route
                     .and_then(|route| route_effect(route, "cave_in_loss_cap"))
-                    .map(|value| value as i64)
-            }),
+                    .map(|value| value as i64),
+            ]),
             cave_in_policy: Some(cave_in_policy),
             defer_event_selection: true,
         };
@@ -2572,10 +2576,14 @@ where
             } else if catastrophic {
                 catastrophic_cave_in = true;
                 let insured = tunnel.insured_until.is_some_and(|expires| expires > now);
+                // Reinforcement also bounds the catastrophic rollback.
                 let (depth_after, insurance_saved, total_loss) = catastrophic_cave_in_depth(
                     depth_before,
                     cave_loss,
-                    loot_modifiers.cave_in_loss_cap,
+                    effective_cave_in_loss_cap(&[
+                        loot_modifiers.cave_in_loss_cap,
+                        (tunnel.reinforced_until > now).then_some(8),
+                    ]),
                     insured,
                 );
                 catastrophic_depth_after = Some(depth_after);
@@ -3426,6 +3434,11 @@ where
                 action_id: None,
             });
         }
+        let detail = serde_json::json!({
+            "route_id": route_id,
+            "layer": selected_state.as_ref().map(|state| state.layer.as_str()),
+        })
+        .to_string();
         let mut next = snapshot.clone();
         next.tunnel
             .as_mut()
@@ -3445,7 +3458,7 @@ where
             low_priority_tax: 0,
             balance_cost: 0,
             action_type: "route_choice".to_owned(),
-            detail: serde_json::json!({"route_id": route_id}).to_string(),
+            detail,
             now,
         })?;
         Ok(DigRuntimeActionResult {

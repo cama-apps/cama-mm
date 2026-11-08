@@ -34,8 +34,6 @@ pub mod dig_miner_runtime;
 pub mod dig_prestige_runtime;
 #[path = "../../cama-db/src/dig_relic_recycling.rs"]
 pub mod dig_relic_recycling;
-#[path = "../../cama-db/src/dig_routes.rs"]
-pub mod dig_routes_repository;
 #[path = "../../cama-db/src/dig_runtime_store.rs"]
 pub mod dig_runtime_store;
 #[path = "../../cama-db/src/dig_social_runtime.rs"]
