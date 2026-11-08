@@ -2,7 +2,8 @@
 
 /// Convert a Discord snowflake into the signed form SQLite stores.
 pub fn signed_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("Discord {label} ID exceeds SQLite INTEGER"))
+    cama_domain::guild::signed_discord_id(value)
+        .map_err(|_| format!("Discord {label} ID exceeds SQLite INTEGER"))
 }
 
 /// Convert a stored signed ID back into a Discord snowflake.
