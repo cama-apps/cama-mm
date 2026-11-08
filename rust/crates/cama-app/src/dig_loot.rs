@@ -12,10 +12,9 @@ use std::sync::OnceLock;
 
 use cama_domain::dig_gear::{Artifact, unique_gear};
 use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
-use cama_domain::embed_safety::EmbedModel;
 use serde::{Deserialize, Serialize};
 
-use crate::dig_service::{AutoBuyStatus, layer_at};
+use crate::dig_service::layer_at;
 use crate::dig_tunnels::EntropyPort;
 
 pub const MAX_INVENTORY_SLOTS: usize = 8;
@@ -3405,124 +3404,6 @@ pub enum ArtifactSelector<'a> {
 pub struct AutocompleteChoice {
     pub label: String,
     pub value: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InteractionReply {
-    pub content: String,
-    pub ephemeral: bool,
-}
-
-#[must_use]
-pub fn gift_command_reply(result: &LootActionResult, receiver_name: &str) -> InteractionReply {
-    if !result.success {
-        return InteractionReply {
-            content: result
-                .error
-                .clone()
-                .unwrap_or_else(|| "Gift failed.".to_owned()),
-            ephemeral: true,
-        };
-    }
-    InteractionReply {
-        content: format!(
-            "You gifted **{}** to **{receiver_name}**.",
-            result.artifact_name.unwrap_or("Unknown Relic")
-        ),
-        ephemeral: false,
-    }
-}
-
-#[must_use]
-pub fn trap_command_reply(result: &LootActionResult) -> InteractionReply {
-    if result.success {
-        InteractionReply {
-            content: "Trap set.".to_owned(),
-            ephemeral: false,
-        }
-    } else {
-        InteractionReply {
-            content: result
-                .error
-                .clone()
-                .unwrap_or_else(|| "No trap placed.".to_owned()),
-            ephemeral: true,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AutoPurchasePresentation {
-    pub item: String,
-    pub status: AutoBuyStatus,
-    pub cost: i64,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DigPresentation {
-    pub depth: i64,
-    pub advance: i64,
-    pub pet_dig_bonus: i64,
-    pub pet_name: Option<String>,
-    pub streak_charm_used: bool,
-    pub auto_purchases: Vec<AutoPurchasePresentation>,
-    pub cave_in: bool,
-    pub broken_gear: Vec<String>,
-}
-
-#[must_use]
-pub fn build_dig_embed(result: &DigPresentation) -> EmbedModel {
-    let mut embed = EmbedModel {
-        title: Some("Tunnel Progress".to_owned()),
-        ..EmbedModel::default()
-    };
-    let mut progress = format!(
-        "Advanced **{}** blocks to depth **{}**.",
-        result.advance, result.depth
-    );
-    if result.pet_dig_bonus > 0 {
-        progress.push_str(&format!(
-            "\n{} excavated +{} blocks.",
-            result.pet_name.as_deref().unwrap_or("Your pet"),
-            result.pet_dig_bonus
-        ));
-    }
-    embed.add_field("Progress", progress, false);
-    if result.streak_charm_used {
-        embed.add_field(
-            "Streak Charm",
-            "Saved your daily streak after one missed day.",
-            false,
-        );
-    }
-    if !result.auto_purchases.is_empty() {
-        let lines = result
-            .auto_purchases
-            .iter()
-            .map(|purchase| match purchase.status {
-                AutoBuyStatus::Purchased => format!("{}: bought", purchase.item),
-                AutoBuyStatus::QueuedFromInventory => {
-                    format!("{}: queued from inventory", purchase.item)
-                }
-                AutoBuyStatus::SkippedInsufficientBalance => {
-                    format!("{}: skipped (need {} JC)", purchase.item, purchase.cost)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        embed.add_field("Auto-Buy", lines, false);
-    }
-    if result.cave_in && !result.broken_gear.is_empty() {
-        embed.add_field(
-            "Gear Broken",
-            format!(
-                "{} — effects disabled until repaired. Use **Repair All**.",
-                result.broken_gear.join(", ")
-            ),
-            false,
-        );
-    }
-    embed
 }
 
 #[cfg(test)]

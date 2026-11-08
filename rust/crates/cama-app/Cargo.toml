@@ -28,6 +28,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+cama-app-dig = { path = "../cama-app-dig", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

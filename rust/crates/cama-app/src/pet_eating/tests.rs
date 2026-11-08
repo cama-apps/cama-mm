@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 
-use cama_domain::pet::{ADULT_AGE_SECONDS, PetBase};
+use cama_domain::pet::{ADULT_AGE_SECONDS, PetBase, PetStatus};
 
 use super::*;
 
@@ -510,7 +510,7 @@ fn test_confirmation_buttons_match_the_choice() {
 
 #[test]
 fn test_eaten_death_copy_is_not_a_starvation_message() {
-    let copy = build_death_copy(&eaten_pet());
+    let copy = crate::pet_commands::build_death_embed(&eaten_pet(), "Owner").description;
 
     assert!(copy.contains("was eaten"));
     assert!(!copy.contains("starved"));
@@ -531,7 +531,9 @@ fn test_petless_memorial_uses_eaten_copy() {
         evolution_hint: None,
     };
 
-    let copy = build_petless_memorial_copy(&status, "Owner", 50);
+    let died_at = eaten_pet().died_at.expect("eaten pet died");
+    let copy =
+        crate::pet_commands::build_status_embed(&status, 20, died_at, "Owner", 50).description;
 
     assert!(copy.contains("was eaten"));
     assert!(!copy.contains("died of eaten"));

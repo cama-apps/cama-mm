@@ -503,3 +503,101 @@ mod missing_dig_weapon_backfill_migration {
         assert_eq!(rows[0].acquired_at, 100);
     }
 }
+
+/// The `relic_loadout_cap_and_streak` data step: miners above the six-relic
+/// cap keep their six newest equipped relics and get the trim notice; nobody
+/// at or under the cap is touched, and no inventory row is deleted.
+mod relic_loadout_cap_migration {
+    use super::*;
+
+    fn equipped_ids(connection: &Connection, discord_id: i64) -> Vec<i64> {
+        let mut statement = connection
+            .prepare(
+                "SELECT id FROM dig_artifacts
+                  WHERE discord_id=?1 AND guild_id=0 AND equipped=1
+                  ORDER BY id",
+            )
+            .expect("prepare equipped relics");
+        statement
+            .query_map([discord_id], |row| row.get(0))
+            .expect("query equipped relics")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect equipped relics")
+    }
+
+    fn trim_notice(connection: &Connection, discord_id: i64) -> i64 {
+        connection
+            .query_row(
+                "SELECT relic_trim_notice FROM tunnels WHERE discord_id=?1 AND guild_id=0",
+                [discord_id],
+                |row| row.get(0),
+            )
+            .expect("trim notice")
+    }
+
+    #[test]
+    fn test_trims_only_over_cap_loadouts_to_the_six_newest() {
+        let file = NamedTempFile::new().expect("relic cap fixture");
+        crate::schema_manager::initialize_or_migrate(file.path()).expect("initialize schema");
+        let connection = Connection::open(file.path()).expect("open fixture");
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("match runtime SQLite compatibility mode");
+        let mut ids = BTreeMap::new();
+        for (discord_id, relics) in [(1_i64, 8_i64), (2, 3), (5, 6)] {
+            connection
+                .execute(
+                    "INSERT INTO tunnels (discord_id, guild_id) VALUES (?1, 0)",
+                    [discord_id],
+                )
+                .expect("insert tunnel");
+            let rows = (0..relics)
+                .map(|found_at| {
+                    connection
+                        .execute(
+                            "INSERT INTO dig_artifacts
+                                (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+                             VALUES (?1,0,?2,?3,1,1)",
+                            params![discord_id, format!("relic_{found_at}"), found_at],
+                        )
+                        .expect("insert equipped relic");
+                    connection.last_insert_rowid()
+                })
+                .collect::<Vec<_>>();
+            ids.insert(discord_id, rows);
+        }
+        connection
+            .execute(
+                "DELETE FROM schema_migrations WHERE name='relic_loadout_cap_and_streak'",
+                [],
+            )
+            .expect("mark the relic cap migration pending");
+        drop(connection);
+
+        let report =
+            crate::schema_manager::initialize_or_migrate(file.path()).expect("rerun migration");
+
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "relic_loadout_cap_and_streak")
+        );
+        let connection = Connection::open(file.path()).expect("reopen fixture");
+        assert_eq!(equipped_ids(&connection, 1), ids[&1][2..]);
+        assert_eq!(trim_notice(&connection, 1), 1);
+        assert_eq!(equipped_ids(&connection, 2), ids[&2]);
+        assert_eq!(trim_notice(&connection, 2), 0);
+        assert_eq!(equipped_ids(&connection, 5), ids[&5]);
+        assert_eq!(trim_notice(&connection, 5), 0);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM dig_artifacts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("artifact count"),
+            17,
+            "trimming unequips; it never deletes inventory"
+        );
+    }
+}

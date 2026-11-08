@@ -51,43 +51,6 @@ pub const fn layer_color(layer: &str) -> u32 {
 }
 
 #[must_use]
-pub fn build_route_choice_embed(choice: &RouteChoice) -> RouteEmbed {
-    RouteEmbed {
-        title: format!("{} Junction", choice.layer),
-        description: format!(
-            "The way forward splits after depth **{}**. Choose the passage that will shape your descent toward **{}**.\n\nThis choice remains active until another junction replaces it.",
-            choice.start_depth, choice.end_depth
-        ),
-        color: layer_color(&choice.layer),
-        fields: choice
-            .offered_routes
-            .iter()
-            .map(|route| RouteField {
-                name: route.name.clone(),
-                value: route.description.clone(),
-            })
-            .collect(),
-        footer: "No rerolls. If this view expires, use /dig go to reopen it.".to_owned(),
-    }
-}
-
-pub fn add_route_choice_fields(embed: &mut RouteEmbed, choice: &RouteChoice) {
-    embed.title = format!("{} Junction", choice.layer);
-    embed.color = layer_color(&choice.layer);
-    embed.fields.push(RouteField {
-        name: format!("The path splits toward {}", choice.layer),
-        value: "Choose one route below. It remains active until another junction replaces it."
-            .to_owned(),
-    });
-    embed
-        .fields
-        .extend(choice.offered_routes.iter().map(|route| RouteField {
-            name: route.name.clone(),
-            value: route.description.clone(),
-        }));
-}
-
-#[must_use]
 pub fn build_locked_route_embed(route: &RouteOffer, layer: &str) -> RouteEmbed {
     RouteEmbed {
         title: format!("Route Locked: {}", route.name),
@@ -363,34 +326,6 @@ mod tests {
                 .find(|route| route.id == route_id)
                 .ok_or_else(|| "unknown route".to_owned())
         }
-    }
-
-    #[test]
-    fn test_route_choice_embed_and_boss_fields_show_the_persisted_offer() {
-        let choice = route_choice();
-        let embed = build_route_choice_embed(&choice);
-        assert_eq!(embed.title, "Stone Junction");
-        assert!(embed.description.contains("25") && embed.description.contains("50"));
-        assert_eq!(
-            embed
-                .fields
-                .iter()
-                .map(|field| field.name.as_str())
-                .collect::<Vec<_>>(),
-            ["Shored Passage", "Old Supports", "Fossil Seam"]
-        );
-        assert!(!embed.footer.contains("next guardian falls"));
-
-        let mut boss_embed = RouteEmbed {
-            title: "Boss Fight Result".to_owned(),
-            color: 0x00_ff_00,
-            ..RouteEmbed::default()
-        };
-        add_route_choice_fields(&mut boss_embed, &choice);
-        assert_eq!(boss_embed.title, "Stone Junction");
-        assert_eq!(boss_embed.color, layer_color("Stone"));
-        assert_eq!(boss_embed.fields.len(), 4);
-        assert!(!boss_embed.fields[0].value.contains("next guardian falls"));
     }
 
     #[test]

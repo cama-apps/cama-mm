@@ -24,8 +24,6 @@ pub mod dig_routes;
 pub mod dig_service;
 #[path = "../../cama-app/src/dig_sweep_fixes.rs"]
 pub mod dig_sweep_fixes;
-#[path = "../../cama-app/src/dig_tunnel_encounters.rs"]
-pub mod dig_tunnel_encounters;
 #[path = "../../cama-app/src/dig_tunnel_naming.rs"]
 pub mod dig_tunnel_naming;
 #[path = "../../cama-app/src/dig_tunnels.rs"]

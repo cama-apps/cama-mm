@@ -583,8 +583,11 @@ fn audit_event_positive_reward_scales_once_and_is_auditable() {
 
 #[test]
 fn audit_slow_drip_has_catalog_metadata_but_no_crediting_service() {
-    let relic = cama_app::dig_relic_rework::relic_content("slow_drip").expect("slow drip relic");
-    assert_eq!(relic.definition.id, "slow_drip");
+    let relic = cama_app::dig_loot::artifact_catalog()
+        .into_iter()
+        .find(|artifact| artifact.id == "slow_drip")
+        .expect("slow drip relic");
+    assert!(relic.is_relic);
     assert_eq!(scale_positive_dig_jc(20), 13);
     // The migrated DB exposes claim rows, but no admitted app service joins
     // elapsed-minute accrual, economy adjustment, claim insertion, and wallet

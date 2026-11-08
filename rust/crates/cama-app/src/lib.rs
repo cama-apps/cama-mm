@@ -8,7 +8,7 @@
 pub use cama_app_dig::{
     dig_assets, dig_bosses, dig_event_threats, dig_gear_runtime, dig_inventory, dig_loot,
     dig_new_events, dig_quest_policy, dig_relic_rework, dig_routes, dig_service, dig_sweep_fixes,
-    dig_tunnel_encounters, dig_tunnel_naming, dig_tunnels, dig_view_supplements,
+    dig_tunnel_naming, dig_tunnels, dig_view_supplements,
 };
 pub use cama_app_gameplay::{
     duel, mafia_service, mana_effects_service, mana_service, manashop_rework, pet, pet_assets,

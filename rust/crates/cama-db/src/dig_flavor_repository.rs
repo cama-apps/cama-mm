@@ -569,55 +569,6 @@ impl DigFlavorRepository {
         load_personality(&connection, discord_id, guild_id)
     }
 
-    pub fn upsert_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        personality: &DigFlavorPersonality,
-        now_unix: i64,
-    ) -> Result<(), DigFlavorRepositoryError> {
-        let histogram = serde_json::to_string(&personality.choice_histogram).map_err(|error| {
-            DigFlavorRepositoryError::InvalidJson {
-                field: "choice_histogram",
-                message: error.to_string(),
-            }
-        })?;
-        let notable = serde_json::to_string(&personality.notable_moments).map_err(|error| {
-            DigFlavorRepositoryError::InvalidJson {
-                field: "notable_moments",
-                message: error.to_string(),
-            }
-        })?;
-        let social = serde_json::to_string(&personality.social_summary).map_err(|error| {
-            DigFlavorRepositoryError::InvalidJson {
-                field: "social_summary",
-                message: error.to_string(),
-            }
-        })?;
-        self.connection()?.execute(
-            "INSERT INTO dig_personality(
-               discord_id,guild_id,play_style,choice_histogram,notable_moments,
-               summary,social_summary,updated_at
-             ) VALUES(?1,?2,?3,?4,?5,'',?6,?7)
-             ON CONFLICT(discord_id,guild_id) DO UPDATE SET
-               play_style=excluded.play_style,
-               choice_histogram=excluded.choice_histogram,
-               notable_moments=excluded.notable_moments,
-               social_summary=excluded.social_summary,
-               updated_at=excluded.updated_at",
-            params![
-                discord_id,
-                guild_id,
-                personality.play_style,
-                histogram,
-                notable,
-                social,
-                now_unix,
-            ],
-        )?;
-        Ok(())
-    }
-
     /// Atomically claim and apply the optional flavor nudge for one committed
     /// Dig action. Returns `true` only when this call changed the wallet.
     pub fn claim_flavor_bonus(

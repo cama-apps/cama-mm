@@ -231,6 +231,30 @@ fn entry(status: BossStatus, boss_id: &str) -> BossProgressValue {
     })
 }
 
+/// Fight through the live start path, answering a mechanic prompt with its
+/// safe option.
+fn fight_through_prompt(service: &mut TestService, risk: RiskTier, wager: i64) -> ResolvedFight {
+    match service
+        .start_boss_duel(key(), risk, wager)
+        .expect("duel starts")
+    {
+        StartBossDuelOutcome::Resolved(resolved) => resolved,
+        StartBossDuelOutcome::Paused(paused) => {
+            let safe = mechanic_by_id(&paused.mechanic_id)
+                .expect("registered mechanic")
+                .safe_option_index;
+            service.resume_boss_duel(key(), safe).expect("duel resumes")
+        }
+    }
+}
+
+fn stored_boss_id(progress: &BossProgress, boundary: i32) -> Option<&str> {
+    match progress.get(&boundary.to_string()) {
+        Some(BossProgressValue::Entry(entry)) => entry.boss_id.as_deref(),
+        _ => None,
+    }
+}
+
 fn wounded_entry(
     status: BossStatus,
     boss_id: &str,
@@ -503,7 +527,7 @@ fn test_ensure_locks_on_first_call() {
         .repository
         .load_tunnel(key())
         .expect("tunnel remains");
-    assert_eq!(locked_boss_id(&stored.boss_progress, 25, 0), Some(first));
+    assert_eq!(stored_boss_id(&stored.boss_progress, 25), Some(first));
     let second = service
         .ensure_boss_locked(key(), 25)
         .expect("second lock succeeds")
@@ -526,10 +550,7 @@ fn test_rolls_when_locked_boss_id_is_empty() {
         .repository
         .load_tunnel(key())
         .expect("tunnel remains");
-    assert_eq!(
-        locked_boss_id(&stored.boss_progress, 25, 0),
-        Some("grothak")
-    );
+    assert_eq!(stored_boss_id(&stored.boss_progress, 25), Some("grothak"));
 }
 
 #[test]
@@ -608,18 +629,37 @@ fn test_reads_new_dict_format() {
 }
 
 #[test]
-fn test_get_locked_boss_id_legacy_fallback() {
-    let progress = BTreeMap::from([(
+fn test_ensure_boss_locked_rolls_for_legacy_progress() {
+    let mut service = test_service(0.99);
+    seed_at_first_boss(&mut service);
+    let mut progress = canonical_boss_progress();
+    progress.insert(
         "25".to_owned(),
         BossProgressValue::Legacy(BossStatus::Active),
-    )]);
-    assert_eq!(locked_boss_id(&progress, 25, 0), Some("grothak"));
+    );
+    set_progress(&mut service, progress, 24);
+    let boss = service
+        .ensure_boss_locked(key(), 25)
+        .expect("legacy progress is locked");
+    assert_eq!(boss.boss_id, "grothak");
+    let stored = service
+        .repository
+        .load_tunnel(key())
+        .expect("tunnel remains");
+    assert_eq!(stored_boss_id(&stored.boss_progress, 25), Some("grothak"));
 }
 
 #[test]
-fn test_get_locked_boss_id_from_new_format() {
-    let progress = BTreeMap::from([("25".to_owned(), entry(BossStatus::Active, "pudge"))]);
-    assert_eq!(locked_boss_id(&progress, 25, 0), Some("pudge"));
+fn test_ensure_boss_locked_keeps_new_format_boss() {
+    let mut service = test_service(0.99);
+    seed_at_first_boss(&mut service);
+    let mut progress = canonical_boss_progress();
+    progress.insert("25".to_owned(), entry(BossStatus::Active, "pudge"));
+    set_progress(&mut service, progress, 24);
+    let boss = service
+        .ensure_boss_locked(key(), 25)
+        .expect("stored lock is kept");
+    assert_eq!(boss.boss_id, "pudge");
 }
 
 #[test]
@@ -1004,9 +1044,7 @@ fn test_loss_write_preserves_other_boundaries() {
         wounded_entry(BossStatus::Active, "void_warden", 2, 10),
     );
     set_progress(&mut service, progress, 49);
-    let result = service
-        .fight_boss(key(), RiskTier::Cautious, 10)
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(!result.won);
     let fresh = service
         .repository
@@ -1213,6 +1251,34 @@ fn test_berserk_gambler_bottled_quake_and_deaths_door_match_python() {
 }
 
 #[test]
+fn test_deaths_door_is_one_shot_and_gamblers_edge_needs_its_roll() {
+    let mut doomed = combat_for_effect_test(CombatEffects {
+        relic_deaths_door: true,
+        ..CombatEffects::default()
+    });
+    doomed.player_hp = 1;
+    doomed.boss_hit = 1.0;
+    doomed.boss_damage = 5;
+    let (first, terminal) = run_round(1, &mut doomed, &mut SequenceEntropy::constant(0.0));
+    assert_eq!(terminal, None);
+    assert_eq!(doomed.player_hp, 1);
+    assert!(first.effect_log.deaths_door);
+    let (second, terminal) = run_round(2, &mut doomed, &mut SequenceEntropy::constant(0.0));
+    assert_eq!(terminal, Some(false));
+    assert!(!second.effect_log.deaths_door);
+
+    let mut gambler = combat_for_effect_test(CombatEffects {
+        relic_double_hit: true,
+        ..CombatEffects::default()
+    });
+    gambler.player_hit = 1.0;
+    let (record, _) = run_round(1, &mut gambler, &mut SequenceEntropy::constant(0.99));
+    assert_eq!(gambler.boss_hp, 9);
+    assert!(record.player_hit);
+    assert!(!record.effect_log.double_hit);
+}
+
+#[test]
 fn test_mechanic_defenses_have_python_precedence_and_are_one_shot() {
     let option = MechanicOption {
         label: "Take it".to_owned(),
@@ -1339,9 +1405,7 @@ fn test_halves_legacy_fight_wager_and_consumes_curse() {
         .stinger_curse
         .insert(CurseKind::HalveNextWager, "crystal_maiden");
     service.repository.insert_tunnel(key(), current);
-    let result = service
-        .fight_boss(key(), RiskTier::Cautious, 101)
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 101);
     assert!(!result.won);
     assert_eq!(result.jc_delta, -51);
     let fresh = service

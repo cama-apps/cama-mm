@@ -6,7 +6,7 @@
 //! runtime adapter can implement [`DigRenderPort`] with an image library without
 //! coupling Discord or filesystem concerns to the application service.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -175,6 +175,8 @@ impl RenderedMedia {
 }
 
 /// Inspect the header-level media contract used for repository asset audits.
+/// Test support: production renderers report their own [`MediaInfo`].
+#[cfg(any(test, feature = "test-support"))]
 pub fn inspect_media(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     if bytes.starts_with(MediaFormat::Png.signature()) {
         inspect_png(bytes)
@@ -185,6 +187,7 @@ pub fn inspect_media(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn inspect_png(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     if bytes.len() < 29 || &bytes[12..16] != b"IHDR" {
         return Err(MediaError::InvalidHeader);
@@ -203,6 +206,7 @@ fn inspect_png(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     Ok(MediaInfo::still(MediaFormat::Png, (width, height), mode))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn inspect_gif(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     if bytes.len() < 13 {
         return Err(MediaError::InvalidHeader);
@@ -295,6 +299,7 @@ fn inspect_gif(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn skip_gif_data_sub_blocks(bytes: &[u8], mut index: usize) -> Result<usize, MediaError> {
     loop {
         let size = usize::from(*bytes.get(index).ok_or(MediaError::InvalidFrameContract)?);
@@ -1008,8 +1013,9 @@ impl DigAssetService {
 }
 
 /// Audit that every application boss definition has an asset slug.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
-pub fn boss_ids_missing_asset_slugs() -> BTreeSet<&'static str> {
+pub fn boss_ids_missing_asset_slugs() -> std::collections::BTreeSet<&'static str> {
     crate::dig_bosses::BOSSES
         .iter()
         .map(|boss| boss.boss_id)

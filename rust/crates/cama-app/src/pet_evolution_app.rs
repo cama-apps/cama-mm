@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::pet_repository::PetRepository;
 use cama_domain::pet::{EvolutionNotice, Pet};
-use cama_domain::pet_evolution::{InstinctScores, PetActivity, PetCalling, resolve_evolution};
+use cama_domain::pet_evolution::{
+    InstinctScores, PetActivity, PetCalling, hint_key_for_scores, resolve_evolution,
+};
 
 use crate::pet::{PetCareEvent, PetEvolutionPort as PetApplicationEvolutionPort};
 
@@ -202,6 +204,18 @@ where
             .unwrap_or_default()
     }
 
+    /// Python's `hint_for`: only pets still inside their upbringing window
+    /// get a hint, read from the persisted instinct scores.
+    pub fn hint_for(&mut self, pet: &Pet) -> Result<Option<String>, String> {
+        if pet.evolved_at.is_some() || pet.evolution_due_at.is_none() {
+            return Ok(None);
+        }
+        let scores = self
+            .evolution_store
+            .scores(pet.pet_id, Some(pet.guild_id))?;
+        Ok(hint_key_for_scores(&scores))
+    }
+
     pub fn resolve_if_due(&mut self, pet: Pet, alive_through: i64) -> Result<Pet, String> {
         let Some(due_at) = pet.evolution_due_at else {
             return Ok(pet);
@@ -285,6 +299,11 @@ where
 
     fn get_unannounced(&mut self, limit: i64) -> Vec<EvolutionNotice> {
         PetEvolutionService::get_unannounced(self, limit).unwrap_or_default()
+    }
+
+    /// A score lookup failure hides the hint rather than failing the status.
+    fn hint_for(&mut self, pet: &Pet) -> Option<String> {
+        PetEvolutionService::hint_for(self, pet).unwrap_or_default()
     }
 }
 
@@ -492,6 +511,59 @@ mod tests {
             },
             FakeClock { now: T0, calls: 0 },
         )
+    }
+
+    fn upbringing_pet() -> Pet {
+        let mut pet = Pet::new(cama_domain::pet::PetBase {
+            pet_id: 7,
+            discord_id: 100,
+            guild_id: GUILD,
+            name: "Blep".to_owned(),
+            species: "common_cama".to_owned(),
+            adopted_at: T0 - 86_400,
+            hatched_at: T0,
+            adopt_fee: 20,
+            last_fed_at: T0,
+            hunger_at_last_fed: 100,
+            times_fed: 0,
+            feeds_today: 0,
+            feed_date: None,
+            week_consumed_jc: 0,
+            week_key: None,
+            prev_week_consumed_jc: 0,
+            prev_week_key: None,
+            pampered_until: None,
+            accessory: None,
+            dig_work_units: 0,
+            dig_work_at: T0,
+            aegis_used: 0,
+            hatch_announced_at: None,
+            died_at: None,
+            death_cause: None,
+            death_announced_at: None,
+        });
+        pet.evolution_started_at = Some(T0);
+        pet.evolution_due_at = Some(T0 + 7 * 86_400);
+        pet
+    }
+
+    #[test]
+    fn test_status_exposes_only_the_narrative_hint_key() {
+        let pet = upbringing_pet();
+        let mut service = make_service(Some(pet.clone()));
+        service
+            .evolution_store_mut()
+            .scores
+            .insert(pet.pet_id, score_snapshot(&[(PetInstinct::Delving, 4)]));
+
+        assert_eq!(
+            service.hint_for(&pet).expect("hint lookup").as_deref(),
+            Some("delving")
+        );
+
+        let mut evolved = pet;
+        evolved.evolved_at = Some(T0 + 7 * 86_400);
+        assert_eq!(service.hint_for(&evolved).expect("hint lookup"), None);
     }
 
     #[test]
