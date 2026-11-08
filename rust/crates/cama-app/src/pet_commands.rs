@@ -3947,6 +3947,30 @@ mod tests {
     }
 
     #[test]
+    fn test_living_status_embed_shows_the_upbringing_hint() {
+        let pet = make_pet();
+        let status = PetStatus {
+            pet: Some(pet.clone()),
+            hunger: 55,
+            stage: Some(PetStage::Baby),
+            mood: Some(PetMood::Content),
+            age_seconds: DAY,
+            supplies: None,
+            last_dead: None,
+            dig_work_units: 0,
+            dig_work_rate: 0,
+            evolution_hint: Some("delving_strong".to_owned()),
+        };
+
+        let embed = build_status_embed(&status, 20, pet.hatched_at + DAY, "Owner", 20);
+
+        assert_eq!(
+            embed.field_value("Upbringing"),
+            hint_text(Some("delving_strong"))
+        );
+    }
+
+    #[test]
     fn test_living_status_embed_shows_passive_mining_progress() {
         let pet = make_pet();
         let status = PetStatus {

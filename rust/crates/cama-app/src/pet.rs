@@ -132,6 +132,11 @@ pub trait PetEvolutionPort {
     fn get_unannounced(&mut self, _limit: i64) -> Vec<EvolutionNotice> {
         Vec::new()
     }
+
+    /// The upbringing hint key for a pet still inside its evolution window.
+    fn hint_for(&mut self, _pet: &Pet) -> Option<String> {
+        None
+    }
 }
 
 pub trait PetStore {
@@ -635,7 +640,7 @@ where
             last_dead: None,
             dig_work_units: work_units,
             dig_work_rate: self.dig_work_rate(&pet, now)?,
-            evolution_hint: None,
+            evolution_hint: self.evolution.hint_for(&pet),
             pet: Some(pet),
         })
     }
@@ -1775,9 +1780,16 @@ mod tests {
         events: Vec<PetCareEvent>,
         due: Vec<Pet>,
         unannounced: Vec<EvolutionNotice>,
+        hint: Option<String>,
+        hint_requests: Vec<i64>,
     }
 
     impl PetEvolutionPort for RecordingEvolution {
+        fn hint_for(&mut self, pet: &Pet) -> Option<String> {
+            self.hint_requests.push(pet.pet_id);
+            self.hint.clone()
+        }
+
         fn record_activity(&mut self, event: PetCareEvent) {
             self.events.push(event);
         }
@@ -2858,6 +2870,34 @@ mod tests {
                 service.adopt(OWNER, Some(GUILD), "Reformed", "standard"),
                 ServiceResult::Success(_)
             ));
+        }
+
+        #[test]
+        fn status_carries_the_upbringing_hint_for_the_living_pet() {
+            let mut store = FakeStore::default();
+            store.set_balance(OWNER, GUILD, 1_000);
+            let mut players = FakePlayers::default();
+            players.players.insert((OWNER, GUILD));
+            let mut service = PetService::new(
+                store,
+                players,
+                ScriptedRandom::default(),
+                FakeClock::new(T0),
+                RecordingEvolution {
+                    hint: Some("delving".to_owned()),
+                    ..RecordingEvolution::default()
+                },
+                20,
+            );
+            let none = service.get_status(OWNER, Some(GUILD)).unwrap();
+            assert_eq!(none.evolution_hint, None);
+            assert!(service.evolution().hint_requests.is_empty());
+
+            let pet = adopt_common(&mut service, "Blep");
+            let status = service.get_status(OWNER, Some(GUILD)).unwrap();
+
+            assert_eq!(status.evolution_hint.as_deref(), Some("delving"));
+            assert_eq!(service.evolution().hint_requests, vec![pet.pet_id]);
         }
 
         #[test]
