@@ -168,8 +168,8 @@ const WIN_RATE_POPOFF_STRONG: &[Beat] = &[
 const WIN_RATE_POPOFF_NOTABLE: &[Beat] = &[
     b("Above the coin flip.", "Slightly weighted coin."),
     b("More wins than losses.", "Low bar. Cleared it."),
-    b("A winning record.", "Respectable. Barely smug."),
-    b("Positive win rate.", "Positively adequate."),
+    b("A winning record.", "Smugness: earned."),
+    b("Positive win rate.", "Your ancient mostly survived."),
 ];
 
 const WIN_RATE_ROAST_EXTREME: &[Beat] = &[
@@ -190,7 +190,7 @@ const WIN_RATE_ROAST_STRONG: &[Beat] = &[
     b("A generous win rate.", "Generous to the other team."),
     b("Every game a learning game.", "So much learning."),
     b("Wins were a rumor.", "Losses were the vibe."),
-    b("Your throne had a timer.", "It went off. A lot."),
+    b("Your throne had a timer.", "Tick, tick, boom."),
 ];
 
 const WIN_RATE_ROAST_NOTABLE: &[Beat] = &[
@@ -207,10 +207,10 @@ const DEATHS_ROAST_EXTREME: &[Beat] = &[
     b("The fountain knows you.", "Skill issue."),
     b("Death had a busy year.", "Massive skill issue."),
     b("Grey screen, second monitor.", "Skill issue."),
-    b("Space created. Allegedly.", "Diagnosis: skill issue."),
+    b("Space created. Allegedly.", "Skill issue, clearly."),
     b("Free gold for the enemy.", "Skill issue."),
     b("Not even Aegis could help.", "Massive skill issue."),
-    b("Respawn timer, memorized.", "Diagnosis: skill issue."),
+    b("Respawn timer, memorized.", "Skill issue, clearly."),
 ];
 
 const DEATHS_ROAST_STRONG: &[Beat] = &[
@@ -325,7 +325,7 @@ const KILL_LOSS_EXTREME: &[Beat] = &[
     b("The scoreboard says MVP.", "Task failed successfully."),
     b("Kills don't take towers.", "Task failed successfully."),
     b("You did your part.", "Task failed successfully."),
-    b("Report the other four?", "Task failed successfully."),
+    b("You did everything. Almost.", "Task failed successfully."),
 ];
 
 const KILL_LOSS_STRONG: &[Beat] = &[
@@ -381,7 +381,7 @@ const GPM_ROAST_EXTREME: &[Beat] = &[
     b("Last hits: optional.", "Skill issue."),
     b("The creeps survived you.", "Massive skill issue."),
     b("Your farm: theoretical.", "Skill issue."),
-    b("Gold per minute, barely.", "Diagnosis: skill issue."),
+    b("Gold per minute, barely.", "Skill issue, clearly."),
     b("Midas would be insulted.", "Skill issue."),
     b("The jungle felt safe.", "Massive skill issue."),
 ];
@@ -400,7 +400,7 @@ const GPM_ROAST_NOTABLE: &[Beat] = &[
     b("Gold income: modest.", "A support budget, basically."),
     b("Farm: below average.", "The jungle didn't miss you."),
     b("Light on the gold.", "Supports call it normal."),
-    b("A modest farmer.", "Very, very modest."),
+    b("A modest farmer.", "The creeps barely noticed."),
 ];
 
 const LAST_HITS_EXTREME: &[Beat] = &[
@@ -676,7 +676,7 @@ const APM_STRONG: &[Beat] = &[
 
 const APM_NOTABLE: &[Beat] = &[
     b("Above-average APM.", "Your mouse is tired."),
-    b("Quick fingers.", "Quicker than most."),
+    b("Quick fingers.", "The keyboard felt it."),
     b("Busy-ish hands.", "Respectable clicking."),
     b("You click with purpose.", "Usually."),
 ];
@@ -766,7 +766,7 @@ const RAPIERS_POPOFF_STRONG: &[Beat] = &[
 const RAPIERS_POPOFF_NOTABLE: &[Beat] = &[
     b("Rapier purchased.", "Results: positive."),
     b("You bought a Rapier.", "And lived to tell it."),
-    b("A Rapier appeared.", "Victory followed."),
+    b("A Rapier appeared.", "The throne fell. Theirs."),
     b("Sword gamble:", "Successful."),
 ];
 
@@ -976,7 +976,7 @@ const NIGHT_OWL_EXTREME: &[Beat] = &[
     b("Still playing at", "Just one more game."),
     b("Last game ended at", "One more game."),
     b("The final ancient fell at", "One more game. Probably."),
-    b("Night shift ended at", "One more game."),
+    b("Final lobby ended at", "One more game."),
     b("Game over, finally, at", "Just one more game."),
     b("Late-night games rank: #{rank}", "One more game."),
 ];
@@ -987,7 +987,7 @@ const NIGHT_OWL_STRONG: &[Beat] = &[
     b("Last game ended at", "Just one more game."),
     b("Your Dota day ended at", "One more game."),
     b("The final ancient fell at", "One more game."),
-    b("Night shift ended at", "Just one more game."),
+    b("The last lobby closed at", "Just one more game."),
 ];
 
 const NIGHT_OWL_NOTABLE: &[Beat] = &[
@@ -1006,7 +1006,7 @@ const MARATHON_EXTREME: &[Beat] = &[
     ),
     b("One day, all Dota.", "Respect, and concern."),
     b("The longest day.", "One more game, times ten."),
-    b("You queued all day.", "The lobby had a resident."),
+    b("You played all day.", "The lobby had a resident."),
     b("Marathon mode: on.", "Hydrate, please."),
 ];
 
@@ -1177,7 +1177,7 @@ pub(super) const ITEM_POOLS: &[(&str, &str, &[Beat])] = &[
         "magic_wand",
         "Magic Wand",
         &[
-            b("Magic Wand appreciation.", "Charges: maxed. Always."),
+            b("Magic Wand appreciation.", "Always one in the cart."),
             b("Wand first. Questions later.", "Iron Branches were harmed."),
             b("The wand is the build.", "The rest is decoration."),
             b("Magic Wand, again.", "Spell spam? Bring it."),
@@ -1216,8 +1216,8 @@ pub(super) const ITEM_POOLS: &[(&str, &str, &[Beat])] = &[
         "Smoke of Deceit",
         &[
             b("Smoke of Deceit, often.", "Ganks? Occasionally."),
-            b("Smoke ganks, constantly.", "Found: mostly wards."),
-            b("Smoke purchased.", "Five heroes, zero kills."),
+            b("Smoke, bought in bulk.", "The plan was always a gank."),
+            b("Smoke purchased.", "Ganks planned. Allegedly."),
         ],
     ),
     (
@@ -1225,7 +1225,7 @@ pub(super) const ITEM_POOLS: &[(&str, &str, &[Beat])] = &[
         "Dust of Appearance",
         &[
             b("Dust of Appearance, often.", "Riki has trust issues."),
-            b("Dust in every fight.", "Paranoia, well placed."),
+            b("Dust, always in stock.", "Paranoia, well placed."),
             b("You brought the Dust.", "Invisible heroes, exposed."),
         ],
     ),
@@ -1444,7 +1444,7 @@ const MAFIA: &[Beat] = &[
     b("Votes were cast.", "Some at the right person."),
     b("You survived some nights.", "Not all of them."),
     b("Suspicious? You?", "Never. Well, sometimes."),
-    b("A Mafia regular.", "Shifty. Respectfully."),
+    b("A Mafia regular.", "Lies told: some. Caught: few."),
 ];
 
 /// A persona title (20 characters at most, it rides on the recap) and its
@@ -1622,7 +1622,7 @@ pub(super) const PERSONAS: &[(&str, Direction, &[Persona])] = &[
         "night_owl",
         Roast,
         &[
-            ("The Night Shift", "One more game, at any hour."),
+            ("The Late Lobby", "One more game, at any hour."),
             ("Night Creature", "The ancient falls best after midnight."),
         ],
     ),

@@ -328,7 +328,8 @@ fn people_pools_are_deep() {
 
 #[test]
 fn no_line_targets_personal_life() {
-    const BANNED: [&str; 13] = [
+    const BANNED: &[&str] = &[
+        // Personal attributes and life outside the game.
         "hobbies",
         "social life",
         "girlfriend",
@@ -342,6 +343,21 @@ fn no_line_targets_personal_life() {
         "dumb",
         "mom",
         "dad",
+        "grass",
+        "real life",
+        "outside",
+        // Medical and mental-health terms.
+        "addiction",
+        "ptsd",
+        "therapy",
+        "meds",
+        "diagnosis",
+        "disorder",
+        "insane",
+        "psycho",
+        // Moderation: never invite reporting a player.
+        "report the",
+        "report your",
     ];
     let mut lines: Vec<&str> = all_beats()
         .into_iter()
@@ -366,6 +382,32 @@ fn no_line_targets_personal_life() {
         let lower = line.to_lowercase();
         for banned in BANNED {
             assert!(!lower.contains(banned), "{line:?} mentions {banned:?}");
+        }
+    }
+}
+
+#[test]
+fn record_time_copy_never_claims_a_queue_or_start_time() {
+    // Late-night times and day totals come from when a game was recorded as
+    // finished, so the copy never says when it was queued or started.
+    for key in ["night_owl", "marathon_day"] {
+        let mut lines: Vec<&str> = TIERS
+            .iter()
+            .flat_map(|tier| pool(key, Direction::Roast, *tier))
+            .flat_map(|beat| [beat.setup, beat.punch])
+            .collect();
+        lines.extend(
+            PERSONAS
+                .iter()
+                .filter(|(metric, _, _)| *metric == key)
+                .flat_map(|(_, _, titles)| titles.iter())
+                .flat_map(|(title, subtitle)| [*title, *subtitle]),
+        );
+        for line in lines {
+            let lower = line.to_lowercase();
+            for claim in ["queued", "started", "queue at"] {
+                assert!(!lower.contains(claim), "{key}: {line:?} says {claim:?}");
+            }
         }
     }
 }
