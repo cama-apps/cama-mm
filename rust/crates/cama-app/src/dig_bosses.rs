@@ -1853,6 +1853,7 @@ pub fn regular_phase(boss_id: &str, phase: u8) -> Option<&'static RegularPhaseDe
     }
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn default_regular_phase(depth: i32, phase: u8) -> Option<&'static RegularPhaseDefinition> {
     match phase {

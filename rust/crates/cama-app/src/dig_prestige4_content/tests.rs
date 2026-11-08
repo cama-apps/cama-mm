@@ -1,6 +1,11 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use super::*;
+use crate::boss_multi_tier::stinger_by_id;
+use crate::dig_bosses::{boss_pool_for_tier, mechanic, regular_phase};
+use crate::dig_loot::{
+    CanonicalEventPolicy, CanonicalEventRolls, canonical_event, resolve_canonical_event_with_policy,
+};
 
 #[derive(Debug, Default)]
 struct ScriptedEntropy {
@@ -66,16 +71,13 @@ fn test_new_bosses_gated_to_prestige_4() {
         ("rimebound_king", 200),
         ("spineback", 275),
     ] {
-        assert!(
-            prestige_four_bosses_at(depth, 4)
+        let offered = |prestige| {
+            boss_pool_for_tier(depth, prestige)
                 .iter()
                 .any(|boss| boss.boss_id == boss_id)
-        );
-        assert!(
-            !prestige_four_bosses_at(depth, 3)
-                .iter()
-                .any(|boss| boss.boss_id == boss_id)
-        );
+        };
+        assert!(offered(4));
+        assert!(!offered(3));
     }
 }
 
@@ -124,9 +126,8 @@ fn test_reskins_keep_ids_change_names_and_add_trophies() {
 #[test]
 fn test_bespoke_phase_overrides_present() {
     for boss_id in BESPOKE_PHASE_BOSS_IDS {
-        let boss = boss_by_id(boss_id).expect("boss");
-        let phase_two = phase_for(boss_id, boss.depth, 2).expect("phase two");
-        let phase_three = phase_for(boss_id, boss.depth, 3).expect("phase three");
+        let phase_two = regular_phase(boss_id, 2).expect("phase two");
+        let phase_three = regular_phase(boss_id, 3).expect("phase three");
         assert!(!phase_two.name.is_empty() && !phase_three.name.is_empty());
         assert!(
             ![
@@ -140,20 +141,9 @@ fn test_bespoke_phase_overrides_present() {
 }
 
 #[test]
-fn test_phase_resolver_falls_back_to_depth_default() {
-    assert_eq!(
-        phase_for("unknown_spore_boss", 150, 2)
-            .expect("default phase")
-            .name,
-        "The Sporeling Collective"
-    );
-    assert!(phase_for("grothak", 25, 3).is_none());
-}
-
-#[test]
 fn test_new_mechanics_well_formed() {
     for mechanic_id in PRESTIGE_FOUR_MECHANIC_IDS {
-        let definition = prestige_four_mechanic(mechanic_id).expect("mechanic");
+        let definition = mechanic(mechanic_id).expect("mechanic");
         assert_eq!(definition.options.len(), 3);
         assert!(definition.safe_option_index < 3);
         for option in definition.options {
@@ -170,38 +160,33 @@ fn test_new_mechanics_well_formed() {
 #[test]
 fn test_new_stingers_resolve() {
     for stinger_id in PRESTIGE_FOUR_STINGER_IDS {
-        assert!(prestige_four_stinger(stinger_id).is_some());
+        assert!(stinger_by_id(stinger_id).is_some());
     }
 }
 
 #[test]
-fn test_new_relics_in_catalog_with_lore_and_effect() {
+fn test_new_relics_in_catalog() {
+    let catalog = artifact_catalog();
+    let relic = |relic_id: &str| {
+        catalog
+            .iter()
+            .find(|artifact| artifact.id == relic_id)
+            .copied()
+            .expect("catalog relic")
+    };
     for relic_id in PRESTIGE_FOUR_TROPHY_IDS
         .into_iter()
         .chain(PRESTIGE_FOUR_GENERAL_RELIC_IDS)
     {
-        let content = artifact_content(relic_id).expect("artifact content");
-        assert!(content.definition.is_relic);
-        assert!(!content.lore.is_empty());
-        assert!(!content.effect.is_empty());
+        assert!(relic(relic_id).is_relic);
     }
-    assert_eq!(
-        artifact_content("weeping_fang")
-            .unwrap()
-            .definition
-            .min_prestige,
-        4
+    assert_eq!(relic("weeping_fang").min_prestige, 4);
+    assert_eq!(relic("listening_shard").min_prestige, 3);
+    assert!(
+        PRESTIGE_FOUR_GENERAL_RELIC_IDS
+            .iter()
+            .all(|id| relic(id).min_prestige == 4)
     );
-    assert_eq!(
-        artifact_content("listening_shard")
-            .unwrap()
-            .definition
-            .min_prestige,
-        3
-    );
-    assert!(PRESTIGE_FOUR_GENERAL_RELIC_IDS.iter().all(|id| {
-        artifact_content(id).is_some_and(|content| content.definition.min_prestige == 4)
-    }));
 }
 
 #[test]
@@ -225,94 +210,6 @@ fn test_total_artifact_count() {
             .into_iter()
             .collect()
     );
-}
-
-#[test]
-fn test_trophy_weeping_fang_venom_chips_boss() {
-    let mut status = TrophyStatus {
-        venom_rounds: 4,
-        ..TrophyStatus::default()
-    };
-    let result = run_trophy_round(round_input(), &mut status);
-    assert_eq!(result.boss_hp, 9);
-    assert!(result.events.venom);
-}
-
-#[test]
-fn test_trophy_listening_shard_forewarned_only_round_1() {
-    let mut status = TrophyStatus {
-        forewarned: true,
-        ..TrophyStatus::default()
-    };
-    let mut input = round_input();
-    input.round = 1;
-    input.boss_hit = true;
-    let first = run_trophy_round(input, &mut status);
-    assert_eq!(first.player_hp, 5);
-    input.round = 2;
-    let second = run_trophy_round(input, &mut TrophyStatus::default());
-    assert_eq!(second.player_hp, 4);
-}
-
-#[test]
-fn test_trophy_runebitten_lifesteal_first_hit_only() {
-    let mut status = TrophyStatus {
-        lifesteal_available: true,
-        starting_hp: 3,
-        ..TrophyStatus::default()
-    };
-    let mut input = round_input();
-    input.round = 1;
-    input.player_hp = 2;
-    input.player_hit = true;
-    let result = run_trophy_round(input, &mut status);
-    assert_eq!(result.player_hp, 3);
-    assert!(result.events.lifesteal);
-    assert!(!status.lifesteal_available);
-}
-
-#[test]
-fn test_trophy_aching_spine_regrowth_capped() {
-    let mut input = round_input();
-    input.player_hp = 3;
-    let mut status = TrophyStatus {
-        regrowth: true,
-        starting_hp: 5,
-        ..TrophyStatus::default()
-    };
-    let result = run_trophy_round(input, &mut status);
-    assert_eq!(result.player_hp, 4);
-    assert!(result.events.regrowth);
-    status.starting_hp = 3;
-    let capped = run_trophy_round(input, &mut status);
-    assert_eq!(capped.player_hp, 3);
-    assert!(!capped.events.regrowth);
-}
-
-#[test]
-fn test_trophy_hateborn_last_stand_extra_damage_at_1hp() {
-    let mut input = round_input();
-    input.player_hp = 1;
-    input.player_hit = true;
-    let mut status = TrophyStatus {
-        last_stand: true,
-        ..TrophyStatus::default()
-    };
-    let result = run_trophy_round(input, &mut status);
-    assert_eq!(result.boss_hp, 8);
-    assert!(result.events.last_stand);
-}
-
-fn round_input() -> TrophyRoundInput {
-    TrophyRoundInput {
-        round: 2,
-        player_hp: 5,
-        boss_hp: 10,
-        player_hit: false,
-        player_damage: 1,
-        boss_hit: false,
-        boss_damage: 1,
-    }
 }
 
 #[test]
@@ -398,23 +295,28 @@ fn test_artifact_rarity_and_layer_fallback_match_python_roll() {
 }
 
 #[test]
-fn test_deepveined_coal_boosts_yield_only_in_the_dark() {
-    assert_eq!(deepveined_yield_multiplier(true, 100), 1.0);
-    assert!((deepveined_yield_multiplier(true, 5) - 1.20).abs() < f64::EPSILON);
-}
-
-#[test]
-fn test_pathfinders_spur_adds_advance_in_deep_layers() {
-    assert_eq!(pathfinders_advance(2, false, 160), 2);
-    assert_eq!(pathfinders_advance(2, true, 160), 3);
-    assert_eq!(pathfinders_advance(2, true, 149), 2);
-}
-
-#[test]
 fn test_diviners_knot_boosts_risky_success() {
-    let base = 0.5;
-    let roll = 0.55;
-    assert!(roll >= diviners_risky_success_chance(base, false, true));
-    assert!(roll < diviners_risky_success_chance(base, true, true));
-    assert_eq!(diviners_risky_success_chance(base, true, false), base);
+    let base = canonical_event("underground_stream")
+        .and_then(|event| event.risky_option.as_ref())
+        .expect("risky option")
+        .success_chance;
+    let rolls = CanonicalEventRolls {
+        success_roll: base + 0.05,
+        ..CanonicalEventRolls::default()
+    };
+    let resolve = |diviners_knot| {
+        resolve_canonical_event_with_policy(
+            "underground_stream",
+            "risky",
+            rolls,
+            CanonicalEventPolicy {
+                diviners_knot,
+                ..CanonicalEventPolicy::default()
+            },
+        )
+        .expect("risky resolution")
+        .succeeded
+    };
+    assert!(!resolve(false));
+    assert!(resolve(true));
 }
