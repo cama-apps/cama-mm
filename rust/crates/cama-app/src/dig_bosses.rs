@@ -5,13 +5,12 @@
 //! gating, mechanics, and relic settlement without opening Discord or the
 //! shared DB.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub use cama_domain::dig_economy::{BOSS_BOUNDARIES, PINNACLE_DEPTH};
 pub const PRESTIGE_HARD_CAP: i32 = 500;
 pub const PINNACLE_SECRET_PHASE_CHANCE: f64 = 0.10;
 pub const BOSS_ROUND_CAP: u8 = 20;
-pub const BOSS_HP_REGEN_PER_24_HOURS: i32 = 1;
 pub const WIN_CHANCE_CAP: f64 = 0.95;
 pub const WIN_CHANCE_FLOOR: f64 = 0.05;
 
@@ -229,12 +228,6 @@ pub struct DuelOddsInput {
     pub boss_damage: i32,
     pub critical_chance: f64,
     pub critical_bonus: i32,
-}
-
-/// Exact absorbing-chain equivalent of the Python Monte-Carlo scout helper.
-#[must_use]
-pub fn approximate_duel_win_probability(input: DuelOddsInput) -> f64 {
-    duel_win_probability_with_damage_bonus(input, 0)
 }
 
 /// Exact absorbing-chain equivalent of Python's scout simulation, including
@@ -861,11 +854,6 @@ pub fn boss_pool_for_tier(depth: i32, prestige_level: i32) -> Vec<&'static BossD
 #[must_use]
 pub fn full_boss_pool_for_tier(depth: i32) -> Vec<&'static BossDefinition> {
     boss_pool_for_tier(depth, 99)
-}
-
-#[must_use]
-pub fn stinger_registered(stinger_id: &str) -> bool {
-    BOSSES.iter().any(|boss| boss.stinger_id == stinger_id)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2036,63 +2024,6 @@ impl BossProgressValue {
 
 pub type BossProgress = BTreeMap<String, BossProgressValue>;
 
-#[must_use]
-pub fn resolve_persisted_boss_hp(
-    boss_progress: &BossProgress,
-    key: &str,
-    fresh_hp: i32,
-    now: i64,
-) -> (i32, i32) {
-    let Some(BossProgressValue::Entry(entry)) = boss_progress.get(key) else {
-        return (fresh_hp, fresh_hp);
-    };
-    let (Some(hp_remaining), Some(hp_max)) = (entry.hp_remaining, entry.hp_max) else {
-        return (fresh_hp, fresh_hp);
-    };
-    let hp_max = hp_max.max(1);
-    let mut hp_remaining = hp_remaining.clamp(1, hp_max);
-    if let Some(last_engaged_at) = entry.last_engaged_at {
-        let complete_days = (now - last_engaged_at).max(0) / 86_400;
-        let regenerated = complete_days.saturating_mul(i64::from(BOSS_HP_REGEN_PER_24_HOURS));
-        hp_remaining = i64::from(hp_remaining)
-            .saturating_add(regenerated)
-            .min(i64::from(hp_max)) as i32;
-    }
-    (hp_remaining.max(1), hp_max)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PersistBossHp<'a> {
-    pub key: &'a str,
-    pub boss_id: &'a str,
-    pub ending_hp: i32,
-    pub hp_max: i32,
-    pub won: bool,
-    pub outcome: &'a str,
-    pub now: i64,
-}
-
-pub fn persist_boss_hp_after_fight(boss_progress: &mut BossProgress, update: PersistBossHp<'_>) {
-    let existing = boss_progress.remove(update.key);
-    let mut entry = match existing {
-        Some(BossProgressValue::Entry(entry)) => entry,
-        Some(BossProgressValue::Legacy(status)) => BossProgressEntry {
-            status,
-            ..BossProgressEntry::default()
-        },
-        None => BossProgressEntry::default(),
-    };
-    entry.hp_remaining = Some(update.ending_hp.max(0));
-    entry.hp_max = Some(update.hp_max);
-    entry.last_engaged_at = Some(update.now);
-    entry.last_outcome = Some(update.outcome.to_owned());
-    entry.first_meet_seen = true;
-    if entry.boss_id.is_none() && !update.boss_id.is_empty() {
-        entry.boss_id = Some(update.boss_id.to_owned());
-    }
-    boss_progress.insert(update.key.to_owned(), BossProgressValue::Entry(entry));
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BossEcho {
     pub boss_id: String,
@@ -2119,9 +2050,6 @@ pub trait BossEchoStore {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InMemoryBossStore {
     echoes: BTreeMap<(i64, String), BossEcho>,
-    inventory: BTreeMap<(i64, i64), BTreeSet<String>>,
-    artifacts: BTreeMap<(i64, i64), Vec<ArtifactRecord>>,
-    next_artifact_id: i64,
 }
 
 const fn normalized_guild_id(guild_id: Option<i64>) -> i64 {
@@ -2161,225 +2089,6 @@ impl BossEchoStore for InMemoryBossStore {
             .get(&(normalized_guild_id(guild_id), boss_id.to_owned()))
             .filter(|echo| echo.weakened_until > now)
     }
-}
-
-impl InMemoryBossStore {
-    pub fn add_inventory_item(&mut self, discord_id: i64, guild_id: i64, item_type: &str) {
-        self.inventory
-            .entry((discord_id, guild_id))
-            .or_default()
-            .insert(item_type.to_owned());
-    }
-
-    #[must_use]
-    pub fn has_scout_lantern(&self, discord_id: i64, guild_id: i64) -> bool {
-        self.inventory
-            .get(&(discord_id, guild_id))
-            .is_some_and(|items| items.contains("lantern") || items.contains("great_lantern"))
-    }
-
-    pub fn settle_relic(&mut self, discord_id: i64, guild_id: i64, relic: &PinnacleRelic) -> i64 {
-        self.next_artifact_id += 1;
-        let row = ArtifactRecord {
-            id: self.next_artifact_id,
-            artifact_id: relic.artifact_id.clone(),
-        };
-        self.artifacts
-            .entry((discord_id, guild_id))
-            .or_default()
-            .push(row);
-        self.next_artifact_id
-    }
-
-    #[must_use]
-    pub fn artifacts(&self, discord_id: i64, guild_id: i64) -> &[ArtifactRecord] {
-        self.artifacts
-            .get(&(discord_id, guild_id))
-            .map_or(&[], Vec::as_slice)
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BossRunState {
-    pub depth: i32,
-    pub prestige_level: i32,
-    pub boss_progress: BossProgress,
-    pub pinnacle_boss_id: Option<String>,
-    pub pinnacle_phase: u8,
-    pub active_duel: Option<ActiveBossDuel>,
-}
-
-impl BossRunState {
-    #[must_use]
-    pub fn with_all_tiers_defeated(depth: i32) -> Self {
-        let mut state = Self {
-            depth,
-            ..Self::default()
-        };
-        for boundary in BOSS_BOUNDARIES {
-            state.boss_progress.insert(
-                boundary.to_string(),
-                BossProgressValue::Legacy(BossStatus::Defeated),
-            );
-        }
-        state
-    }
-}
-
-fn progress_status(progress: &BossProgress, boundary: i32) -> Option<BossStatus> {
-    progress
-        .get(&boundary.to_string())
-        .map(BossProgressValue::status)
-}
-
-#[must_use]
-pub fn all_regular_bosses_defeated(progress: &BossProgress) -> bool {
-    BOSS_BOUNDARIES
-        .iter()
-        .all(|boundary| progress_status(progress, *boundary) == Some(BossStatus::Defeated))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BossLockError {
-    EmptyPool(i32),
-    PreferredBossUnavailable(String),
-}
-
-pub fn lock_regular_boss(
-    state: &mut BossRunState,
-    depth: i32,
-    preferred_boss_id: Option<&str>,
-) -> Result<&'static BossDefinition, BossLockError> {
-    let key = depth.to_string();
-    if let Some(BossProgressValue::Entry(entry)) = state.boss_progress.get(&key)
-        && let Some(existing) = entry.boss_id.as_deref().and_then(boss_by_id)
-    {
-        return Ok(existing);
-    }
-    let pool = boss_pool_for_tier(depth, state.prestige_level);
-    let selected = match preferred_boss_id {
-        Some(preferred) => pool
-            .iter()
-            .copied()
-            .find(|boss| boss.boss_id == preferred)
-            .ok_or_else(|| BossLockError::PreferredBossUnavailable(preferred.to_owned()))?,
-        None => *pool.first().ok_or(BossLockError::EmptyPool(depth))?,
-    };
-    let existing = state.boss_progress.remove(&key);
-    let mut entry = match existing {
-        Some(BossProgressValue::Entry(entry)) => entry,
-        Some(BossProgressValue::Legacy(status)) => BossProgressEntry {
-            status,
-            ..BossProgressEntry::default()
-        },
-        None => BossProgressEntry::default(),
-    };
-    entry.boss_id = Some(selected.boss_id.to_owned());
-    state
-        .boss_progress
-        .insert(key, BossProgressValue::Entry(entry));
-    Ok(selected)
-}
-
-pub fn lock_pinnacle_boss(
-    state: &mut BossRunState,
-    preferred_boss_id: Option<&str>,
-) -> Result<&'static str, BossLockError> {
-    if let Some(existing) = state
-        .pinnacle_boss_id
-        .as_deref()
-        .filter(|boss_id| pinnacle_by_id(boss_id).is_some())
-    {
-        return Ok(PINNACLE_POOL_IDS
-            .iter()
-            .copied()
-            .find(|boss_id| *boss_id == existing)
-            .expect("validated pinnacle id belongs to the static pool"));
-    }
-    let selected = match preferred_boss_id {
-        Some(preferred) if pinnacle_by_id(preferred).is_some() => preferred,
-        Some(preferred) => {
-            return Err(BossLockError::PreferredBossUnavailable(
-                preferred.to_owned(),
-            ));
-        }
-        None => PINNACLE_POOL_IDS[0],
-    };
-    state.pinnacle_boss_id = Some(selected.to_owned());
-    state.pinnacle_phase = 1;
-    Ok(PINNACLE_POOL_IDS
-        .iter()
-        .copied()
-        .find(|boss_id| *boss_id == selected)
-        .expect("validated pinnacle id belongs to the static pool"))
-}
-
-pub const PINNACLE_FORESHADOW_LINES: [&str; 4] = [
-    "Something deeper shifts when the last echo fades.",
-    "The shaft below breathes once.",
-    "Your lantern throws a shadow that does not belong to you.",
-    "The stone beneath the final tier sounds hollow.",
-];
-
-#[must_use]
-pub fn pinnacle_foreshadow_line(state: &BossRunState) -> Option<&'static str> {
-    if !all_regular_bosses_defeated(&state.boss_progress)
-        || progress_status(&state.boss_progress, PINNACLE_DEPTH) == Some(BossStatus::Defeated)
-    {
-        return None;
-    }
-    Some(PINNACLE_FORESHADOW_LINES[0])
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PrestigeCheck {
-    pub can_prestige: bool,
-    pub reason: Option<&'static str>,
-}
-
-#[must_use]
-pub fn can_prestige(state: &BossRunState, max_prestige: i32) -> PrestigeCheck {
-    if !all_regular_bosses_defeated(&state.boss_progress) {
-        return PrestigeCheck {
-            can_prestige: false,
-            reason: Some("Bosses remain."),
-        };
-    }
-    if progress_status(&state.boss_progress, PINNACLE_DEPTH) != Some(BossStatus::Defeated) {
-        return PrestigeCheck {
-            can_prestige: false,
-            reason: Some("Something stirs deeper still — descend further."),
-        };
-    }
-    if state.prestige_level >= max_prestige {
-        return PrestigeCheck {
-            can_prestige: false,
-            reason: Some("Already at max prestige."),
-        };
-    }
-    PrestigeCheck {
-        can_prestige: true,
-        reason: None,
-    }
-}
-
-pub fn prestige_reset(state: &mut BossRunState, max_prestige: i32) -> Result<(), &'static str> {
-    if !can_prestige(state, max_prestige).can_prestige {
-        return Err("Cannot prestige.");
-    }
-    state.depth = 0;
-    state.prestige_level += 1;
-    state.boss_progress.clear();
-    for boundary in BOSS_BOUNDARIES {
-        state.boss_progress.insert(
-            boundary.to_string(),
-            BossProgressValue::Legacy(BossStatus::Active),
-        );
-    }
-    state.pinnacle_boss_id = None;
-    state.pinnacle_phase = 0;
-    state.active_duel = None;
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2482,23 +2191,6 @@ pub const PINNACLE_RELIC_SUFFIX_POOL: [&str; 12] = [
     "Forgotten Things",
 ];
 
-pub const PHASE_TRANSITION_EVENT_IDS: [&str; 14] = [
-    "cave_in",
-    "fissure",
-    "glowburst",
-    "cold_snap",
-    "spore_cloud",
-    "void_pull",
-    "echoing_drip",
-    "iron_tang",
-    "shifting_walls",
-    "hollow_tone",
-    "crystal_bloom",
-    "tremor",
-    "ash_fall",
-    "quiet",
-];
-
 #[must_use]
 pub const fn pinnacle_relic_base_name(pinnacle_id: &str) -> Option<&'static str> {
     match pinnacle_id.as_bytes() {
@@ -2559,222 +2251,6 @@ pub fn roll_pinnacle_relic(
         prestige_at_drop: prestige_level,
         artifact_id: format!("pinnacle:{base}:{suffix}:{}:{}", first.id, second.id),
     })
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArtifactRecord {
-    pub id: i64,
-    pub artifact_id: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PinnacleInfo {
-    pub is_pinnacle: bool,
-    pub phase: u8,
-    pub phase_total: u8,
-    pub name: &'static str,
-}
-
-#[must_use]
-pub fn build_pinnacle_info(state: &BossRunState) -> Option<PinnacleInfo> {
-    let boss = pinnacle_by_id(state.pinnacle_boss_id.as_deref()?)?;
-    let phase = state.pinnacle_phase.clamp(1, 3);
-    Some(PinnacleInfo {
-        is_pinnacle: true,
-        phase,
-        phase_total: 3,
-        name: boss.phases[usize::from(phase - 1)].title,
-    })
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActiveBossDuel {
-    pub boss_id: String,
-    pub mechanic_id: String,
-    pub phase: u8,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PinnacleFightDirective {
-    WinWithoutMechanic,
-    LoseWithoutMechanic {
-        ending_boss_hp: i32,
-        boss_hp_max: i32,
-    },
-    PauseAtMechanic {
-        mechanic_index: usize,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PinnacleFightResult {
-    pub success: bool,
-    pub won: Option<bool>,
-    pub boss_id: String,
-    pub boundary: i32,
-    pub phase: u8,
-    pub is_pinnacle: bool,
-    pub phase_two_incoming: bool,
-    pub pending_prompt: bool,
-    pub mechanic_id: Option<String>,
-    pub observed_bleed_rounds: Vec<u8>,
-}
-
-fn fight_result(boss_id: &str, phase: u8) -> PinnacleFightResult {
-    PinnacleFightResult {
-        success: true,
-        won: None,
-        boss_id: boss_id.to_owned(),
-        boundary: PINNACLE_DEPTH,
-        phase,
-        is_pinnacle: true,
-        phase_two_incoming: false,
-        pending_prompt: false,
-        mechanic_id: None,
-        observed_bleed_rounds: Vec::new(),
-    }
-}
-
-pub fn start_pinnacle_fight(
-    state: &mut BossRunState,
-    directive: PinnacleFightDirective,
-) -> Result<PinnacleFightResult, &'static str> {
-    let boss_id = state
-        .pinnacle_boss_id
-        .clone()
-        .ok_or("No pinnacle boss is locked.")?;
-    let boss = pinnacle_by_id(&boss_id).ok_or("Unknown pinnacle boss.")?;
-    let phase = state.pinnacle_phase.clamp(1, 3);
-    let mut result = fight_result(&boss_id, phase);
-    match directive {
-        PinnacleFightDirective::WinWithoutMechanic => {
-            result.won = Some(true);
-            if phase == 1 {
-                state.pinnacle_phase = 2;
-                result.phase_two_incoming = true;
-                state.boss_progress.insert(
-                    PINNACLE_DEPTH.to_string(),
-                    BossProgressValue::Entry(BossProgressEntry {
-                        status: BossStatus::PhaseOneDefeated,
-                        boss_id: Some(boss_id),
-                        ..BossProgressEntry::default()
-                    }),
-                );
-            }
-        }
-        PinnacleFightDirective::LoseWithoutMechanic {
-            ending_boss_hp,
-            boss_hp_max,
-        } => {
-            result.won = Some(false);
-            persist_boss_hp_after_fight(
-                &mut state.boss_progress,
-                PersistBossHp {
-                    key: &format!("{PINNACLE_DEPTH}:{phase}"),
-                    boss_id: &boss_id,
-                    ending_hp: ending_boss_hp,
-                    hp_max: boss_hp_max,
-                    won: false,
-                    outcome: "loss",
-                    now: 1_000_000,
-                },
-            );
-        }
-        PinnacleFightDirective::PauseAtMechanic { mechanic_index } => {
-            let mechanic_id = boss.phases[usize::from(phase - 1)].mechanic_pool[mechanic_index % 2];
-            state.active_duel = Some(ActiveBossDuel {
-                boss_id: boss_id.clone(),
-                mechanic_id: mechanic_id.to_owned(),
-                phase,
-            });
-            result.pending_prompt = true;
-            result.mechanic_id = Some(mechanic_id.to_owned());
-        }
-    }
-    Ok(result)
-}
-
-pub fn resume_pinnacle_fight(
-    state: &mut BossRunState,
-    option_index: usize,
-    adverse_outcome: bool,
-) -> Result<PinnacleFightResult, &'static str> {
-    let active = state.active_duel.take().ok_or("No active boss duel.")?;
-    let definition = mechanic(&active.mechanic_id).ok_or("Unknown boss mechanic.")?;
-    let selected = definition
-        .options
-        .get(option_index)
-        .ok_or("Invalid mechanic option.")?;
-    let outcome = if adverse_outcome {
-        selected.outcome_rolls.last()
-    } else {
-        selected.outcome_rolls.first()
-    }
-    .ok_or("Mechanic option has no outcome.")?;
-    let mut result = fight_result(&active.boss_id, active.phase);
-    result.won = Some(true);
-    result.mechanic_id = Some(active.mechanic_id);
-    if outcome.status_effect == Some(StatusEffect::Bleed) {
-        let mut remaining = 3;
-        for _ in 0..2 {
-            result.observed_bleed_rounds.push(remaining);
-            remaining -= 1;
-        }
-    }
-    Ok(result)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NestedValue {
-    Text(String),
-    TextList(Vec<String>),
-    Object(DictObject),
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DictObject(BTreeMap<String, NestedValue>);
-
-impl DictObject {
-    #[must_use]
-    pub fn new(values: BTreeMap<String, NestedValue>) -> Self {
-        Self(values)
-    }
-
-    #[must_use]
-    pub fn get(&self, key: &str) -> Option<&NestedValue> {
-        self.0.get(key)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EmbedField {
-    pub name: String,
-    pub value: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BossFightEmbed {
-    pub fields: Vec<EmbedField>,
-}
-
-#[must_use]
-pub fn build_pinnacle_victory_embed(result: &DictObject) -> BossFightEmbed {
-    let mut embed = BossFightEmbed::default();
-    let Some(NestedValue::Object(relic)) = result.get("pinnacle_relic") else {
-        return embed;
-    };
-    let Some(NestedValue::Text(name)) = relic.get("name") else {
-        return embed;
-    };
-    let stats = match relic.get("stats") {
-        Some(NestedValue::TextList(values)) => values.join("\n"),
-        _ => String::new(),
-    };
-    embed.fields.push(EmbedField {
-        name: format!("Relic: {name}"),
-        value: stats,
-    });
-    embed
 }
 
 #[cfg(test)]

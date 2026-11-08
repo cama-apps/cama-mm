@@ -1543,6 +1543,100 @@ fn regular_win_enters_phase_two_only_from_prestige_two() {
     }
 }
 
+fn progress_with_hp(hp_remaining: i32, hp_max: i32, last_engaged_at: Option<i64>) -> BossProgress {
+    BossProgress::from([(
+        "25".to_owned(),
+        BossProgressValue::Entry(BossProgressEntry {
+            hp_remaining: Some(hp_remaining),
+            hp_max: Some(hp_max),
+            last_engaged_at,
+            ..BossProgressEntry::default()
+        }),
+    )])
+}
+
+#[test]
+fn persisted_hp_falls_back_to_fresh_without_a_wounded_entry() {
+    assert_eq!(
+        resolve_persisted_hp(&BossProgress::new(), 25, 10, 0),
+        (10, 10)
+    );
+    let legacy = BossProgress::from([(
+        "25".to_owned(),
+        BossProgressValue::Legacy(BossStatus::Active),
+    )]);
+    assert_eq!(resolve_persisted_hp(&legacy, 25, 10, 0), (10, 10));
+}
+
+#[test]
+fn persisted_hp_regenerates_one_point_per_complete_day_up_to_its_cap() {
+    let wounded = progress_with_hp(4, 12, Some(0));
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 12, 0), (4, 12));
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 12, 86_399).0, 4);
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 12, 3 * 86_400).0, 7);
+    assert_eq!(
+        resolve_persisted_hp(&wounded, 25, 12, 100 * 86_400),
+        (12, 12)
+    );
+}
+
+#[test]
+fn persisted_hp_keeps_the_active_boss_cap_when_the_fresh_cap_changes() {
+    let wounded = progress_with_hp(7, 12, Some(0));
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 9, 0), (7, 12));
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 15, 0), (7, 12));
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 9, 2 * 86_400), (9, 12));
+    assert_eq!(
+        resolve_persisted_hp(&progress_with_hp(20, 12, None), 25, 15, 0),
+        (12, 12)
+    );
+}
+
+#[test]
+fn persisting_boss_hp_writes_the_wound_and_keeps_the_phase_status() {
+    let mut progress = BossProgress::new();
+    persist_boss_hp(&mut progress, 25, "grothak", 3, 10, "loss", 42);
+    let BossProgressValue::Entry(stored) = &progress["25"] else {
+        panic!("entry expected")
+    };
+    assert_eq!(stored.hp_remaining, Some(3));
+    assert_eq!(stored.hp_max, Some(10));
+    assert_eq!(stored.last_engaged_at, Some(42));
+    assert_eq!(stored.last_outcome.as_deref(), Some("loss"));
+    assert!(stored.first_meet_seen);
+    assert_eq!(stored.status, BossStatus::Active);
+    assert_eq!(stored.boss_id.as_deref(), Some("grothak"));
+
+    let mut progress = BossProgress::from([(
+        "25".to_owned(),
+        BossProgressValue::Entry(BossProgressEntry {
+            status: BossStatus::PhaseOneDefeated,
+            boss_id: Some("pudge".to_owned()),
+            ..BossProgressEntry::default()
+        }),
+    )]);
+    persist_boss_hp(&mut progress, 25, "pudge", 2, 8, "loss", 100);
+    assert_eq!(progress["25"].status(), BossStatus::PhaseOneDefeated);
+}
+
+#[test]
+fn every_boss_stinger_and_phase_event_resolves_in_the_live_catalogs() {
+    for boss in &BOSSES {
+        assert!(
+            stinger_by_id(boss.stinger_id).is_some(),
+            "{} stinger {}",
+            boss.boss_id,
+            boss.stinger_id
+        );
+    }
+    assert!(PHASE_TRANSITION_EVENTS.len() >= 4);
+    let ids: BTreeSet<_> = PHASE_TRANSITION_EVENTS
+        .iter()
+        .map(|event| event.id)
+        .collect();
+    assert_eq!(ids.len(), PHASE_TRANSITION_EVENTS.len());
+}
+
 #[test]
 fn test_free_fight_loss_repair_bill_floors_at_live_balance() {
     let mut service = test_service(0.5);
