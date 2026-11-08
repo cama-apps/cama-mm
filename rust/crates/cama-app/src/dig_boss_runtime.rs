@@ -71,6 +71,7 @@ use crate::dig_carry_wager::{
     MAX_NEW_BOSS_WAGER, active_pinnacle_carry, current_boss_boundary, pinnacle_wager_profit,
 };
 use crate::dig_relic_rework::{SHIFTING_IDOL_PLAYER_HIT_CEILING, ShiftingIdolBonus};
+use crate::dig_routes::{RouteEntropy, build_route_offer_state};
 use crate::dig_service::{BOSS_REST_PENDING_KEY, DIG_STARTING_STAT_POINTS};
 use crate::dig_tunnel_naming::DigTunnelNamingService;
 use crate::economy_event_service::EconomyEventConfig;
@@ -249,6 +250,8 @@ impl BossRepositoryPort for SqliteBossRepository {
             ) != BossStatus::Defeated
         {
             apply_first_clear_stat_award(&loaded.snapshot, &mut proposed, audit.boundary)
+                .map_err(|error| self.repository_error(error))?;
+            apply_route_offer(&loaded.snapshot, &mut proposed, audit.boundary)
                 .map_err(|error| self.repository_error(error))?;
         }
         let detail = commit
@@ -1231,6 +1234,36 @@ fn apply_first_clear_stat_award(
         })
         .to_string(),
     );
+    Ok(())
+}
+
+/// Route offers draw from the process RNG, like the module-level `random`
+/// the offer used in Python, so the fight's injected entropy stream is
+/// unchanged.
+struct ProcessRouteEntropy;
+
+impl RouteEntropy for ProcessRouteEntropy {
+    fn index(&mut self, upper_exclusive: usize) -> usize {
+        fastrand::usize(..upper_exclusive)
+    }
+}
+
+/// A tier-boss kill opens the next layer's three-route offer in the same
+/// guarded write as the victory. Other boundaries keep their route state.
+fn apply_route_offer(
+    snapshot: &DigBossRuntimeSnapshot,
+    proposed: &mut DigBossRuntimeState,
+    boundary: i32,
+) -> Result<(), String> {
+    let offer = build_route_offer_state(
+        snapshot.route_state_json.as_deref(),
+        i64::from(boundary),
+        &mut ProcessRouteEntropy,
+    )
+    .map_err(|error| error.to_string())?;
+    if let Some(offer) = offer {
+        proposed.route_state_json = Some(offer.to_python_json());
+    }
     Ok(())
 }
 
