@@ -2472,7 +2472,7 @@ fn fixture_with_discord_and_config(
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
     let media = Arc::new(DigMediaRuntime::production(&DigRuntimeConfig {
-        asset_root: root.into(),
+        asset_root: root,
         ..DigRuntimeConfig::default()
     }));
     let provider =
@@ -6674,7 +6674,7 @@ fn rendered_media_keeps_stats_and_event_ui_separate_with_exact_attachments() {
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
     let media = DigMediaRuntime::production(&DigRuntimeConfig {
-        asset_root: root.into(),
+        asset_root: root,
         ..DigRuntimeConfig::default()
     });
     let result = DigRuntimeOutcome {
@@ -6805,7 +6805,7 @@ fn event_prompt_applies_durable_darkness_and_reading_the_stone_policy() {
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
     let media = DigMediaRuntime::production(&DigRuntimeConfig {
-        asset_root: root.into(),
+        asset_root: root,
         ..DigRuntimeConfig::default()
     });
     let result = DigRuntimeOutcome {

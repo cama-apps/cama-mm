@@ -364,7 +364,7 @@ fn canonical_production_tree_covers_every_boss_slug_and_file_size_contract() {
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
     let runtime = DigMediaRuntime::production(&DigRuntimeConfig {
-        asset_root: root.into(),
+        asset_root: root,
         ..DigRuntimeConfig::default()
     });
     for layer in crate::dig_assets::LAYER_PALETTES {
