@@ -4210,6 +4210,79 @@ fn live_route_plain_dig(route_id: Option<&str>, now: i64) -> super::DigRuntimeOu
     outcome
 }
 
+/// Run one non-cave Dig at `depth` under neutral weather, with or without an
+/// equipped Pathfinder's Spur, and return its advance.
+fn live_pathfinder_advance(depth: i64, equipped: bool, now: i64) -> i64 {
+    let (actor, guild) = (62_393, 62_394);
+    let database = fast_migrated_database();
+    seed_live_runtime_tunnel(&database, actor, guild, now, depth, 1, Some(now - 7_200));
+    let connection = Connection::open(database.path()).expect("pathfinder connection");
+    if equipped {
+        connection
+            .execute(
+                "INSERT INTO dig_artifacts(
+                     discord_id,guild_id,artifact_id,found_at,is_relic,equipped
+                 ) VALUES(?1,?2,'pathfinders_spur',?3,1,1)",
+                params![actor, guild, now - 5_000],
+            )
+            .expect("equip Pathfinder's Spur");
+    }
+    let today = game_date_for_timestamp(now as f64).expect("pathfinder Dig date");
+    connection
+        .execute(
+            "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES (?1,?2,?3,'pathfinder_neutral'),
+                        (?1,?2,'Dirt','pathfinder_neutral_other')",
+            params![guild, today, super::layer_at(depth).name],
+        )
+        .expect("seed neutral pathfinder weather");
+    drop(connection);
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("pathfinder Dig");
+    assert!(outcome.success && !outcome.cave_in, "{:?}", outcome.error);
+    outcome.advance
+}
+
+/// Python's `dig_core_mixin`: Pathfinder's Spur adds one advance per Dig that
+/// starts at depth 150 or deeper.
+#[test]
+fn pathfinders_spur_adds_one_advance_from_depth_150() {
+    let (actor, guild) = (62_393, 62_394);
+    let now = (1_900_096_000..1_900_196_000)
+        .find(|candidate| {
+            let mut entropy = SeededLootEntropy::new(super::seed_for(
+                DigRuntimeRequest {
+                    discord_id: actor,
+                    guild_id: guild,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                },
+                0,
+            ));
+            entropy.unit() > 0.8
+        })
+        .expect("deterministic non-cave seed");
+    for depth in [150, 180] {
+        assert_eq!(
+            live_pathfinder_advance(depth, true, now),
+            live_pathfinder_advance(depth, false, now) + 1,
+            "depth {depth}"
+        );
+    }
+    assert_eq!(
+        live_pathfinder_advance(140, true, now),
+        live_pathfinder_advance(140, false, now)
+    );
+}
+
 #[test]
 fn sqlite_selected_route_shapes_live_advance_and_luminosity_drain() {
     let (actor, guild) = (60_303, 60_304);

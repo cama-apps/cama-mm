@@ -2219,6 +2219,8 @@ where
                 + curse_fx.advance_bonus
                 + gear_fx.advance_bonus
                 + buff_fx.advance_bonus
+                // Pathfinder's Spur: +1 advance in the deep layers.
+                + i64::from(depth_before >= 150 && relics.contains("pathfinders_spur"))
                 + if layer_at(depth_before).name == "The Hollow" {
                     perk_fx.get("hollow_advance_bonus").copied().unwrap_or(0.0) as i64
                 } else {
