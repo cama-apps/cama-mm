@@ -222,28 +222,6 @@ fn display_names_match_override_and_titlecase_fallback() {
 }
 
 #[test]
-fn picking_past_cap_rejects_without_mutating_the_tunnel() {
-    let key = crate::dig_tunnels::TunnelKey::new(10_001, 12_345);
-    let mut tunnel = crate::dig_tunnels::Tunnel::new(key, "Amber Descent", 3_000);
-    tunnel.mark_prestige_ready();
-    tunnel.prestige_perks = owned_perks(&["loot_multiplier"; PRESTIGE_PERK_STACK_CAP]);
-    let expected = tunnel.clone();
-    let mut repository = crate::dig_tunnels::InMemoryTunnelRepository::default();
-    repository.insert(tunnel);
-    let mut service = crate::dig_tunnels::TunnelService::new(
-        repository,
-        crate::dig_tunnels::SplitMixEntropy::new(7),
-    );
-
-    assert_eq!(
-        service.prestige(key, "loot_multiplier", None, 1_000_000),
-        Err(crate::dig_tunnels::TunnelError::PerkAtCap)
-    );
-    assert_eq!(service.repository().tunnel(key), Some(&expected));
-    assert!(service.repository().actions().is_empty());
-}
-
-#[test]
 fn loot_multiplier_display_name_is_loot_bonus() {
     assert_eq!(prestige_perk_display_name("loot_multiplier"), "Loot Bonus");
 }

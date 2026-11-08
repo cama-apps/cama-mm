@@ -3848,6 +3848,38 @@ fn sqlite_live_event_gate_multiplies_ascension_weather_and_route_factors() {
     );
 }
 
+#[test]
+fn sqlite_text_stored_tunnel_integers_load_as_integers() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_305, 60_306);
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(actor, "text-columns", Some(guild)))
+        .expect("seed text-column player");
+    Connection::open(database.path())
+        .expect("text-column connection")
+        .execute(
+            "INSERT INTO tunnels
+                 (discord_id,guild_id,tunnel_name,depth,luminosity,prestige_level,last_dig_at)
+             VALUES (?1,?2,'Test Tunnel','49','100','2',NULL)",
+            params![actor, guild],
+        )
+        .expect("seed text-stored integers");
+    let info = DigRuntimeService::sqlite(database.path())
+        .tunnel_info(actor, guild)
+        .expect("load text-column tunnel")
+        .expect("text-column tunnel");
+    assert_eq!(
+        (
+            info.depth,
+            info.luminosity,
+            info.prestige_level,
+            info.last_dig_at
+        ),
+        (49, 100, 2, None)
+    );
+    assert_eq!(info.tunnel_name, "Test Tunnel");
+}
+
 fn selected_fungal_route_state(route_id: &str) -> String {
     format!(
         r#"{{"end_depth":200,"layer":"Fungal Depths","offered":["{route_id}","mycelial_track","rotcap_hollow"],"selected":"{route_id}","start_depth":150}}"#

@@ -1524,6 +1524,26 @@ fn test_win_applies_economy_event_and_bankruptcy_debuff() {
 }
 
 #[test]
+fn regular_win_enters_phase_two_only_from_prestige_two() {
+    for (prestige, expected) in [(1, BossStatus::Defeated), (2, BossStatus::PhaseOneDefeated)] {
+        let mut service = test_service(0.01);
+        service
+            .repository
+            .insert_tunnel(key(), tunnel(24, prestige, 500));
+        let result = service
+            .fight_boss_with_override(key(), RiskTier::Cautious, 0, Some(winning_override()))
+            .expect("fight resolves");
+        assert!(result.won);
+        let current = service.repository.load_tunnel(key()).unwrap();
+        assert_eq!(
+            current.boss_progress["25"].status(),
+            expected,
+            "P{prestige}"
+        );
+    }
+}
+
+#[test]
 fn test_free_fight_loss_repair_bill_floors_at_live_balance() {
     let mut service = test_service(0.5);
     service.repository.insert_tunnel(key(), tunnel(24, 0, 2));

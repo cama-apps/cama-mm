@@ -114,12 +114,6 @@ pub fn round_prestige_perk_bonus_half_up(value: f64) -> i64 {
     (value.max(0.0) + 0.5) as i64
 }
 
-/// Return whether an optional tunnel owns at least one copy of a perk.
-#[must_use]
-pub fn owns_prestige_perk(tunnel: Option<&Tunnel>, perk_id: &str) -> bool {
-    tunnel.is_some_and(|tunnel| tunnel.prestige_perks.iter().any(|owned| owned == perk_id))
-}
-
 pub const READING_STONE_SAFE_HINTS: [&str; 3] = [
     "The walls whisper of patience here.",
     "A familiar rhythm — caution holds today.",
@@ -1044,15 +1038,6 @@ impl Tunnel {
             route_state: None,
         }
     }
-
-    pub fn mark_prestige_ready(&mut self) {
-        self.depth = i64::from(PINNACLE_DEPTH);
-        for boundary in BOSS_BOUNDARIES {
-            self.boss_progress.insert(boundary, BossStatus::Defeated);
-        }
-        self.boss_progress
-            .insert(PINNACLE_DEPTH, BossStatus::Defeated);
-    }
 }
 
 fn active_regular_bosses() -> BTreeMap<i32, BossStatus> {
@@ -1081,121 +1066,6 @@ pub fn calculate_run_score(tunnel: &Tunnel) -> i64 {
         multiplier += score_multiplier;
     }
     (base as f64 * multiplier) as i64
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RegularBossWin {
-    pub phase: u8,
-    pub phase_two_incoming: bool,
-    pub persisted_status: BossStatus,
-}
-
-#[must_use]
-pub const fn regular_boss_win(prestige_level: i32) -> RegularBossWin {
-    if prestige_level >= 2 {
-        RegularBossWin {
-            phase: 1,
-            phase_two_incoming: true,
-            persisted_status: BossStatus::PhaseOneDefeated,
-        }
-    } else {
-        RegularBossWin {
-            phase: 1,
-            phase_two_incoming: false,
-            persisted_status: BossStatus::Defeated,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RawTunnelValue {
-    Integer(i64),
-    Text(String),
-    Null,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NormalizationError {
-    pub column: String,
-    pub value: String,
-}
-
-impl Display for NormalizationError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "tunnel column {} is not an integer: {}",
-            self.column, self.value
-        )
-    }
-}
-
-impl Error for NormalizationError {}
-
-fn is_integer_tunnel_column(column: &str) -> bool {
-    matches!(
-        column,
-        "discord_id"
-            | "guild_id"
-            | "depth"
-            | "max_depth"
-            | "total_digs"
-            | "total_jc_earned"
-            | "last_dig_at"
-            | "streak_days"
-            | "pickaxe_tier"
-            | "prestige_level"
-            | "trap_active"
-            | "trap_free_today"
-            | "insured_until"
-            | "reinforced_until"
-            | "paid_digs_today"
-            | "revenge_target"
-            | "revenge_until"
-            | "hard_hat_charges"
-            | "void_bait_digs"
-            | "luminosity"
-            | "boss_attempts"
-            | "grappling_hook_charges"
-            | "sonar_skip_pending"
-            | "best_run_score"
-            | "current_run_jc"
-            | "current_run_artifacts"
-            | "current_run_events"
-            | "total_prestige_score"
-            | "stat_strength"
-            | "stat_smarts"
-            | "stat_stamina"
-            | "stat_survival"
-            | "stat_points"
-            | "last_lum_update_at"
-            | "pinnacle_phase"
-            | "pinnacle_hp_remaining"
-            | "pinnacle_last_engaged_at"
-            | "cavein_free_streak"
-            | "relic_trim_notice"
-            | "auto_buy_torch"
-            | "auto_buy_hard_hat"
-            | "last_cheer_at"
-    )
-}
-
-pub fn normalize_tunnel_row(
-    row: &mut BTreeMap<String, RawTunnelValue>,
-) -> Result<(), NormalizationError> {
-    for (column, value) in row.iter_mut() {
-        if !is_integer_tunnel_column(column) {
-            continue;
-        }
-        if let RawTunnelValue::Text(raw) = value {
-            let parsed = raw.parse::<i64>().map_err(|_| NormalizationError {
-                column: column.clone(),
-                value: raw.clone(),
-            })?;
-            *value = RawTunnelValue::Integer(parsed);
-        }
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1265,19 +1135,6 @@ impl InMemoryTunnelRepository {
 
     pub fn tunnel_mut(&mut self, key: TunnelKey) -> Option<&mut Tunnel> {
         self.tunnels.get_mut(&key)
-    }
-
-    pub fn update_last_cheer_at(
-        &mut self,
-        key: TunnelKey,
-        last_cheer_at: i64,
-    ) -> Result<(), PersistenceError> {
-        let tunnel = self
-            .tunnels
-            .get_mut(&key)
-            .ok_or(PersistenceError::MissingTunnel)?;
-        tunnel.last_cheer_at = Some(last_cheer_at);
-        Ok(())
     }
 
     pub fn fail_next_atomic(&mut self) {
@@ -1616,22 +1473,8 @@ where
         Ok(AbandonResult { depth_lost, refund })
     }
 
-    pub fn help_target(&self, target: TunnelKey) -> Result<TunnelNameProjection, TunnelError> {
-        self.target_projection(target)
-    }
-
-    pub fn sabotage_target(&self, target: TunnelKey) -> Result<TunnelNameProjection, TunnelError> {
-        self.target_projection(target)
-    }
-
     pub fn flex_data(&self, key: TunnelKey) -> Result<TunnelNameProjection, TunnelError> {
         self.target_projection(key)
-    }
-
-    pub fn first_letter_clue(&self, key: TunnelKey) -> Result<String, TunnelError> {
-        let name = self.target_projection(key)?.tunnel_name;
-        let first = name.chars().next().ok_or(TunnelError::EmptyTunnelName)?;
-        Ok(format!("Their tunnel name starts with **{first}**."))
     }
 
     #[must_use]
