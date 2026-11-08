@@ -3765,6 +3765,12 @@ impl DigInteractionHandler {
                     result.outcome.carried_wager_forfeit
                 ));
             }
+            if result.abandoned_wager_forfeit > 0 {
+                content.push_str(&format!(
+                    " The paused duel was abandoned and its wager forfeited: **{}** {JOPACOIN_EMOTE}.",
+                    result.abandoned_wager_forfeit
+                ));
+            }
             return responder
                 .followup(InteractionResponse::message(content))
                 .await

@@ -1355,6 +1355,7 @@ fn boss_mechanic_prompt_shows_authored_copy_choices_and_live_hp() {
         forced_no_wager_phase: false,
         echo_applied: false,
         echo_killer_id: None,
+        wager_escrowed: true,
     };
 
     let response = super::paused_boss_response(&paused, USER as i64, GUILD as i64);

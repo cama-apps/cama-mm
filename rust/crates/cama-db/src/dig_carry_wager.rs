@@ -68,7 +68,26 @@ impl CarryTunnelSnapshot {
             .iter()
             .find_map(|(candidate, entry)| (*candidate == boundary).then_some(entry))
     }
+
+    /// Whether the wager carried at `boundary` was escrowed when it was
+    /// carried. A carry without the marker predates escrow.
+    #[must_use]
+    pub fn carried_wager_escrowed(&self, boundary: i64) -> bool {
+        serde_json::from_str::<serde_json::Value>(&self.boss_progress)
+            .ok()
+            .and_then(|progress| {
+                progress
+                    .get(boundary.to_string())
+                    .and_then(|entry| entry.get(CARRIED_WAGER_ESCROWED_KEY))
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
 }
+
+/// Progress-entry marker set beside `carried_wager` when the carried stake is
+/// already escrowed.
+pub const CARRIED_WAGER_ESCROWED_KEY: &str = "carried_wager_escrowed";
 
 /// JSON mutation applied by an atomic settlement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

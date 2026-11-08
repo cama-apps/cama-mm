@@ -47,6 +47,13 @@ pub mod dig_event_runtime {
 pub mod dig_abandon_runtime {
     pub use crate::dig_abandon_runtime_repository::*;
 }
+// The abandon source settles a paused duel or carried pinnacle wager, so it
+// reads both the boss repository and the carry policy under these paths.
+pub use cama_db_external::dig_boss_runtime;
+pub mod dig_carry_wager {
+    pub use cama_app::dig_carry_wager::{PINNACLE_BOUNDARY, active_pinnacle_carry};
+    pub use cama_db_external::dig_carry_wager::*;
+}
 
 fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
     let connection = Connection::open_with_flags(
