@@ -1416,32 +1416,6 @@ fn progression_line(
 }
 
 #[must_use]
-pub fn build_training_field(
-    career: &crate::pet_brawl::CareerSummary,
-    solo_training_sessions: i64,
-) -> EmbedField {
-    let titles = [career.rank.as_deref(), career.build.as_deref()]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let level = career.strength + career.intelligence + career.dexterity;
-    let title_line = if titles.is_empty() {
-        String::new()
-    } else {
-        format!("\n{titles}")
-    };
-    EmbedField {
-        name: "🏋️ Training".to_owned(),
-        value: format!(
-            "Level {level}/4 · {}/20 XP\nSTR {} · INT {} · DEX {}\nSolo: {solo_training_sessions}/3 banked · `/pet train`{title_line}",
-            career.xp, career.strength, career.intelligence, career.dexterity
-        ),
-        inline: false,
-    }
-}
-
-#[must_use]
 pub fn build_declined_embed(recipient_name: &str) -> EmbedModel {
     EmbedModel {
         title: "🐫 Challenge declined".to_owned(),
@@ -1978,28 +1952,6 @@ mod tests {
 
         assert!(challenge.is_none());
         assert!(last_content(&discord).contains("Bots"));
-    }
-
-    #[test]
-    fn test_status_embed_shows_training_stats_rank_and_build() {
-        let career = CareerSummary {
-            xp: 20,
-            strength: 2,
-            intelligence: 1,
-            dexterity: 1,
-            rank: Some("Champion".to_owned()),
-            build: Some("Bruiser".to_owned()),
-        };
-
-        let training = build_training_field(&career, 3);
-
-        assert!(training.value.contains("20/20 XP"));
-        assert!(training.value.contains("STR 2"));
-        assert!(training.value.contains("INT 1"));
-        assert!(training.value.contains("DEX 1"));
-        assert!(training.value.contains("Champion"));
-        assert!(training.value.contains("Bruiser"));
-        assert!(training.value.contains("3/3 banked"));
     }
 
     #[test]

@@ -66,6 +66,16 @@ fn test_boundary_at_075_is_silly() {
     assert_eq!(scripted(0.75, [1]), "The Big Hole");
 }
 
+fn is_known_tunnel_name(name: &str) -> bool {
+    TUNNEL_NAME_SILLY.contains(&name)
+        || (0..TITLE_COUNT).any(|index| title_at(index) == name)
+        || TUNNEL_NAME_ADJECTIVES.iter().any(|adjective| {
+            TUNNEL_NAME_NOUNS
+                .iter()
+                .any(|noun| name == format!("The {adjective} {noun}"))
+        })
+}
+
 #[test]
 fn test_always_returns_a_known_pool_name() {
     let mut service = DigTunnelNamingService::new(FastrandTunnelNameEntropy::seeded(2_024));

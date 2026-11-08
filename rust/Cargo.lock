@@ -550,6 +550,7 @@ dependencies = [
  "async-trait",
  "axum",
  "cama-app",
+ "cama-app-dig",
  "cama-db",
  "cama-domain",
  "cama-runtime-core",

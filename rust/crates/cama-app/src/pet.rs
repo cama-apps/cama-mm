@@ -24,8 +24,8 @@ use cama_domain::pet::{
     PITY_THRESHOLD, PITY_TIER_WEIGHTS, Pet, PetDigWork, PetError, PetMood, PetStage, PetStatus,
     REFUND_MULT_MAX, REFUND_MULT_MIN, RefundNotice, RefundPayout, SALT_LICK,
     SALT_LICK_DURATION_SECONDS, SPECIES, SUPPLY_STACK_CAP, SpeciesTier, TRINKET_COST,
-    TRINKET_DUPE_REFUND, TierWeights, TrinketOutcome, UNHATCHED_SPECIES, WARNING_HUNGER,
-    adoption_fee, food_cost, get_species, sacrifice_tier_weights, species_ids_by_tier,
+    TRINKET_DUPE_REFUND, TierWeights, TrinketOutcome, UNHATCHED_SPECIES, adoption_fee, food_cost,
+    get_species, sacrifice_tier_weights, species_ids_by_tier,
 };
 use cama_domain::pet_evolution::PetActivity;
 use cama_domain::service_result::ServiceResult;
@@ -638,24 +638,6 @@ where
             evolution_hint: None,
             pet: Some(pet),
         })
-    }
-
-    pub fn get_warning_crossing(
-        &mut self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Option<(i64, String)>, PetApplicationError> {
-        let now = self.clock.now();
-        let Some(pet) = self.living_pet(discord_id, guild_id, now)? else {
-            return Ok(None);
-        };
-        if now < pet.hatched_at {
-            return Ok(None);
-        }
-        Ok(Some((
-            pet.hunger_crossing_time(WARNING_HUNGER, self.decay_per_day)?,
-            pet.name,
-        )))
     }
 
     pub fn adopt(
@@ -3220,31 +3202,6 @@ mod tests {
             assert_eq!(first.species, "rama");
             assert_eq!(retried.species, "rama");
             assert_eq!(service.random().weighted.len(), 1);
-        }
-
-        #[test]
-        fn warning_crossing_is_deferred_until_species_resolves() {
-            let (mut service, clock) = fixture();
-            let egg = service
-                .adopt(OWNER, Some(GUILD), "Later", "standard")
-                .unwrap()
-                .pet;
-            assert_eq!(
-                service.get_warning_crossing(OWNER, Some(GUILD)).unwrap(),
-                None
-            );
-            clock.set(egg.hatched_at);
-            service.random_mut().push_weighted("dromedary_cross");
-
-            let crossing = service.get_warning_crossing(OWNER, Some(GUILD)).unwrap();
-
-            assert_eq!(
-                crossing,
-                Some((
-                    egg.hatched_at + 70 * DAY * 100 / (20 * 90),
-                    "Later".to_owned()
-                ))
-            );
         }
     }
 

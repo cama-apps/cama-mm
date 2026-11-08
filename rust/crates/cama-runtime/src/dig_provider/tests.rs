@@ -8617,6 +8617,70 @@ fn dig_result_embed_shows_an_active_curse_on_a_later_dig() {
 }
 
 #[test]
+fn route_choice_view_shows_the_persisted_offer() {
+    let route =
+        |id: &str, name: &str, description: &str, layer: Option<&str>| super::DigRouteOfferView {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            description: description.to_owned(),
+            layer: layer.map(str::to_owned),
+        };
+    let choice = super::DigRouteChoiceView {
+        layer: "Stone".to_owned(),
+        start_depth: 25,
+        end_depth: 50,
+        offered_routes: vec![
+            route(
+                "shored_passage",
+                "Shored Passage",
+                "Safer, but slower.",
+                None,
+            ),
+            route(
+                "old_supports",
+                "Old Supports",
+                "Old braces hold the stone back.",
+                Some("Stone"),
+            ),
+            route(
+                "fossil_seam",
+                "Fossil Seam",
+                "A rich but unstable seam.",
+                Some("Stone"),
+            ),
+        ],
+    };
+
+    let response =
+        super::route_choice_response(&choice, "nonce", USER as i64, GUILD as i64, "token", false);
+    let embed = &response.embeds[0];
+
+    assert_eq!(embed.title.as_deref(), Some("Stone Junction"));
+    let description = embed.description.as_deref().expect("junction description");
+    assert!(description.contains("**25**") && description.contains("**50**"));
+    assert_eq!(
+        embed.color,
+        Some(cama_app::dig_view_supplements::layer_color("Stone"))
+    );
+    assert_eq!(
+        embed
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.value.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Shored Passage", "Safer, but slower."),
+            ("Old Supports", "Old braces hold the stone back."),
+            ("Fossil Seam", "A rich but unstable seam."),
+        ]
+    );
+    assert_eq!(
+        embed.footer.as_deref(),
+        Some("No rerolls. If this view expires, use /dig go to reopen it.")
+    );
+}
+
+#[test]
 fn dig_result_embed_credits_pet_excavation_in_progress() {
     let mut result = hook_outcome();
     result.advance = 17;

@@ -71,6 +71,40 @@ fn dig_reminder_reads_mana_on_the_day_the_mana_service_assigned_it() {
 }
 
 #[test]
+fn pet_warning_waits_for_a_hatched_species() {
+    let file = migrated_database();
+    let connection = Connection::open(file.path()).expect("open migrated database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("match runtime SQLite compatibility mode");
+    connection
+        .execute(
+            "INSERT INTO pets
+                (discord_id,guild_id,name,species,adopted_at,hatched_at,adopt_fee,
+                 last_fed_at,hunger_at_last_fed,dig_work_at)
+             VALUES (?1,?2,'Later',?3,?4,?4,0,?4,100,?4)",
+            (USER, GUILD, cama_domain::pet::UNHATCHED_SPECIES, NOW - 60),
+        )
+        .expect("seed egg");
+    let store = SqliteReminderStore::new(file.path(), 20);
+    let warning = |store: &SqliteReminderStore| {
+        store
+            .get_pet_warning(UserId::new(USER), GuildId::new(GUILD), NOW)
+            .expect("pet warning")
+    };
+    assert!(warning(&store).is_none(), "an unhatched egg has no warning");
+
+    connection
+        .execute(
+            "UPDATE pets SET species='common_cama' WHERE discord_id=?1 AND guild_id=?2",
+            (USER, GUILD),
+        )
+        .expect("resolve species");
+    let resolved = warning(&store).expect("hatched pet warning");
+    assert_eq!(resolved.pet_name, "Later");
+}
+
+#[test]
 fn migrated_sqlite_adapter_persists_preferences_and_reads_every_recovery_anchor() {
     let file = migrated_database();
     let connection = Connection::open(file.path()).expect("open migrated database");

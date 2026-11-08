@@ -1948,14 +1948,63 @@ async fn live_trinket_roll_persists_equipment_and_autocomplete() {
         .handle(autocomplete_request(""), autocomplete.clone())
         .await
         .expect("trinket autocomplete");
-    assert_eq!(
-        autocomplete
-            .autocompletes
-            .lock()
-            .expect("trinket choices")
-            .len(),
-        1
+    provider
+        .handler
+        .handle(
+            autocomplete_request("no trinket has this name"),
+            autocomplete.clone(),
+        )
+        .await
+        .expect("filtered trinket autocomplete");
+    let choices = autocomplete.autocompletes.lock().expect("trinket choices");
+    assert_eq!(choices.len(), 2);
+    let owned = choices[0]
+        .iter()
+        .map(|choice| match choice {
+            CommandOptionChoice::String { value, .. } => value.clone(),
+            other => panic!("trinket choices are strings: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(owned, vec![accessory.expect("owned trinket")]);
+    assert!(
+        choices[1].is_empty(),
+        "only matching owned trinkets are offered"
     );
+}
+
+#[tokio::test]
+async fn status_buttons_reject_other_users_without_touching_the_panel() {
+    let (_database, provider, _pet_id) = fixture(false);
+    let initial = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(status_command(), initial.clone())
+        .await
+        .expect("status response");
+    let intruder = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(
+            component_as(initial.button_id_containing(":buy:"), RECIPIENT),
+            intruder.clone(),
+        )
+        .await
+        .expect("foreign click");
+    let replies = intruder
+        .responses
+        .lock()
+        .expect("responses")
+        .iter()
+        .chain(intruder.followups.lock().expect("followups").iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        replies
+            .iter()
+            .any(|reply| reply.ephemeral && reply.content.contains("not your cama")),
+        "{replies:?}"
+    );
+    assert!(initial.edits.lock().expect("edits").is_empty());
 }
 
 #[tokio::test]
