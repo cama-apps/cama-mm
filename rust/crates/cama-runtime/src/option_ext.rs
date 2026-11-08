@@ -81,13 +81,6 @@ pub struct UserOptionValue {
 }
 
 impl UserOptionValue {
-    /// The resolved display name, falling back to the numeric ID.
-    pub fn display_name_or_id(&self) -> String {
-        self.display_name
-            .clone()
-            .unwrap_or_else(|| self.raw_id.to_string())
-    }
-
     /// The payload's readable display name, else `Unknown player`. Never an
     /// ID or mention markup.
     #[must_use]
@@ -237,7 +230,6 @@ mod tests {
             .expect("present user");
         assert_eq!(user.id, 5);
         assert_eq!(user.raw_id, 5);
-        assert_eq!(user.display_name_or_id(), "Miner");
         assert_eq!(user.readable_display_name(), "Miner");
     }
 
@@ -260,15 +252,6 @@ mod tests {
         );
         let unknown = vec![option("target", InteractionValue::Unknown)];
         assert_eq!(user_option(&unknown, "target"), Ok(None));
-    }
-
-    #[test]
-    fn display_name_or_id_falls_back_to_id() {
-        let options = vec![user("target", 7, None)];
-        let user = user_option(&options, "target")
-            .expect("valid user")
-            .expect("present user");
-        assert_eq!(user.display_name_or_id(), "7");
     }
 
     #[test]

@@ -1212,3 +1212,51 @@ fn test_recovering_elapsed_pet_warning_cancels_stale_generation() {
             .is_none()
     );
 }
+
+#[test]
+fn pet_reminder_is_scheduled_only_when_enabled_and_still_ahead() {
+    let mut service = fixture();
+    let key = task_key(111, TEST_GUILD_ID, ReminderKind::Pet);
+
+    let disabled = service
+        .schedule_pet_reminder(
+            user(111),
+            Some(guild(TEST_GUILD_ID)),
+            NOW + 1_000,
+            "Blep",
+            Some(false),
+        )
+        .unwrap();
+    assert!(disabled.is_none());
+    assert!(service.task(key).is_none());
+
+    let past = service
+        .schedule_pet_reminder(
+            user(111),
+            Some(guild(TEST_GUILD_ID)),
+            NOW - 1,
+            "Blep",
+            Some(true),
+        )
+        .unwrap();
+    assert!(past.is_none());
+    assert!(service.task(key).is_none());
+
+    let armed = service
+        .schedule_pet_reminder(
+            user(111),
+            Some(guild(TEST_GUILD_ID)),
+            NOW + 1_000,
+            "Blep",
+            Some(true),
+        )
+        .unwrap()
+        .expect("armed pet reminder");
+    assert!(is_pending(&service, armed));
+    let task = service.task(key).expect("pet task");
+    assert!(
+        task.message.contains("**Blep** is getting hungry!"),
+        "{}",
+        task.message
+    );
+}

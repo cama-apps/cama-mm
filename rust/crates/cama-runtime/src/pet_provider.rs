@@ -3346,7 +3346,7 @@ fn optional_user(
     Ok(crate::option_ext::user_option(options, name)?.map(|user| {
         (
             user.id,
-            user.display_name_or_id(),
+            user.readable_display_name(),
             user.is_bot.unwrap_or(false),
         )
     }))
