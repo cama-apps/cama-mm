@@ -17,8 +17,6 @@ use thiserror::Error;
 use crate::open_runtime_connection;
 
 pub const CONTRACT_VALUE: i64 = 10;
-pub const PRICE_LOW: i64 = 5;
-pub const PRICE_HIGH: i64 = 95;
 pub const MAX_CONTRACTS_PER_TRADE: i64 = 1_000;
 pub const REFRESH_SECONDS: i64 = 86_400;
 
@@ -258,14 +256,6 @@ pub struct PnlHistoryPoint {
     pub prediction_id: i64,
     pub settle_time: i64,
     pub delta: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetWorthEntry {
-    pub discord_id: i64,
-    pub name: String,
-    pub jopacoin_balance: i64,
-    pub net_worth: i64,
 }
 
 #[derive(Debug, Error)]

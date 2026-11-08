@@ -8,14 +8,10 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use cama_db::package_deal_repository::calculate_package_deal_cost;
 use cama_db::shop_runtime::{
     HostileDestination, HostileLossRequest, HostileLossSettlement, ShopPlayer,
 };
-use cama_domain::economy_scaling::{
-    DailyRewardPolicy, adjust_generated_jc_reward, scale_deflationary_minigame_jc_delta,
-    scale_minigame_jc_delta,
-};
+use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
 use serde_json::json;
 
 pub const SHOP_ANNOUNCE_COST: i64 = 10;
@@ -34,7 +30,6 @@ pub const PACKAGE_DEAL_NO_ACTIVE_COST: i64 = 1;
 pub const PINGEDASH_COST: i64 = 10;
 pub const PINGEDKEVIN_COST: i64 = PINGEDASH_COST;
 pub const PINGEDASH_COOLDOWN_SECONDS: i64 = 86_400;
-pub const PINGEDKEVIN_COOLDOWN_SECONDS: i64 = PINGEDASH_COOLDOWN_SECONDS;
 pub const DOUBLE_OR_NOTHING_COOLDOWN_SECONDS: i64 = 2_592_000;
 pub const PINGEDASH_TENOR_URL: &str = "https://tenor.com/view/hiash-gif-25282310";
 pub const PINGEDKEVIN_TENOR_URL: &str =
@@ -83,40 +78,6 @@ impl CommandResponse {
             allowed_users: Vec::new(),
         }
     }
-
-    fn private_followup(content: impl Into<String>, embed_title: Option<&str>) -> Self {
-        Self {
-            content: content.into(),
-            visibility: Visibility::Ephemeral,
-            phase: ResponsePhase::FollowupAfterEphemeralDefer,
-            embed_title: embed_title.map(str::to_owned),
-            allowed_users: Vec::new(),
-        }
-    }
-}
-
-/// Persistence contract required before the Rust command can become live.
-///
-/// Every money-moving shop action is represented by one atomic operation.  A
-/// Discord adapter must never synthesize these from read-then-write calls.
-pub trait AtomicShopSettlementPort {
-    type Error;
-
-    fn settle_double_or_nothing_atomic(
-        &self,
-        request: DoubleOrNothingRequest,
-    ) -> Result<DoubleOrNothingSettlement, Self::Error>;
-    fn try_purchase_item_atomic(
-        &self,
-        request: ManaPurchaseRequest,
-    ) -> Result<ManaPurchaseResult, Self::Error>;
-    fn refund_item_purchase_atomic(&self, purchase_id: &str) -> Result<bool, Self::Error>;
-    fn get_item_purchase(
-        &self,
-        purchase_id: &str,
-    ) -> Result<Option<ManaPurchaseResult>, Self::Error>;
-    fn mark_item_purchase_applying_atomic(&self, purchase_id: &str) -> Result<bool, Self::Error>;
-    fn complete_item_purchase_atomic(&self, purchase_id: &str) -> Result<bool, Self::Error>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -159,8 +120,6 @@ impl PaidPingKind {
         format!("Spend {cost} jopacoin to send the {}", self.display_name())
     }
 }
-
-pub const SHOP_BUY_PARAMETER_NAMES: &[&str] = &["interaction", "item", "target"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PurchaseFailureReason {
@@ -415,133 +374,10 @@ fn rejected_double(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AllowedMention {
-    pub everyone: bool,
-    pub roles: bool,
-    pub users: Vec<i64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PaidPingDelivery {
-    pub response: CommandResponse,
-    pub allowed_mentions: AllowedMention,
-}
-
-#[must_use]
-pub fn paid_ping_response(
-    kind: PaidPingKind,
-    target_user_id: Option<i64>,
-    purchase: Option<&PaidPingPurchase>,
-) -> CommandResponse {
-    let Some(target_user_id) = target_user_id.filter(|target| *target > 0) else {
-        return CommandResponse::initial_ephemeral(format!(
-            "{} is unavailable because its target user is not configured.",
-            kind.display_name()
-        ));
-    };
-    let Some(purchase) = purchase else {
-        return CommandResponse::initial_ephemeral(format!(
-            "{} is unavailable right now.",
-            kind.display_name()
-        ));
-    };
-    if purchase.success {
-        let mut response = CommandResponse::public_followup(
-            format!("<@{target_user_id}>\n{}", kind.tenor_url()),
-            None,
-        );
-        response.allowed_users.push(target_user_id);
-        return response;
-    }
-    let message = match purchase.reason {
-        Some(PurchaseFailureReason::NotRegistered) => format!(
-            "You need to `/player register` before using `/shop {}`.",
-            kind.command_name()
-        ),
-        Some(PurchaseFailureReason::OnCooldown) => format!(
-            "{} is on cooldown. You can use it again <t:{}:R>.",
-            kind.display_name(),
-            purchase.cooldown_ends_at.unwrap_or_default()
-        ),
-        Some(PurchaseFailureReason::InsufficientBalance) => format!(
-            "You need 10 jopacoin for {}, but you only have {}.",
-            kind.display_name(),
-            purchase.balance
-        ),
-        _ => format!("{} is unavailable right now.", kind.display_name()),
-    };
-    CommandResponse::initial_ephemeral(message)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Choice {
     pub name: &'static str,
     pub value: &'static str,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OwnedChoice {
-    pub name: String,
-    pub value: &'static str,
-}
-
-#[must_use]
-pub fn item_autocomplete(
-    current: &str,
-    configured_package_games: i64,
-    recalibration_on_cooldown: bool,
-) -> Vec<OwnedChoice> {
-    let package_games = package_deal_games(configured_package_games);
-    let mut choices = vec![
-        OwnedChoice {
-            name: format!("Announce Balance ({SHOP_ANNOUNCE_COST} jopacoin)"),
-            value: "announce",
-        },
-        OwnedChoice {
-            name: format!("Announce Balance + Tag User ({SHOP_ANNOUNCE_TARGET_COST} jopacoin)"),
-            value: "announce_target",
-        },
-        OwnedChoice {
-            name: format!("Jopa Coin(TM) ({SHOP_JOPA_COIN_COST} jopacoin)"),
-            value: "jopa_coin",
-        },
-        OwnedChoice {
-            name: format!("Arcana/Immortal Gift ({SHOP_NEW_MYSTERY_GIFT_COST} jopacoin)"),
-            value: "mystery_gift",
-        },
-        OwnedChoice {
-            name: format!("Double or Nothing ({SHOP_DOUBLE_OR_NOTHING_COST} jopacoin)"),
-            value: "double_or_nothing",
-        },
-        OwnedChoice {
-            name: soft_avoid_choice_name(SHOP_SOFT_AVOID_COST),
-            value: "soft_avoid",
-        },
-        OwnedChoice {
-            name: format!(
-                "Package Deal ({PACKAGE_DEAL_NO_ACTIVE_COST} JC at 0 active, 500+ after for {package_games} games)"
-            ),
-            value: "package_deal",
-        },
-        if recalibration_on_cooldown {
-            OwnedChoice {
-                name: "Recalibrate (ON COOLDOWN)".to_owned(),
-                value: "recalibrate_cooldown",
-            }
-        } else {
-            OwnedChoice {
-                name: format!("Recalibrate ({SHOP_RECALIBRATE_COST} jopacoin)"),
-                value: "recalibrate",
-            }
-        },
-    ];
-    if !current.is_empty() {
-        let current = current.to_lowercase();
-        choices.retain(|choice| choice.name.to_lowercase().contains(&current));
-    }
-    choices.truncate(25);
-    choices
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -662,80 +498,6 @@ pub enum RecalibrationEligibility {
     OnCooldown { ends_at: i64 },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RecalibrationOutcome {
-    pub purchase: SimplePurchaseOutcome,
-    pub recalibrated: bool,
-    pub refund: Option<SpendIntent>,
-}
-
-#[must_use]
-pub fn recalibration_purchase(
-    user_id: i64,
-    eligibility: RecalibrationEligibility,
-    balance: i64,
-    debit_committed: bool,
-    recalibration_succeeded: bool,
-    notice_transport_alive: bool,
-) -> RecalibrationOutcome {
-    if eligibility != RecalibrationEligibility::Allowed {
-        let message = match eligibility {
-            RecalibrationEligibility::NotRegistered => {
-                "You need to `/player register` before you can recalibrate.".to_owned()
-            }
-            RecalibrationEligibility::NoRating => {
-                "You don't have a rating yet. Play some games first!".to_owned()
-            }
-            RecalibrationEligibility::InsufficientGames {
-                games_played,
-                min_games,
-            } => format!(
-                "You need at least {min_games} games to recalibrate (you have {games_played})."
-            ),
-            RecalibrationEligibility::OnCooldown { ends_at } => {
-                format!("Recalibration is on cooldown. You can recalibrate again <t:{ends_at}:R>.")
-            }
-            RecalibrationEligibility::Allowed => unreachable!(),
-        };
-        return RecalibrationOutcome {
-            purchase: SimplePurchaseOutcome {
-                response: CommandResponse::initial_ephemeral(message),
-                spend: None,
-                delivered: false,
-                notice_transport_lapsed: !notice_transport_alive,
-            },
-            recalibrated: false,
-            refund: None,
-        };
-    }
-
-    let purchase = simple_purchase(
-        SimpleProduct::Recalibrate,
-        user_id,
-        true,
-        balance,
-        debit_committed,
-        notice_transport_alive,
-    );
-    if !purchase.delivered {
-        return RecalibrationOutcome {
-            purchase,
-            recalibrated: false,
-            refund: None,
-        };
-    }
-    let refund = (!recalibration_succeeded).then_some(SpendIntent {
-        amount: SHOP_RECALIBRATE_COST,
-        source: "shop_recalibrate",
-        actor_id: user_id,
-    });
-    RecalibrationOutcome {
-        purchase,
-        recalibrated: recalibration_succeeded,
-        refund,
-    }
-}
-
 #[must_use]
 pub fn soft_avoid_choice_name(configured_default: i64) -> String {
     let default_cost = configured_default.max(SOFT_AVOID_MIN_COST);
@@ -765,154 +527,9 @@ pub fn calculate_soft_avoid_cost(pairing: Option<PairingRecord>, configured_defa
     (numerator / pairing.games_together).max(SOFT_AVOID_MIN_COST)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SoftAvoidFailure {
-    AlreadyActive { games_remaining: i64 },
-    InsufficientBalance { balance: i64 },
-    Storage,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SoftAvoidCommandOutcome {
-    pub cost: i64,
-    pub response: CommandResponse,
-    pub charged_atomically: bool,
-}
-
-#[must_use]
-pub fn soft_avoid_command_outcome(
-    target_name: &str,
-    pairing: Option<PairingRecord>,
-    preexisting_games: Option<i64>,
-    purchase: Result<i64, SoftAvoidFailure>,
-) -> SoftAvoidCommandOutcome {
-    let cost = calculate_soft_avoid_cost(pairing, SHOP_SOFT_AVOID_COST);
-    if let Some(games) = preexisting_games {
-        return SoftAvoidCommandOutcome {
-            cost,
-            response: CommandResponse::initial_ephemeral(format!(
-                "Your soft avoid for **{target_name}** is already active with {games} games remaining."
-            )),
-            charged_atomically: false,
-        };
-    }
-    match purchase {
-        Ok(games_remaining) => SoftAvoidCommandOutcome {
-            cost,
-            response: CommandResponse::private_followup(
-                format!("Soft Avoid Active: {games_remaining} games remaining"),
-                Some("Soft Avoid Active"),
-            ),
-            charged_atomically: true,
-        },
-        Err(SoftAvoidFailure::AlreadyActive { games_remaining }) => SoftAvoidCommandOutcome {
-            cost,
-            response: CommandResponse::private_followup(
-                format!(
-                    "Your soft avoid for **{target_name}** is already active with {games_remaining} games remaining."
-                ),
-                None,
-            ),
-            charged_atomically: false,
-        },
-        Err(SoftAvoidFailure::InsufficientBalance { balance }) => SoftAvoidCommandOutcome {
-            cost,
-            response: CommandResponse::private_followup(
-                format!("You need {cost} jopacoin for this, but you only have {balance}."),
-                None,
-            ),
-            charged_atomically: false,
-        },
-        Err(SoftAvoidFailure::Storage) => SoftAvoidCommandOutcome {
-            cost,
-            response: CommandResponse::private_followup(
-                "Soft avoid purchase failed before it could be activated. You were not charged.",
-                None,
-            ),
-            charged_atomically: false,
-        },
-    }
-}
-
 #[must_use]
 pub fn package_deal_games(configured_duration: i64) -> i64 {
     configured_duration.min(PACKAGE_DEAL_MAX_GAMES)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PackageDealFailure {
-    AlreadyFull { games_remaining: i64 },
-    InsufficientBalance { balance: i64 },
-    Storage,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PackageDealSuccess {
-    pub cost: i64,
-    pub active_deal_count: i64,
-    pub games_added: i64,
-    pub games_remaining: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PackageDealCommandOutcome {
-    pub active_cost: i64,
-    pub requested_games: i64,
-    pub response: CommandResponse,
-    pub charged_atomically: bool,
-}
-
-#[must_use]
-pub fn package_deal_command_outcome(
-    target_name: &str,
-    buyer_rating: Option<f64>,
-    target_rating: Option<f64>,
-    configured_duration: i64,
-    purchase: Result<PackageDealSuccess, PackageDealFailure>,
-) -> PackageDealCommandOutcome {
-    let active_cost = calculate_package_deal_cost(1, false, buyer_rating, target_rating);
-    let requested_games = package_deal_games(configured_duration);
-    let (response, charged_atomically) = match purchase {
-        Ok(success) => (
-            CommandResponse::private_followup(
-                format!(
-                    "Package Deal Active\n**Games added:** {}\n**Games remaining:** {}\n**Cost:** {} jopacoin",
-                    success.games_added, success.games_remaining, success.cost
-                ),
-                Some("Package Deal Active"),
-            ),
-            true,
-        ),
-        Err(PackageDealFailure::AlreadyFull { games_remaining }) => (
-            CommandResponse::private_followup(
-                format!(
-                    "Your Package Deal with **{target_name}** already has {games_remaining} games remaining. You were not charged."
-                ),
-                None,
-            ),
-            false,
-        ),
-        Err(PackageDealFailure::InsufficientBalance { balance }) => (
-            CommandResponse::private_followup(
-                format!("You need {active_cost} jopacoin for this, but you only have {balance}."),
-                None,
-            ),
-            false,
-        ),
-        Err(PackageDealFailure::Storage) => (
-            CommandResponse::private_followup(
-                "Package deal purchase failed before it could be activated. You were not charged.",
-                None,
-            ),
-            false,
-        ),
-    };
-    PackageDealCommandOutcome {
-        active_cost,
-        requested_games,
-        response,
-        charged_atomically,
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1077,31 +694,12 @@ pub fn mana_item(key: &str) -> Option<ManaItemSpec> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ManaPurchaseRequest {
-    pub account_id: i64,
-    pub guild_id: i64,
-    pub item_key: &'static str,
-    pub day_key: &'static str,
-    pub cost: i64,
-    pub tap_mana: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManaPurchaseFailure {
     AlreadyUsed,
     PurchaseInProgress,
     ManaTapped,
     NotRegistered,
     InsufficientBalance,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ManaPurchaseResult {
-    pub success: bool,
-    pub reason: Option<ManaPurchaseFailure>,
-    pub balance: i64,
-    pub purchase_id: Option<String>,
-    pub item_key: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1158,29 +756,6 @@ pub fn recent_loss_aggregates(
             aggregate.total = aggregate.total.saturating_add(loss);
             aggregate
         })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GeneratedRecovery {
-    pub base_reward: i64,
-    pub adjusted_reward: i64,
-}
-
-#[must_use]
-pub fn generated_recovery(
-    loss: i64,
-    rate: f64,
-    cap: i64,
-    guild_id: Option<i64>,
-    daily_reward_policy: Option<&mut dyn DailyRewardPolicy>,
-) -> GeneratedRecovery {
-    let base_reward = ((loss as f64 * rate) as i64).min(cap);
-    let adjusted_reward =
-        adjust_generated_jc_reward(base_reward as f64, 1.0, guild_id, daily_reward_policy);
-    GeneratedRecovery {
-        base_reward,
-        adjusted_reward,
-    }
 }
 
 /// Settings the hostile mana-shop effects read.

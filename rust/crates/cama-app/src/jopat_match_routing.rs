@@ -1,4 +1,4 @@
-//! Discord-neutral routing for JOPA-T match, pet, and enrichment callouts.
+//! Discord-neutral routing for JOPA-T match and debrief callouts.
 //!
 //! This module owns the tested ordering and selection policy. Every live edge
 //! (Discord, configuration, AI provider, GIF renderer, player names, hero
@@ -6,8 +6,6 @@
 //! without a gateway.
 
 use std::collections::{BTreeMap, VecDeque};
-
-use cama_domain::pet::get_species;
 
 use crate::dig_neon::BigWinFlavor;
 use crate::jopat_post_match::{
@@ -23,10 +21,8 @@ pub const POST_MATCH_BASE_CHANCE: f64 = 0.35;
 pub const POST_MATCH_NOTABLE_CHANCE: f64 = 0.55;
 pub const POST_MATCH_EXTREME_CHANCE: f64 = 0.75;
 pub const POST_MATCH_GIF_CHANCE: f64 = 0.20;
-pub const DEFAULT_MVP_CHANCE: f64 = 0.35;
 pub const BIG_WIN_MIN_PAYOUT: i64 = 500;
 pub const DEGEN_MILESTONE_SCORE: i64 = 90;
-pub const PET_ANNOUNCEMENT_LIMIT: usize = 10;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePortError(pub String);
@@ -98,12 +94,6 @@ impl ScriptedJopatMatchRandom {
             choices: VecDeque::new(),
             observed_chances: Vec::new(),
         }
-    }
-
-    #[must_use]
-    pub fn with_choices(mut self, choices: impl IntoIterator<Item = usize>) -> Self {
-        self.choices = choices.into_iter().collect();
-        self
     }
 
     #[must_use]
@@ -302,9 +292,7 @@ fn numeric(value: Option<&NumericFact>) -> Option<f64> {
 }
 
 pub struct JopatMatchService<R, I, A, G> {
-    enabled: bool,
     ai_enabled: bool,
-    mvp_chance: f64,
     random: R,
     identity: I,
     ai: A,
@@ -321,9 +309,7 @@ where
     #[must_use]
     pub const fn new(random: R, identity: I, ai: A, gifs: G) -> Self {
         Self {
-            enabled: true,
             ai_enabled: false,
-            mvp_chance: DEFAULT_MVP_CHANCE,
             random,
             identity,
             ai,
@@ -332,20 +318,8 @@ where
     }
 
     #[must_use]
-    pub const fn with_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
-        self
-    }
-
-    #[must_use]
     pub const fn with_ai_enabled(mut self, enabled: bool) -> Self {
         self.ai_enabled = enabled;
-        self
-    }
-
-    #[must_use]
-    pub const fn with_mvp_chance(mut self, chance: f64) -> Self {
-        self.mvp_chance = chance;
         self
     }
 
@@ -371,9 +345,6 @@ where
         winner_id: Option<u64>,
         loser_id: Option<u64>,
     ) -> Option<NeonResult> {
-        if !self.enabled {
-            return None;
-        }
         if context.winner_name.is_none()
             && let Some(discord_id) = winner_id
         {
@@ -400,68 +371,6 @@ where
             });
         }
         Some(NeonResult::text(2, text))
-    }
-
-    #[must_use]
-    pub fn on_match_enriched(
-        &mut self,
-        guild_id: Option<u64>,
-        winners: &[EnrichedPlayer],
-        losers: &[EnrichedPlayer],
-    ) -> Vec<NeonResult> {
-        if !self.enabled {
-            return Vec::new();
-        }
-        let enriched_winners = winners
-            .iter()
-            .filter(|player| player.has_telemetry())
-            .collect::<Vec<_>>();
-        let extreme_losers = losers
-            .iter()
-            .filter(|player| player.is_extreme_loser())
-            .collect::<Vec<_>>();
-        if enriched_winners.is_empty() && extreme_losers.is_empty() {
-            return Vec::new();
-        }
-        if !self.random.roll(self.mvp_chance) {
-            return Vec::new();
-        }
-        let (target, is_winner) = if extreme_losers.is_empty() {
-            let target = enriched_winners
-                .into_iter()
-                .max_by_key(|player| player.winner_selection_key())
-                .expect("non-empty enriched winners");
-            (target, true)
-        } else {
-            let target = extreme_losers
-                .into_iter()
-                .max_by_key(|player| player.loser_selection_key())
-                .expect("non-empty extreme losers");
-            (target, false)
-        };
-        let player_name = target.discord_id.map_or_else(
-            || "Unknown client".to_owned(),
-            |discord_id| self.resolve_player_name(discord_id, guild_id),
-        );
-        let hero = target
-            .hero_id
-            .and_then(|hero_id| self.identity.hero_name(hero_id).ok().flatten());
-        let context = JopatPostMatchContext {
-            winner_name: is_winner.then_some(player_name.clone()),
-            loser_name: (!is_winner).then_some(player_name),
-            hero,
-            kills: target.kills.map(i64::from).map(NumericFact::from),
-            deaths: target.deaths.map(i64::from).map(NumericFact::from),
-            assists: target.assists.map(i64::from).map(NumericFact::from),
-            gpm: target.gpm.map(i64::from).map(NumericFact::from),
-            xpm: target.xpm.map(i64::from).map(NumericFact::from),
-            ..JopatPostMatchContext::default()
-        };
-        let text = self.render_context_text(&context);
-        let mention = target
-            .discord_id
-            .map_or_else(String::new, |discord_id| format!("<@{discord_id}>\n"));
-        vec![NeonResult::text(2, format!("{mention}{text}"))]
     }
 
     fn resolve_player_name(&mut self, discord_id: u64, guild_id: Option<u64>) -> String {
@@ -530,134 +439,8 @@ fn to_player_context(context: &JopatPostMatchContext) -> PlayerContext {
         .collect::<BTreeMap<_, _>>()
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct EnrichedPlayer {
-    pub discord_id: Option<u64>,
-    pub hero_id: Option<u16>,
-    pub kills: Option<i32>,
-    pub deaths: Option<i32>,
-    pub assists: Option<i32>,
-    pub gpm: Option<i32>,
-    pub xpm: Option<i32>,
-    pub fantasy_points: Option<f64>,
-}
-
-impl EnrichedPlayer {
-    fn has_telemetry(&self) -> bool {
-        self.hero_id.is_some()
-            || self.kills.is_some()
-            || self.deaths.is_some()
-            || self.assists.is_some()
-            || self.gpm.is_some()
-            || self.xpm.is_some()
-            || self.fantasy_points.is_some()
-    }
-
-    fn is_extreme_loser(&self) -> bool {
-        let deaths = self.deaths.unwrap_or(0);
-        deaths >= 14
-            || (deaths >= 8
-                && f64::from(self.kills.unwrap_or(0) + self.assists.unwrap_or(0))
-                    / f64::from(deaths.max(1))
-                    <= 0.75)
-    }
-
-    fn winner_selection_key(&self) -> (OrderedFloat, i32, i32) {
-        (
-            OrderedFloat(self.fantasy_points.unwrap_or(0.0)),
-            self.kills.unwrap_or(0) + self.assists.unwrap_or(0),
-            self.gpm.unwrap_or(0),
-        )
-    }
-
-    fn loser_selection_key(&self) -> (i32, i32) {
-        (
-            self.deaths.unwrap_or(0),
-            -(self.kills.unwrap_or(0) + self.assists.unwrap_or(0)),
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct OrderedFloat(f64);
-
-impl Eq for OrderedFloat {}
-
-impl PartialOrd for OrderedFloat {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrderedFloat {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.total_cmp(&other.0)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PetFeed {
-    pub pet_name: String,
-    pub species_id: String,
-    pub fullness_gain: i64,
-}
-
-pub trait PetMatchPort {
-    fn on_match_win(
-        &mut self,
-        winning_player_ids: &[u64],
-        guild_id: Option<u64>,
-    ) -> Result<Vec<PetFeed>, RuntimePortError>;
-}
-
 pub trait MatchDeliveryPort {
-    fn send_public_text(&mut self, content: String) -> Result<(), RuntimePortError>;
     fn send_neon(&mut self, result: NeonResult) -> Result<(), RuntimePortError>;
-}
-
-pub fn run_pet_match_hooks<P, D>(
-    pets: &mut P,
-    delivery: &mut D,
-    guild_id: Option<u64>,
-    winning_player_ids: &[u64],
-) where
-    P: PetMatchPort,
-    D: MatchDeliveryPort,
-{
-    if winning_player_ids.is_empty() {
-        return;
-    }
-    let Ok(feeds) = pets.on_match_win(winning_player_ids, guild_id) else {
-        return;
-    };
-    let Some(content) = pet_snack_announcement(&feeds) else {
-        return;
-    };
-    let _ignored = delivery.send_public_text(content);
-}
-
-#[must_use]
-pub fn pet_snack_announcement(feeds: &[PetFeed]) -> Option<String> {
-    if feeds.is_empty() {
-        return None;
-    }
-    let lines = feeds
-        .iter()
-        .take(PET_ANNOUNCEMENT_LIMIT)
-        .map(|feed| {
-            let snack = if feed.fullness_gain == 0 {
-                "a victory snack — already full".to_owned()
-            } else {
-                format!("+{} fullness in celebration", feed.fullness_gain)
-            };
-            format!(
-                "🦙 **{}** the {} munches {snack}",
-                feed.pet_name,
-                get_species(&feed.species_id).display_name,
-            )
-        })
-        .collect::<Vec<_>>();
-    Some(format!("🎉 Post-game snacks:\n{}", lines.join("\n")))
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

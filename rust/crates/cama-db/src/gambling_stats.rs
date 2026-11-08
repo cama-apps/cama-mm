@@ -1328,15 +1328,6 @@ pub fn leverage_distribution_from_history(history: &[BetHistoryEntry]) -> BTreeM
 }
 
 #[must_use]
-pub fn leverage_distribution_from_nullable(values: &[Option<i64>]) -> BTreeMap<i64, i64> {
-    let mut result = BTreeMap::new();
-    for value in values {
-        *result.entry(value.unwrap_or(1)).or_default() += 1;
-    }
-    result
-}
-
-#[must_use]
 pub fn compute_degen_score(inputs: &DegenScoreInputs) -> DegenScoreBreakdown {
     let mut flavor_texts = Vec::new();
     let total_leverage_bets = inputs.leverage_distribution.values().sum::<i64>();

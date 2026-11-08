@@ -1,10 +1,8 @@
-//! Discord-neutral betting reminder and wager-copy policy.
+//! Discord-neutral betting reminder policy.
 //!
 //! This module keeps the reminder strings, lopsided-pool threshold, tightly scoped mention
-//! policy, partial-message thread routing, and concurrent copy refresh behavior
-//! executable without a gateway.
+//! policy, and partial-message thread routing executable without a gateway.
 
-use std::collections::BTreeSet;
 use std::fmt;
 
 use cama_domain::formatting::JOPACOIN_EMOTE;
@@ -153,107 +151,6 @@ fn multiplier_text(numerator: i64, side_total: i64, total_pool: i64) -> String {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct MessageTarget {
-    pub channel_id: i64,
-    pub message_id: i64,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct WagerRefreshReport {
-    pub attempted: Vec<MessageTarget>,
-    pub failed: Vec<MessageTarget>,
-}
-
-pub trait WagerCopyPort: Sync {
-    fn load_pending_state(
-        &self,
-        guild_id: Option<GuildId>,
-        pending_match_id: Option<i64>,
-    ) -> Option<PendingBettingState>;
-
-    fn pot_totals(
-        &self,
-        guild_id: Option<GuildId>,
-        pending_state: &PendingBettingState,
-    ) -> PotTotals;
-
-    fn update_wager_field(&self, target: MessageTarget, field: &WagerField) -> Result<(), String>;
-}
-
-pub struct WagerRefreshRequest<'a> {
-    pub guild_id: Option<GuildId>,
-    pub pending_match_id: Option<i64>,
-    pub locked: bool,
-    pub pending_state: Option<&'a PendingBettingState>,
-}
-
-/// Refresh every distinct shuffle copy in parallel. A failed copy is reported
-/// but never prevents another target from being attempted.
-#[must_use]
-pub fn refresh_wager_copies(
-    port: &dyn WagerCopyPort,
-    request: WagerRefreshRequest<'_>,
-) -> Option<WagerRefreshReport> {
-    let pending_state = request
-        .pending_state
-        .cloned()
-        .or_else(|| port.load_pending_state(request.guild_id, request.pending_match_id))?;
-    let totals = port.pot_totals(request.guild_id, &pending_state);
-    let field = format_betting_display(
-        totals,
-        pending_state.betting_mode,
-        pending_state.bet_lock_until,
-        request.locked,
-        pending_state.bet_seed_radiant,
-        pending_state.bet_seed_dire,
-        pending_state.bet_seed_bonus,
-    );
-    let attempted = wager_targets(&pending_state);
-    let failures = std::thread::scope(|scope| {
-        attempted
-            .iter()
-            .copied()
-            .map(|target| {
-                let field = &field;
-                scope.spawn(move || port.update_wager_field(target, field).err().map(|_| target))
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .filter_map(|handle| handle.join().ok().flatten())
-            .collect::<Vec<_>>()
-    });
-    Some(WagerRefreshReport {
-        attempted,
-        failed: failures,
-    })
-}
-
-#[must_use]
-pub fn wager_targets(state: &PendingBettingState) -> Vec<MessageTarget> {
-    let mut seen = BTreeSet::new();
-    [
-        (state.shuffle_channel_id, state.shuffle_message_id),
-        (
-            state.command_shuffle_channel_id,
-            state.command_shuffle_message_id,
-        ),
-        (
-            state.thread_shuffle_thread_id,
-            state.thread_shuffle_message_id,
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(channel_id, message_id)| {
-        let target = MessageTarget {
-            channel_id: channel_id.filter(|id| *id != 0)?,
-            message_id: message_id.filter(|id| *id != 0)?,
-        };
-        seen.insert(target).then_some(target)
-    })
-    .collect()
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TopBettor {
     pub discord_id: DiscordId,
@@ -331,12 +228,6 @@ impl AllowedMentions {
             replied_user: false,
             users: MentionUsers::Scoped(users),
         }
-    }
-
-    /// Discord's broad parse list is deliberately empty for every reminder.
-    #[must_use]
-    pub const fn parse_everyone_or_roles(&self) -> bool {
-        self.everyone || self.roles
     }
 }
 

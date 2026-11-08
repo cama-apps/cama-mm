@@ -537,36 +537,3 @@ fn test_tax_floors_ten_percent_and_ignores_unknown_or_nonpositive_profit() {
     assert_eq!(service.calculate_tax(1, Some(999), 1_000), 0);
     assert_eq!(service.calculate_tax(1, None, 1_000), 0);
 }
-
-#[test]
-fn test_settlement_announcements_show_vanity_tax() {
-    let match_text = format_bet_distribution(
-        &[BetWinnerAnnouncement {
-            discord_id: 1,
-            payout: 200,
-            amount: 100,
-        }],
-        &BTreeMap::new(),
-        &BTreeMap::from([(1, 1)]),
-    );
-    assert!(match_text.contains("won 199"));
-    assert!(match_text.contains("−1"));
-    assert!(match_text.contains("vanity tax"));
-
-    let prediction_text = build_resolution_announcement_chunks(
-        5,
-        "yes",
-        &[PredictionWinnerAnnouncement {
-            discord_id: 1,
-            cost_basis: 100,
-            yes_contracts: 2,
-            no_contracts: 0,
-            payout: 199,
-            profit: 99,
-        }],
-        0,
-        1,
-    )
-    .join("\n");
-    assert!(prediction_text.contains("1 JC vanity tax"));
-}

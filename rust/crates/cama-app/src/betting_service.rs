@@ -11,18 +11,11 @@ use cama_db::dota_bet_seed_repository::BettingTeam;
 
 pub type DiscordId = i64;
 
-pub const DEFAULT_WIN_REWARD: i64 = 10;
 pub const DEFAULT_VANITY_TAX_BASIS_POINTS: i64 = 1_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Team {
     pub player_ids: Vec<DiscordId>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ShuffleResult {
-    pub radiant_team: Team,
-    pub dire_team: Team,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,52 +48,7 @@ pub struct PendingMatchState {
     pub balancing_rating_system: RatingSystem,
 }
 
-impl PendingMatchState {
-    #[must_use]
-    pub fn to_payload_json(&self) -> String {
-        format!(
-            "{{\"radiant_team_ids\":{},\"dire_team_ids\":{},\"shuffle_timestamp\":{},\"bet_lock_until\":{},\"is_draft\":{},\"is_bomb_pot\":{},\"is_openskill_shuffle\":{},\"balancing_rating_system\":\"{}\"}}",
-            json_i64_array(&self.radiant_team_ids),
-            json_i64_array(&self.dire_team_ids),
-            self.shuffle_timestamp,
-            self.bet_lock_until,
-            self.is_draft,
-            self.is_bomb_pot,
-            self.is_openskill_shuffle,
-            self.balancing_rating_system.as_str(),
-        )
-    }
-}
-
-#[must_use]
-pub fn typed_shuffle(
-    players: &[DiscordId],
-    shuffle_timestamp: i64,
-) -> (ShuffleResult, PendingMatchState) {
-    let middle = players.len() / 2;
-    let radiant = players[..middle].to_vec();
-    let dire = players[middle..].to_vec();
-    (
-        ShuffleResult {
-            radiant_team: Team {
-                player_ids: radiant.clone(),
-            },
-            dire_team: Team {
-                player_ids: dire.clone(),
-            },
-        },
-        PendingMatchState {
-            radiant_team_ids: radiant,
-            dire_team_ids: dire,
-            shuffle_timestamp,
-            bet_lock_until: shuffle_timestamp.saturating_add(900),
-            is_draft: false,
-            is_bomb_pot: false,
-            is_openskill_shuffle: false,
-            balancing_rating_system: RatingSystem::Glicko,
-        },
-    )
-}
+impl PendingMatchState {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WealthSnapshot {
@@ -250,15 +198,6 @@ fn rounded_basis_points(value: i64, basis_points: i64) -> i64 {
             0
         };
     quotient.saturating_add(adjustment)
-}
-
-fn json_i64_array(values: &[i64]) -> String {
-    let body = values
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{body}]")
 }
 
 #[cfg(test)]

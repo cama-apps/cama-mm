@@ -1059,15 +1059,6 @@ impl MemoryEconomy {
         Ok(())
     }
 
-    pub fn set_player_balance(
-        &self,
-        guild_id: GuildId,
-        player_id: i64,
-        balance: i64,
-    ) -> Result<(), EconomyEventError> {
-        self.add_player(guild_id, player_id, balance)
-    }
-
     pub fn player_balance(
         &self,
         guild_id: GuildId,
@@ -1447,13 +1438,6 @@ impl EconomyEventConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReserveVotingRestriction {
-    pub event_id: i64,
-    pub name: String,
-    pub severity: u8,
-}
-
 pub struct EconomyEventService<S, E, C, R> {
     store: S,
     economy: E,
@@ -1559,35 +1543,6 @@ where
             .event_for_date(guild_id, &event_date)?
             .filter(|event| event.status == EventStatus::Active)
             .map_or_else(EconomyEventEffects::default, |event| event.effects))
-    }
-
-    pub fn get_reserve_voting_restriction(
-        &self,
-        guild_id: Option<i64>,
-        now: Option<i64>,
-    ) -> Result<Option<ReserveVotingRestriction>, EconomyEventError> {
-        if !self.config.enabled {
-            return Ok(None);
-        }
-        let now = now.unwrap_or_else(|| self.clock.now());
-        let guild_id = GuildId::normalize(guild_id);
-        let event_date = self.event_date_for_timestamp(now)?;
-        let restriction = self
-            .store
-            .event_for_date(guild_id, &event_date)?
-            .filter(|event| {
-                event.status == EventStatus::Active
-                    && event.direction == Direction::Deflationary
-                    && event.severity >= 3
-                    && event.starts_at <= now
-                    && now < event.ends_at
-            })
-            .map(|event| ReserveVotingRestriction {
-                event_id: event.event_id,
-                name: event.name,
-                severity: event.severity,
-            });
-        Ok(restriction)
     }
 
     pub fn adjust_reward(
@@ -1802,42 +1757,6 @@ where
         }
         let reminder_at = event.starts_at + SECOND_ANNOUNCEMENT_DELAY_SECONDS;
         (reminder_at <= now && now < event.ends_at).then_some("reminder")
-    }
-
-    pub fn format_event(event: &EconomyEvent) -> (String, String) {
-        const LEVELS: [&str; 5] = ["I", "II", "III", "IV", "V"];
-        let level = LEVELS[usize::from(event.severity.clamp(1, 5) - 1)];
-        let mut lines = vec![if event.announcement.is_empty() {
-            "The economy has shifted.".into()
-        } else {
-            event.announcement.clone()
-        }];
-        let mut direct = Vec::new();
-        if event.effects.reserve_burn_jc != 0 {
-            direct.push(format!(
-                "Reserve burned: **{} JC**",
-                format_grouped(event.effects.reserve_burn_jc)
-            ));
-        }
-        if event.effects.wallet_burn_jc != 0 {
-            direct.push(format!(
-                "Wallet liquidity burned: **{} JC**",
-                format_grouped(event.effects.wallet_burn_jc)
-            ));
-        }
-        if event.effects.reserve_release_jc != 0 {
-            direct.push(format!(
-                "Reserve released: **{} JC**",
-                format_grouped(event.effects.reserve_release_jc)
-            ));
-        }
-        if !direct.is_empty() {
-            lines.push(direct.join("\n"));
-        }
-        (
-            format!("{} — Level {level}", event.name),
-            lines.join("\n\n"),
-        )
     }
 
     #[must_use]

@@ -3,17 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::*;
 
 #[test]
-fn test_shuffle_result_vs_pending_state_keys() {
-    let players = (1..=10).collect::<Vec<_>>();
-    let (result, pending) = typed_shuffle(&players, 123_456);
-    assert_eq!(result.radiant_team.player_ids, [1, 2, 3, 4, 5]);
-    assert_eq!(result.dire_team.player_ids, [6, 7, 8, 9, 10]);
-    assert_eq!(pending.radiant_team_ids, result.radiant_team.player_ids);
-    assert_eq!(pending.dire_team_ids, result.dire_team.player_ids);
-    assert_eq!(pending.shuffle_timestamp, 123_456);
-}
-
-#[test]
 fn test_disabled_top_tier_uses_base_rate_for_all_slots() {
     let candidates = (14_900..14_910)
         .map(|discord_id| WealthSnapshot {
@@ -123,60 +112,4 @@ fn test_create_auto_spectator_bets_uses_top_richest_spectators() {
             .iter()
             .all(|bet| !participants.contains(&bet.discord_id))
     );
-}
-
-fn pending_state() -> PendingMatchState {
-    PendingMatchState {
-        radiant_team_ids: vec![1, 2, 3, 4, 5],
-        dire_team_ids: vec![6, 7, 8, 9, 10],
-        shuffle_timestamp: 100,
-        bet_lock_until: 1_000,
-        is_draft: false,
-        is_bomb_pot: false,
-        is_openskill_shuffle: false,
-        balancing_rating_system: RatingSystem::Glicko,
-    }
-}
-
-#[test]
-fn test_bomb_pot_flag_persisted_in_pending_match() {
-    let mut state = pending_state();
-    state.is_bomb_pot = true;
-    assert!(state.to_payload_json().contains("\"is_bomb_pot\":true"));
-    state.is_bomb_pot = false;
-    assert!(state.to_payload_json().contains("\"is_bomb_pot\":false"));
-}
-
-#[test]
-fn test_openskill_shuffle_flag_persisted_in_pending_match() {
-    let mut state = pending_state();
-    state.is_openskill_shuffle = true;
-    assert!(
-        state
-            .to_payload_json()
-            .contains("\"is_openskill_shuffle\":true")
-    );
-    state.is_openskill_shuffle = false;
-    assert!(
-        state
-            .to_payload_json()
-            .contains("\"is_openskill_shuffle\":false")
-    );
-}
-
-#[test]
-fn test_balancing_rating_system_persisted_in_pending_match() {
-    let mut state = pending_state();
-    for (rating_system, expected) in [
-        (RatingSystem::OpenSkill, "openskill"),
-        (RatingSystem::Glicko, "glicko"),
-        (RatingSystem::Jopacoin, "jopacoin"),
-    ] {
-        state.balancing_rating_system = rating_system;
-        assert!(
-            state
-                .to_payload_json()
-                .contains(&format!("\"balancing_rating_system\":\"{expected}\""))
-        );
-    }
 }

@@ -241,14 +241,6 @@ pub fn render_cooldown_hit(command: &str) -> String {
 }
 
 #[must_use]
-pub fn render_match_recorded() -> String {
-    terminal_lines(&[
-        "[JOPA-T] MATCH DEBRIEF".into(),
-        "Replay ledger accepted.".into(),
-    ])
-}
-
-#[must_use]
 pub fn render_bankruptcy_filing(name: &str, debt: i64, filing_number: u32) -> String {
     terminal_lines(&[
         "BANKRUPTCY FILING ACCEPTED".into(),
@@ -280,20 +272,6 @@ pub fn render_balance_zero(name: &str) -> String {
     terminal_lines(&[
         "BALANCE ZERO".into(),
         format!("Client {name} has no remaining collateral."),
-    ])
-}
-
-#[must_use]
-pub fn render_streak(name: &str, streak: u32, is_win: bool) -> String {
-    let status = if is_win {
-        "WIN STREAK HOT"
-    } else {
-        "LOSS STREAK ANOMALY"
-    };
-    terminal_lines(&[
-        status.into(),
-        format!("Client: {name}"),
-        format!("Run: {streak}"),
     ])
 }
 
@@ -416,48 +394,6 @@ pub fn render_gamba_spectator(name: &str) -> String {
         "SPECTATOR MODE".into(),
         format!("Client: {name}"),
         "Not playing. Just watching.".into(),
-    ])
-}
-
-#[must_use]
-pub fn render_prediction_resolved(question: &str, outcome: &str, total_pool: i64) -> String {
-    terminal_lines(&[
-        "PREDICTION RESOLVED".into(),
-        format!("Market: {question}"),
-        format!("Outcome: {outcome}. Pool: {total_pool} JC"),
-    ])
-}
-
-#[must_use]
-pub fn render_prediction_market_crash(
-    question: &str,
-    total_pool: i64,
-    outcome: &str,
-    winners: u32,
-    losers: u32,
-) -> String {
-    terminal_lines(&[
-        "MARKET SETTLEMENT CRASH".into(),
-        format!("Market: {question}"),
-        format!("Outcome: {outcome}. Pool: {total_pool} JC"),
-        format!("Winners: {winners}. Losers: {losers}."),
-    ])
-}
-
-#[must_use]
-pub fn render_soft_avoid(cost: i64, games: u32) -> String {
-    terminal_lines(&[
-        "SOFT AVOID PURCHASED".into(),
-        format!("Anonymous cost: {cost} JC. Duration: {games} games."),
-    ])
-}
-
-#[must_use]
-pub fn render_soft_avoid_surveillance(cost: i64, games: u32) -> String {
-    terminal_lines(&[
-        "SOCIAL SURVEILLANCE".into(),
-        format!("Avoid window: {games} games."),
-        format!("Anonymous settlement: {cost} JC."),
     ])
 }
 
@@ -1283,86 +1219,6 @@ pub fn create_don_coin_flip_gif(name: &str, balance_lost: i64) -> GifAsset {
 }
 
 #[must_use]
-pub fn create_market_crash_gif(
-    total_pool: i64,
-    outcome: &str,
-    winners: u32,
-    losers: u32,
-) -> GifAsset {
-    let mut durations = vec![100; 15];
-    durations.extend([80; 15]);
-    durations.extend([200; 14]);
-    durations.push(60_000);
-    render_neon_animation(
-        "market_crash",
-        &durations,
-        scene_seed(&(total_pool, outcome, winners, losers)),
-        |frame, canvas| {
-            if frame < 30 {
-                let crash = frame >= 15;
-                let progress = (frame % 15) as i32;
-                let peak_x = 280;
-                let end_x = if crash { 370 } else { 40 + progress * 20 };
-                let end_y = if crash {
-                    210 - progress * 8
-                } else {
-                    190 - progress * 6
-                };
-                canvas.text_centered(
-                    "PREDICTION MARKET",
-                    10,
-                    if crash { COLOR_RED } else { COLOR_GREEN },
-                    1,
-                );
-                canvas.text_centered(&format!("POOL: {total_pool} JC"), 32, COLOR_DIM_GREEN, 1);
-                canvas.line(40, 220, 370, 220, COLOR_DIM_GREEN);
-                canvas.line(40, 80, 40, 220, COLOR_DIM_GREEN);
-                canvas.line(
-                    40,
-                    220,
-                    peak_x,
-                    100,
-                    if crash { COLOR_RED } else { COLOR_GREEN },
-                );
-                canvas.line(
-                    peak_x,
-                    100,
-                    end_x,
-                    end_y,
-                    if crash { COLOR_RED } else { COLOR_GREEN },
-                );
-                canvas.text_left(
-                    if crash {
-                        "STATUS: SETTLING"
-                    } else {
-                        "STATUS: ACTIVE"
-                    },
-                    20,
-                    235,
-                    COLOR_YELLOW,
-                    1,
-                );
-                if crash && frame.is_multiple_of(2) {
-                    canvas.text_centered("MARKET CRASH", 130, COLOR_RED, 2);
-                }
-            } else {
-                canvas.text_centered("MARKET SETTLED", 20, COLOR_YELLOW, 2);
-                canvas.text_centered(
-                    &format!("OUTCOME: {}", outcome.to_ascii_uppercase()),
-                    75,
-                    COLOR_YELLOW,
-                    1,
-                );
-                canvas.text_centered(&format!("TOTAL POOL: {total_pool} JC"), 105, COLOR_RED, 1);
-                canvas.text_left(&format!("WINNERS: {winners}"), 60, 145, COLOR_GREEN, 1);
-                canvas.text_left(&format!("LOSERS: {losers}"), 60, 170, COLOR_RED, 1);
-                canvas.text_centered("WEALTH REDISTRIBUTED", 220, COLOR_GREEN, 1);
-            }
-        },
-    )
-}
-
-#[must_use]
 pub fn create_bomb_pot_gif(pool: i64, contributors: i64) -> GifAsset {
     let mut durations = vec![100; 15];
     durations.extend([60; 10]);
@@ -1522,41 +1378,6 @@ pub fn render_win_streak_record(name: &str, streak: i64) -> String {
         "The algorithm adjusts.".into(),
         "The system takes notice.".into(),
     ])
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PaletteFrame {
-    pub colors: Vec<[u8; 3]>,
-    pub palette: Vec<[u8; 3]>,
-    pub indexed: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct QuantizationStats {
-    pub adaptive_searches: usize,
-    pub palette_remaps: usize,
-}
-
-/// Select one animation-wide palette, then remap every full frame into it.
-#[must_use]
-pub fn quantize_frames_with_shared_palette(frames: &mut [PaletteFrame]) -> QuantizationStats {
-    if frames.is_empty() {
-        return QuantizationStats::default();
-    }
-    let mut palette = Vec::new();
-    for color in frames.iter().flat_map(|frame| frame.colors.iter().copied()) {
-        if !palette.contains(&color) && palette.len() < 256 {
-            palette.push(color);
-        }
-    }
-    for frame in &mut *frames {
-        frame.palette.clone_from(&palette);
-        frame.indexed = true;
-    }
-    QuantizationStats {
-        adaptive_searches: 1,
-        palette_remaps: frames.len(),
-    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1811,16 +1632,6 @@ impl NeonDegenService {
         }
         self.one_time_seen.insert(key);
         Ok(())
-    }
-
-    #[must_use]
-    pub fn check_one_time(
-        &mut self,
-        discord_id: u64,
-        guild_id: Option<u64>,
-        event_type: &str,
-    ) -> bool {
-        self.unseen(&EventKey::new(discord_id, guild_id, event_type))
     }
 
     #[must_use]
@@ -2803,19 +2614,6 @@ const STRICT_FACT_KEYS: &[&str] = &[
     "degen_score",
     "streak",
 ];
-
-#[must_use]
-pub fn build_player_context(player: Option<&PlayerSnapshot>) -> PlayerContext {
-    let mut context = PlayerContext::new();
-    if let Some(player) = player {
-        context.insert("name".into(), ContextValue::Text(player.name.clone()));
-        context.insert("balance".into(), ContextValue::Integer(player.balance));
-        if let Some(lowest) = player.lowest_balance {
-            context.insert("lowest_balance".into(), ContextValue::Integer(lowest));
-        }
-    }
-    context
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlayerSnapshot {

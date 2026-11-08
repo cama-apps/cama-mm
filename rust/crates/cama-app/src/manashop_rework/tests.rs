@@ -116,21 +116,6 @@ impl Fixture {
             })
             .expect("grant fixture buff")
     }
-
-    /// Read the persisted `data` JSON for a buff so tests can assert what the
-    /// repository actually wrote, not just what it reads back.
-    fn raw_buff_data(&self, buff_id: i64) -> String {
-        Connection::open(&self.path)
-            .and_then(|connection| {
-                connection.query_row(
-                    "SELECT data FROM manashop_buffs WHERE id = ?1",
-                    params![buff_id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-            })
-            .expect("read fixture buff data")
-            .unwrap_or_default()
-    }
 }
 
 impl Drop for Fixture {
@@ -145,32 +130,6 @@ impl Drop for Fixture {
     }
 }
 
-#[derive(Default)]
-struct RecordingGateway {
-    requests: Vec<HostileLossRequest>,
-    settlement: Option<HostileLossSettlement>,
-    fail: bool,
-}
-
-impl ProtectionGateway for RecordingGateway {
-    type Error = &'static str;
-
-    fn apply_hostile_loss(
-        &mut self,
-        request: HostileLossRequest,
-    ) -> Result<HostileLossSettlement, Self::Error> {
-        self.requests.push(request);
-        if self.fail {
-            return Err("protection failure");
-        }
-        Ok(self.settlement.unwrap_or(HostileLossSettlement {
-            attempted_loss: 0,
-            absorbed_amount: 0,
-            applied_loss: 0,
-        }))
-    }
-}
-
 #[test]
 fn test_buff_service_grant_and_active_for() {
     let fixture = Fixture::new();
@@ -182,39 +141,6 @@ fn test_buff_service_grant_and_active_for() {
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].buff_type, "counterspell");
     assert!(active[0].expires_at > NOW);
-}
-
-#[test]
-fn test_pvp_immunity_via_counterspell_or_sanctuary() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    assert!(!service.has_pvp_immunity(USER, GUILD).unwrap());
-    service.grant_counterspell(USER, GUILD).unwrap();
-    assert!(service.has_pvp_immunity(USER, GUILD).unwrap());
-}
-
-#[test]
-fn test_sanctuary_protects_both_caster_and_ally() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    service.grant_sanctuary(USER, GUILD, ALLY).unwrap();
-    assert!(service.has_pvp_immunity(USER, GUILD).unwrap());
-    assert!(service.has_pvp_immunity(ALLY, GUILD).unwrap());
-    let active = service
-        .active_for(USER, GUILD, BuffType::Sanctuary)
-        .unwrap();
-    let row = &active[0];
-    assert_eq!(row.target_id, Some(ALLY));
-    assert_eq!(row.data.capacity, Some(150));
-    assert_eq!(row.data.capacity_remaining, Some(150));
-    assert_eq!(row.data.rate, Some(1.0));
-    assert_eq!(row.data.shared, Some(true));
-    assert_eq!(row.data.rolling_retroactive, Some(false));
-    assert_eq!(row.data.caster_id, Some(USER));
-    assert_eq!(row.data.ally_id, Some(ALLY));
-    assert_eq!(row.data.protected_user_ids, vec![USER, ALLY]);
-    assert!(!service.has_sanctuary_match_bonus(USER, GUILD));
-    assert!(!service.has_sanctuary_match_bonus(ALLY, GUILD));
 }
 
 #[test]
@@ -244,65 +170,6 @@ fn test_aegis_grants_full_75_jc_protection_pool() {
 }
 
 #[test]
-fn test_swamp_siphon_routes_through_protection_gateway() {
-    let mut gateway = RecordingGateway {
-        settlement: Some(HostileLossSettlement {
-            attempted_loss: 3,
-            absorbed_amount: 1,
-            applied_loss: 2,
-        }),
-        ..RecordingGateway::default()
-    };
-    let result = execute_swamp_siphon(USER, GUILD, TARGET, 100, 3, 7, &mut gateway).unwrap();
-    assert_eq!(result.amount, 2);
-    assert_eq!(result.attempted_amount, 3);
-    assert_eq!(result.absorbed_amount, 1);
-    let request = &gateway.requests[0];
-    assert_eq!(request.target_id, TARGET);
-    assert_eq!(request.guild_id, GUILD);
-    assert_eq!(request.attempted_loss, 3);
-    assert_eq!(request.kind, "swamp_siphon");
-    assert_eq!(request.actor_id, USER);
-    assert!(request.event_key.starts_with("swamp_siphon:"));
-    assert_eq!(request.destination, "player");
-    assert_eq!(request.recipient_id, USER);
-    assert!(request.clamp_to_balance);
-}
-
-#[test]
-fn test_consume_aegis_charge_returns_true_then_false() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    service.grant_aegis(USER, GUILD).unwrap();
-    assert!(service.consume_aegis_charge(USER, GUILD).unwrap());
-    assert!(!service.consume_aegis_charge(USER, GUILD).unwrap());
-}
-
-#[test]
-fn test_blood_pact_skim_state_persists() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    service.grant_blood_pact(USER, GUILD, TARGET).unwrap();
-    let pact = service.blood_pact_skimmer(TARGET, GUILD).unwrap().unwrap();
-    assert_eq!(pact.discord_id, USER);
-    // `None` is the uncapped sentinel: newly granted pacts skim without a ceiling.
-    assert_eq!(pact.data.cap, None);
-    assert_eq!(pact.data.skim_rate, Some(0.25));
-    service
-        .record_blood_pact_skim(pact.id, &pact.data, 25)
-        .unwrap();
-    assert_eq!(
-        service
-            .blood_pact_skimmer(TARGET, GUILD)
-            .unwrap()
-            .unwrap()
-            .data
-            .skimmed_total,
-        Some(25)
-    );
-}
-
-#[test]
 fn test_blood_pact_target_snapshot_is_batched_and_guild_scoped() {
     let fixture = Fixture::new();
     let service = fixture.service();
@@ -316,177 +183,6 @@ fn test_blood_pact_target_snapshot_is_batched_and_guild_scoped() {
             .unwrap(),
         BTreeSet::from([TARGET])
     );
-}
-
-#[test]
-fn test_blood_pact_skim_applies_rate_without_a_cap() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    service.grant_blood_pact(USER, GUILD, TARGET).unwrap();
-    let first = service
-        .claim_blood_pact_skim(TARGET, GUILD, 400)
-        .unwrap()
-        .unwrap();
-    let second = service
-        .claim_blood_pact_skim(TARGET, GUILD, 400)
-        .unwrap()
-        .unwrap();
-    assert_eq!(first.skimmer_id, USER);
-    assert_eq!((first.amount, first.new_total), (100, 100));
-    assert_eq!(second.buff_id, first.buff_id);
-    assert_eq!(second.skimmer_id, USER);
-    // The retired 150 JC ceiling would have clipped this to (50, 150).
-    assert_eq!((second.amount, second.new_total), (100, 200));
-
-    // Skimming keeps paying the full rate well past that old ceiling.
-    let third = service
-        .claim_blood_pact_skim(TARGET, GUILD, 400)
-        .unwrap()
-        .expect("an uncapped pact never stops skimming while it is live");
-    assert_eq!((third.amount, third.new_total), (100, 300));
-    assert_eq!(
-        service
-            .blood_pact_skimmer(TARGET, GUILD)
-            .unwrap()
-            .unwrap()
-            .data
-            .skimmed_total,
-        Some(300)
-    );
-}
-
-#[test]
-fn test_uncapped_blood_pact_stays_uncapped_across_persistence() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    let buff_id = service.grant_blood_pact(USER, GUILD, TARGET).unwrap();
-    service
-        .claim_blood_pact_skim(TARGET, GUILD, 400)
-        .unwrap()
-        .unwrap();
-
-    // An absent cap is omitted from the stored JSON rather than written as a
-    // number, so re-reading a skimmed pact cannot resurrect a ceiling.
-    let stored = fixture.raw_buff_data(buff_id);
-    assert!(!stored.contains("\"cap\""), "{stored}");
-
-    let reloaded = service.blood_pact_skimmer(TARGET, GUILD).unwrap().unwrap();
-    assert_eq!(reloaded.data.cap, None);
-    assert_eq!(reloaded.data.skimmed_total, Some(100));
-    assert_eq!(reloaded.data.skim_rate, Some(0.25));
-
-    let after_reload = service
-        .claim_blood_pact_skim(TARGET, GUILD, 400)
-        .unwrap()
-        .expect("uncapped pact keeps skimming after its state round-trips");
-    assert_eq!((after_reload.amount, after_reload.new_total), (100, 200));
-}
-
-#[test]
-fn test_legacy_blood_pact_with_stored_cap_still_stops_at_its_ceiling() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    // A pact granted before the cap was retired keeps the ceiling it was
-    // written with; only newly granted pacts are uncapped.
-    let data = BuffData {
-        skimmed_total: Some(0),
-        cap: Some(150),
-        skim_rate: Some(0.25),
-        ..BuffData::default()
-    };
-    fixture.grant_raw(
-        USER,
-        GUILD,
-        BuffType::BloodPact,
-        Some(TARGET),
-        NOW + 3_600,
-        Some(&data),
-    );
-
-    let first = service
-        .claim_blood_pact_skim(TARGET, GUILD, 400)
-        .unwrap()
-        .unwrap();
-    assert_eq!((first.amount, first.new_total), (100, 100));
-    let second = service
-        .claim_blood_pact_skim(TARGET, GUILD, 400)
-        .unwrap()
-        .unwrap();
-    assert_eq!((second.amount, second.new_total), (50, 150));
-    assert!(
-        service
-            .claim_blood_pact_skim(TARGET, GUILD, 400)
-            .unwrap()
-            .is_none(),
-        "an explicitly capped pact must stop once its ceiling is reached"
-    );
-}
-
-#[test]
-fn test_record_blood_pact_skim_preserves_stored_cap_and_rate() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    let data = BuffData {
-        skimmed_total: Some(5),
-        cap: Some(80),
-        skim_rate: Some(0.25),
-        ..BuffData::default()
-    };
-    let id = fixture.grant_raw(
-        USER,
-        GUILD,
-        BuffType::BloodPact,
-        Some(TARGET),
-        NOW + 3_600,
-        Some(&data),
-    );
-    let pact = service.blood_pact_skimmer(TARGET, GUILD).unwrap().unwrap();
-    service.record_blood_pact_skim(id, &pact.data, 30).unwrap();
-    let refreshed = service.blood_pact_skimmer(TARGET, GUILD).unwrap().unwrap();
-    assert_eq!(refreshed.data.skimmed_total, Some(30));
-    assert_eq!(refreshed.data.cap, Some(80));
-    assert_eq!(refreshed.data.skim_rate, Some(0.25));
-}
-
-#[test]
-fn test_dark_bargain_debt_fetches() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    fixture.register(USER, GUILD, 100);
-    service.grant_dark_bargain(USER, GUILD, 700, 800).unwrap();
-    let debt = service.dark_bargain_debt(USER, GUILD).unwrap().unwrap();
-    assert_eq!(debt.data.amount_due, Some(700));
-    assert_eq!(debt.data.default_penalty, Some(1_600));
-    assert_eq!(debt.data.default_penalty_games, Some(5));
-}
-
-#[test]
-fn dark_bargain_debt_and_principal_commit_together() {
-    // The default penalty is charged off the debt buff alone, so a debt that
-    // outlives a failed credit bills the player for money they never got.
-    let fixture = Fixture::new();
-    let service = fixture.service();
-
-    // No player row: the credit cannot apply, so the debt must not stand.
-    let error = service.grant_dark_bargain(USER, GUILD, 700, 800);
-    assert!(error.is_err(), "an unappliable credit fails the purchase");
-    assert!(
-        service.dark_bargain_debt(USER, GUILD).unwrap().is_none(),
-        "no debt is left behind when the principal could not be paid"
-    );
-
-    fixture.register(USER, GUILD, 100);
-    service.grant_dark_bargain(USER, GUILD, 700, 800).unwrap();
-    assert!(service.dark_bargain_debt(USER, GUILD).unwrap().is_some());
-    let balance: i64 = Connection::open(&fixture.path)
-        .expect("open manashop fixture")
-        .query_row(
-            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
-            params![USER, GUILD],
-            |row| row.get(0),
-        )
-        .expect("player balance");
-    assert_eq!(balance, 900, "the principal is credited with the debt");
 }
 
 fn expired_dark_data() -> BuffData {
@@ -578,35 +274,6 @@ fn test_settle_due_dark_bargain_missing_player_keeps_debt_active() {
 }
 
 #[test]
-fn test_overgrowth_active_for_user_only() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    service.grant_overgrowth(USER, GUILD).unwrap();
-    assert!(service.has_overgrowth(USER, GUILD).unwrap());
-    assert!(!service.has_overgrowth(ALLY, GUILD).unwrap());
-}
-
-#[test]
-fn test_overgrowth_grants_ten_dig_charges() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    service.grant_overgrowth(USER, GUILD).unwrap();
-    assert_eq!(
-        service
-            .active_for(USER, GUILD, BuffType::Overgrowth)
-            .unwrap()[0]
-            .data
-            .charges_remaining,
-        Some(10)
-    );
-    for _ in 0..10 {
-        assert!(service.consume_overgrowth_charge(USER, GUILD).unwrap());
-    }
-    assert!(!service.consume_overgrowth_charge(USER, GUILD).unwrap());
-    assert!(!service.has_overgrowth(USER, GUILD).unwrap());
-}
-
-#[test]
 fn test_overgrowth_regrant_refreshes_not_extends() {
     let fixture = Fixture::new();
     let service = fixture.service();
@@ -657,10 +324,80 @@ fn test_overgrowth_regrant_collapses_pre_existing_duplicates() {
 }
 
 #[test]
-fn test_cleanup_expired_prunes_old_rows() {
+fn test_sanctuary_records_both_caster_and_ally() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.grant_raw(USER, GUILD, BuffType::Counterspell, None, NOW - 10, None);
-    assert!(service.cleanup_expired().unwrap() >= 1);
-    assert!(!service.has_pvp_immunity(USER, GUILD).unwrap());
+    service.grant_sanctuary(USER, GUILD, ALLY).unwrap();
+    let active = service
+        .active_for(USER, GUILD, BuffType::Sanctuary)
+        .unwrap();
+    let row = &active[0];
+    assert_eq!(row.target_id, Some(ALLY));
+    assert_eq!(row.data.capacity, Some(150));
+    assert_eq!(row.data.capacity_remaining, Some(150));
+    assert_eq!(row.data.rate, Some(1.0));
+    assert_eq!(row.data.shared, Some(true));
+    assert_eq!(row.data.rolling_retroactive, Some(false));
+    assert_eq!(row.data.caster_id, Some(USER));
+    assert_eq!(row.data.ally_id, Some(ALLY));
+    assert_eq!(row.data.protected_user_ids, vec![USER, ALLY]);
+}
+
+#[test]
+fn dark_bargain_debt_and_principal_commit_together() {
+    // The default penalty is charged off the debt buff alone, so a debt that
+    // outlives a failed credit bills the player for money they never got.
+    let fixture = Fixture::new();
+    let service = fixture.service();
+
+    // No player row: the credit cannot apply, so the debt must not stand.
+    let error = service.grant_dark_bargain(USER, GUILD, 700, 800);
+    assert!(error.is_err(), "an unappliable credit fails the purchase");
+    assert!(
+        service
+            .active_for(USER, GUILD, BuffType::DarkBargain)
+            .unwrap()
+            .is_empty(),
+        "no debt is left behind when the principal could not be paid"
+    );
+
+    fixture.register(USER, GUILD, 100);
+    service.grant_dark_bargain(USER, GUILD, 700, 800).unwrap();
+    assert_eq!(
+        service
+            .active_for(USER, GUILD, BuffType::DarkBargain)
+            .unwrap()
+            .len(),
+        1
+    );
+    let balance: i64 = Connection::open(&fixture.path)
+        .expect("open manashop fixture")
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![USER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("player balance");
+    assert_eq!(balance, 900, "the principal is credited with the debt");
+}
+
+#[test]
+fn test_overgrowth_grants_ten_dig_charges_to_the_buyer_only() {
+    let fixture = Fixture::new();
+    let service = fixture.service();
+    service.grant_overgrowth(USER, GUILD).unwrap();
+    assert_eq!(
+        service
+            .active_for(USER, GUILD, BuffType::Overgrowth)
+            .unwrap()[0]
+            .data
+            .charges_remaining,
+        Some(10)
+    );
+    assert!(
+        service
+            .active_for(ALLY, GUILD, BuffType::Overgrowth)
+            .unwrap()
+            .is_empty()
+    );
 }

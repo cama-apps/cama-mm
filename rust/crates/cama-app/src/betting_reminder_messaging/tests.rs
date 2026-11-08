@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::Mutex;
 
 use super::*;
 
@@ -139,122 +138,6 @@ fn test_reminder_identifies_lobby_and_pending_match_last_call() {
 #[test]
 fn test_reminder_identifies_lobby_and_pending_match_closed() {
     assert_identity(ReminderType::Closed);
-}
-
-struct CopyPort {
-    state: PendingBettingState,
-    totals: PotTotals,
-    load_calls: AtomicUsize,
-    total_calls: AtomicUsize,
-    updates: Mutex<Vec<MessageTarget>>,
-    failures: BTreeSet<MessageTarget>,
-    barrier: Option<Arc<Barrier>>,
-}
-
-impl CopyPort {
-    fn new(state: PendingBettingState) -> Self {
-        Self {
-            state,
-            totals: PotTotals {
-                radiant: 100,
-                dire: 200,
-            },
-            load_calls: AtomicUsize::new(0),
-            total_calls: AtomicUsize::new(0),
-            updates: Mutex::default(),
-            failures: BTreeSet::new(),
-            barrier: None,
-        }
-    }
-}
-
-impl WagerCopyPort for CopyPort {
-    fn load_pending_state(
-        &self,
-        _guild_id: Option<GuildId>,
-        _pending_match_id: Option<i64>,
-    ) -> Option<PendingBettingState> {
-        self.load_calls.fetch_add(1, Ordering::SeqCst);
-        Some(self.state.clone())
-    }
-
-    fn pot_totals(
-        &self,
-        _guild_id: Option<GuildId>,
-        _pending_state: &PendingBettingState,
-    ) -> PotTotals {
-        self.total_calls.fetch_add(1, Ordering::SeqCst);
-        self.totals
-    }
-
-    fn update_wager_field(&self, target: MessageTarget, _field: &WagerField) -> Result<(), String> {
-        self.updates.lock().expect("updates").push(target);
-        if let Some(barrier) = &self.barrier {
-            barrier.wait();
-        }
-        if self.failures.contains(&target) {
-            Err("copy unavailable".to_owned())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[test]
-fn test_wager_message_copies_update_concurrently_with_reused_state() {
-    let mut state = pending_state();
-    state.command_shuffle_channel_id = Some(221);
-    state.command_shuffle_message_id = Some(222);
-    state.thread_shuffle_thread_id = Some(331);
-    state.thread_shuffle_message_id = Some(332);
-    let mut port = CopyPort::new(state.clone());
-    port.barrier = Some(Arc::new(Barrier::new(3)));
-
-    let report = refresh_wager_copies(
-        &port,
-        WagerRefreshRequest {
-            guild_id: Some(1),
-            pending_match_id: Some(1),
-            locked: false,
-            pending_state: Some(&state),
-        },
-    )
-    .expect("refresh report");
-
-    assert_eq!(report.attempted.len(), 3);
-    assert!(report.failed.is_empty());
-    assert_eq!(port.load_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(port.total_calls.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn test_wager_message_targets_are_deduplicated_and_failure_isolated() {
-    let mut state = pending_state();
-    state.command_shuffle_channel_id = state.shuffle_channel_id;
-    state.command_shuffle_message_id = state.shuffle_message_id;
-    state.thread_shuffle_thread_id = Some(331);
-    state.thread_shuffle_message_id = Some(332);
-    let primary = MessageTarget {
-        channel_id: 111,
-        message_id: 112,
-    };
-    let mut port = CopyPort::new(state.clone());
-    port.failures.insert(primary);
-
-    let report = refresh_wager_copies(
-        &port,
-        WagerRefreshRequest {
-            guild_id: Some(1),
-            pending_match_id: Some(1),
-            locked: false,
-            pending_state: Some(&state),
-        },
-    )
-    .expect("refresh report");
-
-    assert_eq!(report.attempted.len(), 2);
-    assert_eq!(report.failed, vec![primary]);
-    assert_eq!(port.updates.lock().expect("updates").len(), 2);
 }
 
 #[test]
@@ -547,26 +430,6 @@ fn test_last_call_unchanged_even_when_lopsided() {
 }
 
 #[test]
-fn test_final_warning_ping_cannot_mass_mention() {
-    let flavor = FakeFlavor::responding("@everyone @here the longshots need backers!");
-    let plan = reminder_plan(
-        ReminderType::Warning,
-        true,
-        &pending_state(),
-        &message_info(),
-        PotTotals {
-            radiant: 100,
-            dire: 500,
-        },
-        Some(&flavor),
-    );
-    let delivery = channel_delivery(&plan);
-    assert!(delivery.content.contains("@everyone"));
-    assert!(!delivery.allowed_mentions.parse_everyone_or_roles());
-    assert_eq!(scoped_ids(delivery), (1001..=1005).collect());
-}
-
-#[test]
 fn test_final_warning_thread_reply_also_pings_scoped() {
     let info = ShuffleMessageInfo {
         channel_id: Some(111),
@@ -623,5 +486,26 @@ fn test_final_warning_pings_even_without_flavor_service() {
     let delivery = channel_delivery(&plan);
     assert!(!delivery.content.contains("WARNING LINE"));
     assert!(delivery.content.contains("<@1001>"));
+    assert_eq!(scoped_ids(delivery), (1001..=1005).collect());
+}
+
+#[test]
+fn test_final_warning_ping_cannot_mass_mention() {
+    let flavor = FakeFlavor::responding("@everyone @here the longshots need backers!");
+    let plan = reminder_plan(
+        ReminderType::Warning,
+        true,
+        &pending_state(),
+        &message_info(),
+        PotTotals {
+            radiant: 100,
+            dire: 500,
+        },
+        Some(&flavor),
+    );
+    let delivery = channel_delivery(&plan);
+    assert!(delivery.content.contains("@everyone"));
+    assert!(!delivery.allowed_mentions.everyone);
+    assert!(!delivery.allowed_mentions.roles);
     assert_eq!(scoped_ids(delivery), (1001..=1005).collect());
 }

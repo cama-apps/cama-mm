@@ -69,79 +69,15 @@ fn service(
 }
 
 #[derive(Default)]
-struct FakePets {
-    feeds: Vec<PetFeed>,
-    calls: usize,
-}
-
-impl PetMatchPort for FakePets {
-    fn on_match_win(
-        &mut self,
-        _winning_player_ids: &[u64],
-        _guild_id: Option<u64>,
-    ) -> Result<Vec<PetFeed>, RuntimePortError> {
-        self.calls += 1;
-        Ok(self.feeds.clone())
-    }
-}
-
-#[derive(Default)]
 struct FakeDelivery {
-    texts: Vec<String>,
     neon: Vec<NeonResult>,
 }
 
 impl MatchDeliveryPort for FakeDelivery {
-    fn send_public_text(&mut self, content: String) -> Result<(), RuntimePortError> {
-        self.texts.push(content);
-        Ok(())
-    }
-
     fn send_neon(&mut self, result: NeonResult) -> Result<(), RuntimePortError> {
         self.neon.push(result);
         Ok(())
     }
-}
-
-fn pet_feed(fullness_gain: i64) -> PetFeed {
-    PetFeed {
-        pet_name: "Blep".to_owned(),
-        species_id: "common_cama".to_owned(),
-        fullness_gain,
-    }
-}
-
-#[test]
-fn test_pet_match_hook_reports_fullness_gain() {
-    let mut pets = FakePets {
-        feeds: vec![pet_feed(10)],
-        ..FakePets::default()
-    };
-    let mut delivery = FakeDelivery::default();
-
-    run_pet_match_hooks(&mut pets, &mut delivery, Some(10), &[1]);
-
-    assert_eq!(pets.calls, 1);
-    assert_eq!(delivery.texts.len(), 1);
-    assert!(delivery.texts[0].contains("munches +10 fullness in celebration"));
-}
-
-#[test]
-fn test_pet_match_hook_calls_out_already_full_pet() {
-    let mut pets = FakePets {
-        feeds: vec![pet_feed(0)],
-        ..FakePets::default()
-    };
-    let mut delivery = FakeDelivery::default();
-
-    run_pet_match_hooks(&mut pets, &mut delivery, Some(10), &[1]);
-
-    assert!(
-        delivery.texts[0].contains("munches a victory snack — already full"),
-        "{}",
-        delivery.texts[0]
-    );
-    assert!(!delivery.texts[0].contains("+0 fullness"));
 }
 
 #[test]
@@ -681,82 +617,4 @@ fn test_match_hook_reuses_settlement_balances_and_bulk_degen_scores() {
     assert_eq!(balances.bulk_calls, 0);
     assert_eq!(balances.individual_calls, 0);
     assert_eq!(delivery.neon.len(), 1);
-}
-
-fn enriched_winner(discord_id: u64, kills: i32) -> EnrichedPlayer {
-    EnrichedPlayer {
-        discord_id: Some(discord_id),
-        hero_id: Some(1),
-        kills: Some(kills),
-        deaths: Some(2),
-        assists: Some(10),
-        gpm: Some(500 + kills),
-        fantasy_points: Some(f64::from(20 + kills)),
-        ..EnrichedPlayer::default()
-    }
-}
-
-#[test]
-fn test_enrichment_rolls_once_and_returns_at_most_one_callout() {
-    let mut service = service(ScriptedJopatMatchRandom::always(true));
-    let winners = (5..10)
-        .enumerate()
-        .map(|(index, kills)| enriched_winner(index as u64 + 1, kills))
-        .collect::<Vec<_>>();
-
-    let results = service.on_match_enriched(Some(10), &winners, &[]);
-
-    assert_eq!(results.len(), 1);
-    assert_eq!(service.random().observed_chances().len(), 1);
-}
-
-#[test]
-fn test_enrichment_uses_the_configured_per_match_chance() {
-    let mut service = service(ScriptedJopatMatchRandom::always(false)).with_mvp_chance(0.23);
-
-    let results = service.on_match_enriched(Some(10), &[enriched_winner(1, 8)], &[]);
-
-    assert!(results.is_empty());
-    assert_eq!(service.random().observed_chances(), &[0.23]);
-}
-
-#[test]
-fn test_enrichment_can_roast_a_genuinely_extreme_loser() {
-    let mut service = service(ScriptedJopatMatchRandom::always(true));
-    let loser = EnrichedPlayer {
-        discord_id: Some(44),
-        hero_id: Some(2),
-        kills: Some(0),
-        deaths: Some(16),
-        assists: Some(2),
-        gpm: Some(180),
-        xpm: Some(210),
-        ..EnrichedPlayer::default()
-    };
-
-    let results = service.on_match_enriched(Some(10), &[], &[loser]);
-
-    assert_eq!(results.len(), 1);
-    let text = results[0].text_block.as_deref().expect("callout text");
-    assert!(text.contains("Client-44") || text.contains("<@44>"));
-}
-
-#[test]
-fn test_enrichment_does_not_roast_an_ordinary_loser() {
-    let mut service = service(ScriptedJopatMatchRandom::always(true));
-    let loser = EnrichedPlayer {
-        discord_id: Some(45),
-        hero_id: Some(2),
-        kills: Some(0),
-        deaths: Some(6),
-        assists: Some(1),
-        gpm: Some(410),
-        xpm: Some(430),
-        ..EnrichedPlayer::default()
-    };
-
-    let results = service.on_match_enriched(Some(10), &[], &[loser]);
-
-    assert!(results.is_empty());
-    assert!(service.random().observed_chances().is_empty());
 }

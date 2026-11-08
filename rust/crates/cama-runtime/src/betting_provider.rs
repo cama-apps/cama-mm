@@ -900,13 +900,6 @@ impl BettingRegistrationProvider {
         }
     }
 
-    /// Builder form for composition roots that prefer immutable setup.
-    #[must_use]
-    pub fn with_wager_refresh_port(self, port: Arc<dyn BettingWagerRefreshPort>) -> Self {
-        self.set_wager_refresh_port(port);
-        self
-    }
-
     /// Schedule each spin's wheel-ready reminder through the reminder runtime.
     pub fn attach_reminder_hooks(&self, hooks: ReminderHooks) -> Result<(), String> {
         self.handler

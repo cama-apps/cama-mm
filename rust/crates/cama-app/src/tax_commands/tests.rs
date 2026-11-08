@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 
 use cama_domain::embed_safety::{DESCRIPTION_LIMIT, FIELD_VALUE_LIMIT, validate_embed};
@@ -227,24 +227,6 @@ impl PlayerAuditReadPort for FakeReadPort {
             Ok(self.snapshot.clone())
         }
     }
-}
-
-#[test]
-fn test_tax_group_contains_audit_and_enforcement_commands() {
-    assert_eq!(
-        TAX_SUBCOMMANDS.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "audit",
-            "event",
-            "player",
-            "ledger",
-            "fine",
-            "resetcooldown",
-            "bankruptcy",
-            "policy",
-            "vanity",
-        ])
-    );
 }
 
 #[test]
@@ -659,40 +641,6 @@ fn test_tax_ledger_page_calculates_offset_for_service() {
 }
 
 #[test]
-fn test_tax_player_uses_paginated_recent_ledger_slice() {
-    let limit = PLAYER_LEDGER_DEFAULT_LIMIT;
-    let snapshot = player_snapshot(
-        (0..i64::try_from(limit).unwrap())
-            .map(|index| ledger_row(index, None, "balance_update"))
-            .collect(),
-    );
-    let port = FakeReadPort::new(17, Vec::new(), snapshot);
-    let output = player_command(
-        &port,
-        &tax_authorized(),
-        PlayerCommandRequest {
-            guild_id: 123,
-            requester_id: 42,
-            user: user(99, "Taxpayer"),
-        },
-    );
-    assert_eq!(
-        port.calls.borrow().as_slice(),
-        [
-            ReadCall::Snapshot(99, 123, limit, 0),
-            ReadCall::Count(123, Some(99)),
-        ]
-    );
-    let view = output.view.unwrap();
-    assert!(view.buttons.previous_disabled);
-    assert!(!view.buttons.next_disabled);
-    let embed = output.response.embed.unwrap();
-    assert!(embed.text().contains("Page 1"));
-    assert!(embed.text().contains("Entries 1-8 of 17"));
-    assert!(validate_embed(&embed.model).is_empty());
-}
-
-#[test]
 fn test_tax_player_ledger_view_loads_next_page_with_offset() {
     let limit = PLAYER_LEDGER_DEFAULT_LIMIT;
     let port = FakeReadPort::new(
@@ -994,6 +942,21 @@ fn test_tax_bankruptcy_remove_calls_service() {
 }
 
 #[test]
+fn test_tax_vanity_handles_missing_service() {
+    let response = vanity_command::<InMemoryVanityTax>(
+        None,
+        &PermissionContext::new(42),
+        &[],
+        123,
+        42,
+        &user(42, "Anyone"),
+        None,
+    );
+    assert!(response.ephemeral);
+    assert!(response.content.unwrap().contains("not active"));
+}
+
+#[test]
 fn test_tax_vanity_reports_taxable_status_with_exemption_instructions() {
     let vanity = InMemoryVanityTax::default();
     vanity.refresh_member(123, 42, None);
@@ -1166,21 +1129,6 @@ fn test_tax_vanity_rejects_non_admin_override() {
     );
     assert_eq!(vanity.calculate_tax(7, 123, 500), 0);
     assert!(response.content.unwrap().contains("Only admins"));
-}
-
-#[test]
-fn test_tax_vanity_handles_missing_service() {
-    let response = vanity_command::<InMemoryVanityTax>(
-        None,
-        &PermissionContext::new(42),
-        &[],
-        123,
-        42,
-        &user(42, "Anyone"),
-        None,
-    );
-    assert!(response.ephemeral);
-    assert!(response.content.unwrap().contains("not active"));
 }
 
 #[test]

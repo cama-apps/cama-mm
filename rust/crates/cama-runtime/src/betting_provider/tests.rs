@@ -2714,7 +2714,6 @@ fn restart_resilience_full_betting_workflow_settles_both_sides_after_recreation(
 #[test]
 fn provider_exposes_dig_bonus_wheel_seam() {
     let _ = BettingRegistrationProvider::trigger_bonus_spin;
-    let _ = BettingRegistrationProvider::with_wager_refresh_port;
     let explosion = resolve_explosion(true, 0, 1.0, 1.0);
     assert_eq!(explosion.credited_reward, 44);
     assert!(explosion.is_bonus);

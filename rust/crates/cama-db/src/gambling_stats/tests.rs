@@ -590,19 +590,6 @@ fn test_bet_history_guild_isolation() {
 }
 
 #[test]
-fn test_leverage_distribution_from_history_matches_repository_semantics_empty() {
-    assert_eq!(leverage_distribution_from_nullable(&[]), BTreeMap::new());
-}
-
-#[test]
-fn test_leverage_distribution_from_history_matches_repository_semantics_values() {
-    assert_eq!(
-        leverage_distribution_from_nullable(&[None, None, Some(1), Some(2), Some(5), Some(5)]),
-        BTreeMap::from([(1, 3), (2, 1), (5, 2)])
-    );
-}
-
-#[test]
 fn test_bulk_gambling_metrics_match_legacy_aggregates() {
     let mut fixture = Fixture::new();
     for discord_id in [1001, 1002, 1003] {

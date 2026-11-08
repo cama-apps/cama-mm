@@ -172,50 +172,6 @@ impl TipRepository {
         Ok(connection.last_insert_rowid())
     }
 
-    /// Return one sender's most recent tips from exactly one normalized guild.
-    pub fn get_tips_by_sender(
-        &self,
-        sender_id: i64,
-        guild_id: Option<i64>,
-        limit: i64,
-    ) -> Result<Vec<TipTransaction>, TipRepositoryError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT id, sender_id, recipient_id, amount, fee, guild_id, timestamp
-             FROM tip_transactions
-             WHERE sender_id = ?1 AND guild_id = ?2
-             ORDER BY timestamp DESC
-             LIMIT ?3",
-        )?;
-        let rows = statement.query_map(
-            params![sender_id, Self::normalize_guild_id(guild_id), limit],
-            row_to_tip,
-        )?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    /// Return one recipient's most recent tips from exactly one normalized guild.
-    pub fn get_tips_by_recipient(
-        &self,
-        recipient_id: i64,
-        guild_id: Option<i64>,
-        limit: i64,
-    ) -> Result<Vec<TipTransaction>, TipRepositoryError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT id, sender_id, recipient_id, amount, fee, guild_id, timestamp
-             FROM tip_transactions
-             WHERE recipient_id = ?1 AND guild_id = ?2
-             ORDER BY timestamp DESC
-             LIMIT ?3",
-        )?;
-        let rows = statement.query_map(
-            params![recipient_id, Self::normalize_guild_id(guild_id), limit],
-            row_to_tip,
-        )?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
     /// Return every guild-scoped tip involving one user, newest first.
     ///
     /// A self-tip is emitted once as `Sent`, matching Python's `CASE` order.
@@ -246,32 +202,6 @@ impl TipRepository {
             },
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    /// Sum fees either across the whole database or within one explicit guild.
-    ///
-    /// This intentionally differs from the other nullable-guild methods:
-    /// Python treats `None` here as "all guilds", not guild sentinel zero.
-    pub fn get_total_fees_collected(
-        &self,
-        guild_id: Option<i64>,
-    ) -> Result<i64, TipRepositoryError> {
-        let connection = self.connection()?;
-        let total = if let Some(guild_id) = guild_id {
-            connection.query_row(
-                "SELECT COALESCE(SUM(fee), 0)
-                 FROM tip_transactions WHERE guild_id = ?1",
-                params![guild_id],
-                |row| row.get(0),
-            )?
-        } else {
-            connection.query_row(
-                "SELECT COALESCE(SUM(fee), 0) FROM tip_transactions",
-                [],
-                |row| row.get(0),
-            )?
-        };
-        Ok(total)
     }
 
     /// Rank senders by amount, using the Discord ID as the stable tie-breaker.
@@ -1046,10 +976,10 @@ mod tests {
         fixture.log_in_guild(1, 2, 50, 5, Some(99_999));
         let tips = fixture
             .repository
-            .get_tips_by_sender(1, Some(99_999), 10)
+            .get_all_tips_for_user(1, Some(99_999))
             .unwrap();
         assert_eq!(tips.len(), 1);
-        let tip = &tips[0];
+        let tip = &tips[0].tip;
         assert_eq!(tip.sender_id, 1);
         assert_eq!(tip.recipient_id, 2);
         assert_eq!(tip.amount, 50);
@@ -1064,91 +994,11 @@ mod tests {
         fixture.seed_players(&[1, 2]);
         fixture.log(1, 2, 10, 1);
         assert_eq!(
-            fixture.repository.get_tips_by_sender(1, None, 10).unwrap()[0].guild_id,
+            fixture.repository.get_all_tips_for_user(1, None).unwrap()[0]
+                .tip
+                .guild_id,
             0
         );
-    }
-
-    #[test]
-    fn test_get_tips_by_sender_returns_multiple() {
-        let fixture = Fixture::new();
-        fixture.seed_players(&[1, 2, 3]);
-        fixture.log(1, 2, 10, 1);
-        fixture.log(1, 3, 20, 2);
-        fixture.log(1, 2, 30, 3);
-        assert_eq!(
-            fixture
-                .repository
-                .get_tips_by_sender(1, None, 10)
-                .unwrap()
-                .len(),
-            3
-        );
-    }
-
-    #[test]
-    fn test_get_tips_by_sender_respects_limit() {
-        let fixture = Fixture::new();
-        fixture.seed_players(&[1, 2]);
-        for amount in 10..20 {
-            fixture.log(1, 2, amount, 1);
-        }
-        assert_eq!(
-            fixture
-                .repository
-                .get_tips_by_sender(1, None, 3)
-                .unwrap()
-                .len(),
-            3
-        );
-    }
-
-    #[test]
-    fn test_get_tips_by_sender_ordered_by_timestamp_desc() {
-        let fixture = Fixture::new();
-        fixture.seed_players(&[1, 2]);
-        for (amount, fee) in [(10, 1), (20, 2), (30, 3)] {
-            fixture.log(1, 2, amount, fee);
-        }
-        let tips = fixture.repository.get_tips_by_sender(1, None, 10).unwrap();
-        assert_eq!(tips.len(), 3);
-        let mut amounts = tips.iter().map(|tip| tip.amount).collect::<Vec<_>>();
-        amounts.sort_unstable();
-        assert_eq!(amounts, [10, 20, 30]);
-        assert!(
-            tips.windows(2)
-                .all(|window| window[0].timestamp >= window[1].timestamp)
-        );
-    }
-
-    #[test]
-    fn test_get_tips_by_recipient_returns_multiple() {
-        let fixture = Fixture::new();
-        fixture.seed_players(&[1, 2, 3]);
-        fixture.log(1, 3, 10, 1);
-        fixture.log(2, 3, 20, 2);
-        assert_eq!(
-            fixture
-                .repository
-                .get_tips_by_recipient(3, None, 10)
-                .unwrap()
-                .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn test_get_tips_by_recipient_isolates_user() {
-        let fixture = Fixture::new();
-        fixture.seed_players(&[1, 2, 3]);
-        fixture.log(1, 2, 10, 1);
-        fixture.log(1, 3, 20, 2);
-        let tips = fixture
-            .repository
-            .get_tips_by_recipient(2, None, 10)
-            .unwrap();
-        assert_eq!(tips.len(), 1);
-        assert_eq!(tips[0].recipient_id, 2);
     }
 
     #[test]
@@ -1173,44 +1023,6 @@ mod tests {
         assert!(
             tips.iter()
                 .any(|entry| entry.direction == TipDirection::Received)
-        );
-    }
-
-    #[test]
-    fn test_get_total_fees_collected_all_guilds() {
-        let fixture = Fixture::new();
-        fixture.seed_players(&[1, 2]);
-        fixture.log_in_guild(1, 2, 100, 5, Some(111));
-        fixture.log_in_guild(1, 2, 200, 10, Some(222));
-        fixture.log(1, 2, 50, 3);
-        assert_eq!(
-            fixture.repository.get_total_fees_collected(None).unwrap(),
-            18
-        );
-    }
-
-    #[test]
-    fn test_get_total_fees_collected_specific_guild() {
-        let fixture = Fixture::new();
-        fixture.seed_players(&[1, 2]);
-        fixture.log_in_guild(1, 2, 100, 5, Some(111));
-        fixture.log_in_guild(1, 2, 200, 10, Some(222));
-        fixture.log_in_guild(1, 2, 50, 3, Some(111));
-        assert_eq!(
-            fixture
-                .repository
-                .get_total_fees_collected(Some(111))
-                .unwrap(),
-            8
-        );
-    }
-
-    #[test]
-    fn test_get_total_fees_collected_empty_returns_zero() {
-        let fixture = Fixture::new();
-        assert_eq!(
-            fixture.repository.get_total_fees_collected(None).unwrap(),
-            0
         );
     }
 
