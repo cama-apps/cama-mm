@@ -191,6 +191,7 @@ impl DotaHostPort for SimulatedHost {
         let lobby_id = synthetic_lobby_id(&settings.name);
         state.results.remove(&(lobby_id + 1));
         state.lobby = Some(HostLobby {
+            launch_history: HostLaunchHistory::default(),
             id: lobby_id,
             name: settings.name.clone(),
             owner_account_id: self.owner,

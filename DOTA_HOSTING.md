@@ -229,6 +229,15 @@ before releasing the account, without recording or settling again. A result
 recorded while lobby recreation is pending cancels recreation and enters
 cleanup instead.
 
+Historical sessions that missed allocation can also be released after their
+Cama result is finalized. The launch must be more than 90 seconds old, and
+a fresh GC observation (at most 45 seconds old) must show the owned lobby
+idle, with matching settings, no server, no Dota match ID, and no loading or
+gameplay phase. This applies to automatic recorded-result cleanup and
+`resolve outcome:recorded dota_match:0`; it does not authorize cancellation
+or recreation of an unresolved launch. The recorded game and payouts are
+preserved, including when the players used a replacement lobby.
+
 `Resolution queued` means the request was saved, not that cleanup finished.
 Status reports the current cleanup blocker instead of the old launch error.
 Cleanup permits at most three reconnects to refresh stale GC observations and

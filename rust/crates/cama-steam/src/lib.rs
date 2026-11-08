@@ -20,8 +20,8 @@ pub use auth::{
 };
 pub use lobby::{
     DotaSteamClient, DotaSteamError, DotaSteamEvent, LivePlayer, LiveScoreboard, LiveTeam,
-    LobbyConfig, LobbyMember, LobbyOutcome, LobbySnapshot, LobbyState, MatchDetails,
-    MatchMetadataLocation, MatchPlayer, MatchReplay, MatchTeam, Team,
+    LobbyConfig, LobbyLaunchHistory, LobbyMember, LobbyOutcome, LobbySnapshot, LobbyState,
+    MatchDetails, MatchMetadataLocation, MatchPlayer, MatchReplay, MatchTeam, Team,
 };
 
 /// Dota 2's Steam app ID.

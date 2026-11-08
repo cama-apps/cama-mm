@@ -348,6 +348,8 @@ pub struct LobbyMember {
 /// An authoritative practice lobby state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LobbySnapshot {
+    /// Monotonic evidence retained across updates for this lobby identity.
+    pub launch_history: LobbyLaunchHistory,
     pub lobby_id: u64,
     pub leader_steam_id: u64,
     pub server_steam_id: Option<u64>,
@@ -376,6 +378,43 @@ pub struct LobbySnapshot {
     pub connect: Option<String>,
     pub pending_invites: Vec<u64>,
     pub members: Vec<LobbyMember>,
+}
+
+/// Launch milestones that must survive a brief allocation/loading/return cycle
+/// between application polls. Never use this as the current lobby state.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LobbyLaunchHistory {
+    pub allocation_observed: bool,
+    pub postgame_observed: bool,
+    pub game_states: std::collections::BTreeSet<i32>,
+    pub match_id: Option<u64>,
+    pub conflicting_match_ids: bool,
+}
+
+impl LobbySnapshot {
+    fn retain_launch_history(&mut self, previous: Option<&(u64, LobbyLaunchHistory)>) {
+        self.launch_history = previous
+            .filter(|(id, _)| *id == self.lobby_id)
+            .map(|(_, history)| history.clone())
+            .unwrap_or_default();
+        let history = &mut self.launch_history;
+        history.allocation_observed |= matches!(
+            self.state,
+            LobbyState::ServerSetup | LobbyState::ServerAssign | LobbyState::Run
+        );
+        history.postgame_observed |= self.state == LobbyState::PostGame
+            || matches!(
+                self.outcome,
+                LobbyOutcome::RadiantVictory | LobbyOutcome::DireVictory
+            );
+        if let Some(game_state) = self.game_state {
+            history.game_states.insert(game_state);
+        }
+        if let Some(match_id) = self.match_id {
+            history.conflicting_match_ids |= history.match_id.is_some_and(|old| old != match_id);
+            history.match_id.get_or_insert(match_id);
+        }
+    }
 }
 
 /// A player entry in the live server scoreboard.
@@ -564,6 +603,9 @@ struct ClientState {
     own_steam_id: u64,
     status: CacheStatus,
     lobby: Option<LobbySnapshot>,
+    // Keep milestones through an unsubscribe/resubscribe of the same lobby.
+    // A different lobby ID replaces this, bounding retained history to one lobby.
+    lobby_launch_history: Option<(u64, LobbyLaunchHistory)>,
     lobby_observed_at: Option<Instant>,
     lobby_refresh_requested_at: Option<Instant>,
     welcome_generation: u64,
@@ -571,6 +613,12 @@ struct ClientState {
 }
 
 impl ClientState {
+    fn observe_lobby(&mut self, lobby: &mut LobbySnapshot) {
+        lobby.retain_launch_history(self.lobby_launch_history.as_ref());
+        log_lobby_transition(self.lobby.as_ref(), lobby);
+        self.lobby_launch_history = Some((lobby.lobby_id, lobby.launch_history.clone()));
+    }
+
     /// The lobby whose cache should be resent, when the current observation is
     /// ageing. A disconnected or empty cache has nothing trustworthy to renew.
     fn lobby_refresh_target(&self) -> Option<u64> {
@@ -660,6 +708,7 @@ impl DotaSteamClient {
             own_steam_id,
             status: CacheStatus::Hydrating,
             lobby: None,
+            lobby_launch_history: None,
             welcome_generation: 0,
             welcome_observed_at: None,
             lobby_observed_at: None,
@@ -1339,6 +1388,9 @@ async fn apply_subscribed(
         let previous = state.lobby.as_ref().map(|lobby| lobby.lobby_id);
         state.status = CacheStatus::Ready;
         if contains_lobby_type {
+            if let Some(lobby) = &mut lobby {
+                state.observe_lobby(lobby);
+            }
             state.lobby = lobby.clone();
             state.lobby_observed_at = lobby.as_ref().map(|_| Instant::now());
         }
@@ -1480,13 +1532,14 @@ async fn apply_unsubscribed(
 }
 
 async fn apply_lobby(
-    lobby: LobbySnapshot,
+    mut lobby: LobbySnapshot,
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
 ) {
     {
         let mut state = state.write().await;
         state.status = CacheStatus::Ready;
+        state.observe_lobby(&mut lobby);
         state.lobby = Some(lobby.clone());
         state.lobby_observed_at = Some(Instant::now());
     }
@@ -1505,8 +1558,25 @@ async fn clear_lobby(state: &Arc<RwLock<ClientState>>, events: &broadcast::Sende
     }
 }
 
+fn log_lobby_transition(previous: Option<&LobbySnapshot>, lobby: &LobbySnapshot) {
+    if previous.is_none_or(|old| {
+        old.lobby_id != lobby.lobby_id
+            || old.state != lobby.state
+            || old.game_state != lobby.game_state
+            || old.match_id != lobby.match_id
+            || old.server_steam_id != lobby.server_steam_id
+            || old.outcome != lobby.outcome
+    }) {
+        tracing::info!(lobby_id = lobby.lobby_id, state = ?lobby.state,
+            previous_state = ?previous.map(|old| old.state), game_state = ?lobby.game_state,
+            match_id = ?lobby.match_id, server_id = ?lobby.server_steam_id,
+            outcome = ?lobby.outcome, "Dota GC lobby transition observed");
+    }
+}
+
 fn map_lobby(lobby: &CSODOTALobby) -> LobbySnapshot {
     LobbySnapshot {
+        launch_history: LobbyLaunchHistory::default(),
         lobby_id: lobby.lobby_id(),
         leader_steam_id: lobby.leader_id(),
         server_steam_id: nonzero(lobby.server_id()),
@@ -1953,11 +2023,110 @@ mod tests {
             own_steam_id: TEST_STEAM_ID,
             status: CacheStatus::Ready,
             lobby: Some(map_lobby(&lobby)),
+            lobby_launch_history: None,
             welcome_generation: 0,
             welcome_observed_at: None,
             lobby_observed_at: Some(Instant::now()),
             lobby_refresh_requested_at: None,
         }))
+    }
+
+    #[tokio::test]
+    async fn launch_history_survives_fast_return_and_cache_resubscription() {
+        let state = ready_lobby_state();
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
+        let mut wire = CSODOTALobby::new();
+        wire.set_lobby_id(7001);
+        wire.set_state(csodotalobby::State::SERVERSETUP);
+        let mut update = CMsgSOSingleObject::new();
+        update.set_type_id(SO_TYPE_LOBBY);
+        update.set_object_data(wire.write_to_bytes().unwrap());
+        apply_single(update, &state, &events).await;
+        wire.set_state(csodotalobby::State::RUN);
+        wire.set_match_id(888);
+        wire.set_server_id(999);
+        let mut update = CMsgSOSingleObject::new();
+        update.set_type_id(SO_TYPE_LOBBY);
+        update.set_object_data(wire.write_to_bytes().unwrap());
+        apply_single(update, &state, &events).await;
+
+        // A full UI snapshot can replace both updates before the worker polls.
+        wire.set_state(csodotalobby::State::UI);
+        wire.clear_match_id();
+        wire.clear_server_id();
+        let mut object =
+            steam_vent_proto_dota2::gcsdk_gcmessages::cmsg_socache_subscribed::SubscribedType::new(
+            );
+        object.set_type_id(SO_TYPE_LOBBY);
+        object.object_data.push(wire.write_to_bytes().unwrap());
+        let mut subscribed = CMsgSOCacheSubscribed::new();
+        subscribed.objects.push(object);
+        apply_subscribed(subscribed, &state, &events).await;
+        let current = state.read().await.lobby.clone().unwrap();
+        assert_eq!(current.state, LobbyState::Ui);
+        assert_eq!(current.match_id, None);
+        assert_eq!(current.server_steam_id, None);
+        assert!(current.launch_history.allocation_observed);
+        assert_eq!(current.launch_history.match_id, Some(888));
+        assert!(!current.launch_history.conflicting_match_ids);
+
+        clear_lobby(&state, &events).await;
+        apply_lobby(map_lobby(&wire), &state, &events).await;
+        assert!(
+            state
+                .read()
+                .await
+                .lobby
+                .as_ref()
+                .unwrap()
+                .launch_history
+                .allocation_observed
+        );
+        assert_eq!(
+            state
+                .read()
+                .await
+                .lobby
+                .as_ref()
+                .unwrap()
+                .launch_history
+                .match_id,
+            Some(888)
+        );
+
+        wire.set_lobby_id(7002);
+        apply_lobby(map_lobby(&wire), &state, &events).await;
+        assert_eq!(
+            state.read().await.lobby.as_ref().unwrap().launch_history,
+            LobbyLaunchHistory::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_history_retains_gameplay_and_conflicting_match_ids() {
+        let state = ready_lobby_state();
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
+        let mut current = state.read().await.lobby.clone().unwrap();
+        current.state = LobbyState::Run;
+        current.game_state = Some(5);
+        current.match_id = Some(888);
+        apply_lobby(current.clone(), &state, &events).await;
+        current.state = LobbyState::Ui;
+        current.game_state = Some(0);
+        current.match_id = Some(889);
+        apply_lobby(current, &state, &events).await;
+        let history = state
+            .read()
+            .await
+            .lobby
+            .as_ref()
+            .unwrap()
+            .launch_history
+            .clone();
+        assert!(history.game_states.contains(&5));
+        assert!(history.game_states.contains(&0));
+        assert!(history.conflicting_match_ids);
+        assert_eq!(history.match_id, Some(888));
     }
 
     #[tokio::test]
@@ -2546,6 +2715,7 @@ mod tests {
             own_steam_id: 76561197960287930,
             status: CacheStatus::Hydrating,
             lobby: None,
+            lobby_launch_history: None,
             welcome_generation: 0,
             welcome_observed_at: None,
             lobby_observed_at: None,

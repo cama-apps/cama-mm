@@ -61,6 +61,10 @@ pub struct LobbySettings {
 }
 
 const PUBLIC_LOBBY_VISIBILITY: i32 = 0;
+// Cleanup of a recorded, unassigned launch relies on fresh observations being
+// newer than the launch timeout. Keep the observation window strictly shorter.
+const GC_OBSERVATION_MAX_AGE: Duration = Duration::from_secs(45);
+const LAUNCH_CONFIRMATION_TIMEOUT_SECONDS: i64 = 90;
 
 fn legacy_lobby_visibility() -> i32 {
     2
@@ -74,8 +78,17 @@ pub enum LobbyStage {
     Postgame,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct HostLaunchHistory {
+    pub allocation_observed: bool,
+    pub gameplay_observed: bool,
+    pub match_id: Option<u64>,
+    pub conflicting_match_ids: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct HostLobby {
+    pub launch_history: HostLaunchHistory,
     pub id: u64,
     pub name: String,
     pub owner_account_id: u32,
@@ -138,7 +151,8 @@ pub trait DotaHostPort: Send + Sync {
     /// None is authoritative only after initial GC cache hydration. Connection
     /// loss and stale/incomplete cache must return an error.
     async fn snapshot(&self) -> Result<Option<HostLobby>, String>;
-    /// True only when the source has recent GC observation, not just a readable cache.
+    /// True only when lobby data arrived within GC_OBSERVATION_MAX_AGE, not
+    /// merely when a cached snapshot is readable. Cleanup relies on this bound.
     async fn betting_observation_fresh(&self) -> bool {
         true
     }
@@ -504,7 +518,20 @@ impl DotaHostWorker {
                 record.lobby_id = Some(lobby.id.to_string());
                 self.save(&mut record, &state, now).await?;
             }
-            if let Some(match_id) = lobby.match_id {
+            if lobby.launch_history.conflicting_match_ids {
+                return self.review(&mut record, &mut state,
+                    "the GC reported multiple match IDs for this lobby; automatic recovery is paused", now).await;
+            }
+            // Persist gameplay before allocation evidence: a crash between
+            // writes must never make a played game eligible for recreation.
+            if lobby.launch_history.gameplay_observed {
+                self.close_betting(&mut record, &mut state, now).await?;
+            }
+            if lobby.launch_history.allocation_observed && state.allocation_observed_at.is_none() {
+                state.allocation_observed_at = Some(now);
+                self.save(&mut record, &state, now).await?;
+            }
+            if let Some(match_id) = lobby.match_id.or(lobby.launch_history.match_id) {
                 if record
                     .valve_match_id
                     .as_ref()
@@ -546,11 +573,14 @@ impl DotaHostWorker {
                 {
                     return Ok(());
                 }
-                if !recorded_cleanup::can_release_lobby(&record, &state, &lobby) {
+                if !recorded_cleanup::can_release_lobby(&record, &state, &lobby, now) {
                     // Match details may reach us before the lobby's final
                     // update. Never destroy a server still reported active.
-                    return self.review(&mut record, &mut state,
-                        "Cama result recorded; waiting for the owned Dota lobby to finish or return to idle before releasing the host", now).await;
+                    let reason = format!(
+                        "Cama result recorded; waiting for the owned Dota lobby to finish or return to idle before releasing the host (GC stage {:?}, game state {:?}, server {:?}, Dota match {:?})",
+                        lobby.stage, lobby.game_state, lobby.server_id, lobby.match_id
+                    );
+                    return self.review(&mut record, &mut state, &reason, now).await;
                 }
                 return self
                     .destroy_recorded_lobby(port, &mut record, &mut state, lobby.id, now)
@@ -764,7 +794,7 @@ impl DotaHostWorker {
             return self.review(&mut record,&mut state,"league, game mode, pick priority, or safety settings differ from the saved lobby settings",now).await;
         }
         if let Some(sent) = state.launch_requested_at {
-            if now.saturating_sub(sent) > 90 {
+            if now.saturating_sub(sent) > LAUNCH_CONFIRMATION_TIMEOUT_SECONDS {
                 return self
                     .review(
                         &mut record,
@@ -1124,7 +1154,7 @@ impl DotaHostWorker {
                     )
                     .await;
             }
-            if !recorded_cleanup::can_release_lobby(record, state, lobby) {
+            if !recorded_cleanup::can_release_lobby(record, state, lobby, now) {
                 // Explicit recovery may bypass stale lifecycle cache only with
                 // independent, complete Valve evidence for this exact game.
                 let finished = if let Some(id) = record

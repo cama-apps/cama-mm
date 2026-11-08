@@ -110,7 +110,7 @@ fn lobby_config(settings: &LobbySettings) -> LobbyConfig {
 impl DotaHostPort for SteamHost {
     async fn betting_observation_fresh(&self) -> bool {
         self.0
-            .refresh_lobby_observation(Duration::from_secs(45))
+            .refresh_lobby_observation(GC_OBSERVATION_MAX_AGE)
             .await
     }
     async fn snapshot(&self) -> Result<Option<HostLobby>, String> {
@@ -137,6 +137,17 @@ impl DotaHostPort for SteamHost {
                     _ => return Err("GC reported an unsupported pick priority".to_owned()),
                 };
                 Ok(HostLobby {
+                    launch_history: HostLaunchHistory {
+                        allocation_observed: s.launch_history.allocation_observed,
+                        gameplay_observed: s.launch_history.postgame_observed
+                            || s.launch_history
+                                .game_states
+                                .iter()
+                                .copied()
+                                .any(dota_lobby::gameplay_has_started),
+                        match_id: s.launch_history.match_id,
+                        conflicting_match_ids: s.launch_history.conflicting_match_ids,
+                    },
                     id: s.lobby_id,
                     name: s.game_name,
                     owner_account_id: s
