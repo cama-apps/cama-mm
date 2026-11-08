@@ -819,7 +819,7 @@ fn withholding_note(deductions: ProfitDeductions) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::{HashMap, VecDeque};
 
     use super::*;
 
