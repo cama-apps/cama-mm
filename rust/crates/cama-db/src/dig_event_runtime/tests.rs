@@ -1313,6 +1313,36 @@ fn artifact_reward_pool_uses_one_owned_artifact_query() {
 }
 
 #[test]
+fn quest_snapshot_recent_bet_uses_an_inclusive_seven_day_window() {
+    let fixture = Fixture::new();
+    fixture.seed(ACTOR, GUILD, 20);
+    let now = 2_000_000_000;
+    let actor = key(ACTOR, Some(GUILD));
+    let recent_bet = || {
+        fixture
+            .repository
+            .quest_snapshot(actor, now)
+            .unwrap()
+            .recent_bet
+    };
+    assert!(!recent_bet(), "no bet");
+
+    let insert_bet = |bet_time: i64| {
+        fixture
+            .connection()
+            .execute(
+                "INSERT INTO bets (guild_id,discord_id,bet_time) VALUES (?1,?2,?3)",
+                params![GUILD, ACTOR, bet_time],
+            )
+            .unwrap();
+    };
+    insert_bet(now - 7 * 86_400 - 1);
+    assert!(!recent_bet(), "a bet older than seven days");
+    insert_bet(now - 7 * 86_400);
+    assert!(recent_bet(), "a bet exactly seven days old");
+}
+
+#[test]
 fn quest_progress_is_fail_soft_ordered_and_idempotent() {
     let fixture = Fixture::new();
     fixture.seed(ACTOR, GUILD, 20);

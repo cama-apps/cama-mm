@@ -231,6 +231,38 @@ fn success_request(spec: SuccessRequestSpec<'_>) -> EncounterSettlementRequest {
 }
 
 #[test]
+fn test_richest_and_deepest_candidates_rank_others_and_exclude_the_digger() {
+    let fixture = Fixture::new();
+    for (id, balance, depth) in [
+        (DIGGER, 9_000, 500),
+        (10_002, 100, 10),
+        (10_003, 200, 200),
+        (10_004, 300, 50),
+        (10_005, 400, 0),
+    ] {
+        fixture.add_player(id, GUILD, balance, None);
+        fixture.add_tunnel(id, GUILD, depth);
+    }
+    fixture.add_player(10_006, OTHER_GUILD, 50_000, None);
+    fixture.add_tunnel(10_006, OTHER_GUILD, 900);
+
+    let candidates = |strategy| {
+        fixture
+            .repository
+            .candidate_ids(candidate_query(strategy, Some(2)))
+            .unwrap()
+    };
+    assert_eq!(
+        candidates(EncounterVictimStrategy::RichestN),
+        vec![10_005, 10_004]
+    );
+    assert_eq!(
+        candidates(EncounterVictimStrategy::DeepestN),
+        vec![10_003, 10_004]
+    );
+}
+
+#[test]
 fn test_richest_n_burn_is_net_deflationary() {
     let fixture = Fixture::new();
     for (id, balance) in [(DIGGER, 50), (10_002, 1_000), (10_003, 800), (10_004, 500)] {
