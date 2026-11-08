@@ -1236,6 +1236,34 @@ fn test_berserk_gambler_bottled_quake_and_deaths_door_match_python() {
 }
 
 #[test]
+fn test_deaths_door_is_one_shot_and_gamblers_edge_needs_its_roll() {
+    let mut doomed = combat_for_effect_test(CombatEffects {
+        relic_deaths_door: true,
+        ..CombatEffects::default()
+    });
+    doomed.player_hp = 1;
+    doomed.boss_hit = 1.0;
+    doomed.boss_damage = 5;
+    let (first, terminal) = run_round(1, &mut doomed, &mut SequenceEntropy::constant(0.0));
+    assert_eq!(terminal, None);
+    assert_eq!(doomed.player_hp, 1);
+    assert!(first.effect_log.deaths_door);
+    let (second, terminal) = run_round(2, &mut doomed, &mut SequenceEntropy::constant(0.0));
+    assert_eq!(terminal, Some(false));
+    assert!(!second.effect_log.deaths_door);
+
+    let mut gambler = combat_for_effect_test(CombatEffects {
+        relic_double_hit: true,
+        ..CombatEffects::default()
+    });
+    gambler.player_hit = 1.0;
+    let (record, _) = run_round(1, &mut gambler, &mut SequenceEntropy::constant(0.99));
+    assert_eq!(gambler.boss_hp, 9);
+    assert!(record.player_hit);
+    assert!(!record.effect_log.double_hit);
+}
+
+#[test]
 fn test_mechanic_defenses_have_python_precedence_and_are_one_shot() {
     let option = MechanicOption {
         label: "Take it".to_owned(),

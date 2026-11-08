@@ -1,4 +1,4 @@
-//! Typed Dig relic rarity, raw-find, and recycling policy independent from Discord.
+//! Typed Dig relic rarity and recycling policy independent from Discord.
 //!
 //! This module reuses the Dig artifact catalog, injects entropy, and makes persistence a port. The
 //! SQLite recycling adapter revalidates inventory after application-level checks so stale
@@ -10,34 +10,16 @@ use std::fmt::Display;
 use cama_db::dig_relic_recycling::{
     DigRelicRecyclingRepository, DigRelicRecyclingRepositoryError, PersistedRelicRow, RelicOwner,
 };
-use thiserror::Error;
 
 use crate::dig_loot::{ArtifactDef, Rarity, artifact_catalog};
 use crate::dig_prestige4_content;
-use crate::dig_service::layer_at;
 
-pub const RAW_RELIC_FIND_RATE: f64 = 0.005;
 pub const RELIC_RARITY_ORDER: [Rarity; 4] = [
     Rarity::Common,
     Rarity::Uncommon,
     Rarity::Rare,
     Rarity::Legendary,
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RawRelicFindRequest {
-    pub discord_id: i64,
-    pub guild_id: i64,
-    pub depth: i64,
-    pub extra_rate_mod: f64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RawRelicFind {
-    pub artifact_id: &'static str,
-    pub name: &'static str,
-    pub rarity: Rarity,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnedRelicRow {
@@ -146,31 +128,6 @@ impl RelicEntropy for ScriptedRelicEntropy {
     }
 }
 
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
-pub enum RelicFindError {
-    #[error("Relic rarity roll must be between 0 (inclusive) and 1 (exclusive).")]
-    InvalidUnitRoll,
-    #[error("raw relic persistence failed: {0}")]
-    Persistence(String),
-}
-
-pub trait RawRelicFindPort {
-    type Error: Display;
-
-    fn tunnel_exists(&self, discord_id: i64, guild_id: i64) -> Result<bool, Self::Error>;
-    fn owned_artifact_ids(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<BTreeSet<String>, Self::Error>;
-    fn persist_raw_relic(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        artifact_id: &str,
-    ) -> Result<(), Self::Error>;
-}
-
 pub trait RelicRecyclePort {
     type Error: Display;
 
@@ -239,65 +196,6 @@ impl<P> DigRelicRecyclingService<P> {
     #[must_use]
     pub const fn port(&self) -> &P {
         &self.port
-    }
-}
-
-impl<P> DigRelicRecyclingService<P>
-where
-    P: RawRelicFindPort,
-{
-    pub fn roll_raw_relic_find(
-        &self,
-        request: RawRelicFindRequest,
-        entropy: &mut impl RelicEntropy,
-    ) -> Result<Option<RawRelicFind>, RelicFindError> {
-        if !self
-            .port
-            .tunnel_exists(request.discord_id, request.guild_id)
-            .map_err(|error| RelicFindError::Persistence(error.to_string()))?
-        {
-            return Ok(None);
-        }
-        let find_roll = entropy.unit();
-        validate_unit_roll(find_roll)?;
-        if find_roll >= RAW_RELIC_FIND_RATE * request.extra_rate_mod.max(0.0) {
-            return Ok(None);
-        }
-
-        let target_rarity = relic_rarity_for_roll(entropy.unit())?;
-        let owned = self
-            .port
-            .owned_artifact_ids(request.discord_id, request.guild_id)
-            .map_err(|error| RelicFindError::Persistence(error.to_string()))?;
-        let layer_name = layer_at(request.depth).name;
-        let ordinary = artifact_catalog()
-            .into_iter()
-            .filter(|artifact| {
-                is_ordinary_relic(*artifact)
-                    && artifact.rarity == target_rarity
-                    && !owned.contains(artifact.id)
-            })
-            .collect::<Vec<_>>();
-        let mut eligible = ordinary
-            .iter()
-            .copied()
-            .filter(|artifact| artifact.layer.eq_ignore_ascii_case(layer_name))
-            .collect::<Vec<_>>();
-        if eligible.is_empty() {
-            eligible = ordinary;
-        }
-        if eligible.is_empty() {
-            return Ok(None);
-        }
-        let selected = eligible[entropy.choose_index(eligible.len())];
-        self.port
-            .persist_raw_relic(request.discord_id, request.guild_id, selected.id)
-            .map_err(|error| RelicFindError::Persistence(error.to_string()))?;
-        Ok(Some(RawRelicFind {
-            artifact_id: selected.id,
-            name: selected.name,
-            rarity: selected.rarity,
-        }))
     }
 }
 
@@ -393,27 +291,6 @@ where
 #[must_use]
 pub fn is_ordinary_relic(artifact: ArtifactDef) -> bool {
     dig_prestige4_content::is_ordinary_relic(artifact)
-}
-
-pub fn relic_rarity_for_roll(roll: f64) -> Result<Rarity, RelicFindError> {
-    validate_unit_roll(roll)?;
-    Ok(if roll < 0.60 {
-        Rarity::Common
-    } else if roll < 0.90 {
-        Rarity::Uncommon
-    } else if roll < 0.99 {
-        Rarity::Rare
-    } else {
-        Rarity::Legendary
-    })
-}
-
-fn validate_unit_roll(roll: f64) -> Result<(), RelicFindError> {
-    if roll.is_finite() && (0.0..1.0).contains(&roll) {
-        Ok(())
-    } else {
-        Err(RelicFindError::InvalidUnitRoll)
-    }
 }
 
 #[must_use]
