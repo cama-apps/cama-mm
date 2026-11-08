@@ -4216,10 +4216,15 @@ impl DraftHandler {
         if !is_admin(&self.config, user_id, permissions) {
             return respond_ephemeral(&responder, "❌ Admin only command.").await;
         }
+        // Seeding the sample players is SQLite work, so acknowledge first.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let state = sample_state(guild_id, false);
         self.ensure_sample_players(guild_id).await?;
         responder
-            .respond(
+            .edit_original(
                 InteractionResponse::message("**[SAMPLE UI - Not a real draft]**")
                     .embed(sample_live_embed(&state))
                     .action_rows(drafting_sample_view(&state)),
@@ -4238,6 +4243,11 @@ impl DraftHandler {
         if !is_admin(&self.config, user_id, permissions) {
             return respond_ephemeral(&responder, "❌ Admin only command.").await;
         }
+        // Seeding the sample players is SQLite work, so acknowledge first.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let state = sample_state(guild_id, true);
         self.ensure_sample_players(guild_id).await?;
         let pending = db_pending_state(&state, unix_now(), self.config.bet_lock_seconds, false)?;
@@ -4256,7 +4266,7 @@ impl DraftHandler {
             "is_bomb_pot": false,
         }));
         responder
-            .respond(
+            .edit_original(
                 InteractionResponse::message("**[SAMPLE UI - Not a real draft]**")
                     .embed(completion_embed(&state, &pending)),
             )
