@@ -405,7 +405,7 @@ pub(super) fn persona_signals(
             },
         });
     }
-    let meals = activity.pets.meals();
+    let meals = activity.pets.lifetime_meals();
     if meals >= 5 {
         signals.push(PersonaSignal {
             activity: PersonaActivity::Pets,
@@ -488,7 +488,7 @@ pub(super) fn recap_numbers(
             format_grouped(activity.mafia.games)
         ));
     }
-    let meals = activity.pets.meals();
+    let meals = activity.pets.lifetime_meals();
     if meals >= 5 {
         numbers.push(format!("{}|pet meals", format_grouped(meals)));
     }

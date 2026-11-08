@@ -311,7 +311,7 @@ impl WrappedSources {
             .map_err(|error| error.to_string())?;
         let rating_history = self
             .wrapped
-            .rating_history(target_id, guild_id, 50)
+            .rating_history(target_id, guild_id, start_ts, end_ts)
             .unwrap_or_else(|error| {
                 warn!(%error, target_id, guild_id, "failed to fetch Wrapped rating history");
                 Vec::new()

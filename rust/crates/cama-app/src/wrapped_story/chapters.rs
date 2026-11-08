@@ -601,7 +601,7 @@ pub fn pet_cards(year: &PetYear, names: NameLookup<'_>, seed: u64) -> Vec<Chapte
         pet.art = CardArt::ActivePet;
     }
     pet.headline = star.name.clone();
-    let meals = year.meals();
+    let meals = year.lifetime_meals();
     pet.stat_value = plural(meals, "meal", "meals");
     pet.stat_label = if year.pets.len() > 1 {
         format!("served across {} pets", year.pets.len())

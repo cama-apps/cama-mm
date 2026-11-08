@@ -299,10 +299,11 @@ impl WrappedActivityRepository {
         let rank = ServerRank::among(
             &totals(
                 &connection,
-                "SELECT discord_id, SUM(times_fed) FROM pets
-                  WHERE guild_id = ?1 AND adopted_at < ?3
-                    AND (died_at IS NULL OR died_at >= ?2)
-               GROUP BY discord_id",
+                "SELECT account_id, SUM(-delta) FROM economy_ledger_entries
+                  WHERE guild_id = ?1 AND account_type = 'player'
+                    AND source = 'pet' AND delta < 0
+                    AND created_at >= ?2 AND created_at < ?3
+               GROUP BY account_id",
                 guild_id,
                 window,
             )?,
