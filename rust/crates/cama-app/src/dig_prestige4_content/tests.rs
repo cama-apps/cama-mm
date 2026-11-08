@@ -2,10 +2,11 @@ use std::collections::{BTreeSet, VecDeque};
 
 use super::*;
 use crate::boss_multi_tier::stinger_by_id;
-use crate::dig_bosses::{boss_pool_for_tier, mechanic, regular_phase};
+use crate::dig_bosses::{boss_by_id, boss_pool_for_tier, mechanic, regular_phase};
 use crate::dig_loot::{
     CanonicalEventPolicy, CanonicalEventRolls, canonical_event, resolve_canonical_event_with_policy,
 };
+use crate::dig_relic_rework::trophy_relic_for_boss;
 
 #[derive(Debug, Default)]
 struct ScriptedEntropy {
@@ -101,26 +102,26 @@ fn test_new_bosses_fields() {
         ("spineback", 275, "The Spineback", "bruiser", "aching_spine"),
     ];
     for (id, depth, name, archetype, trophy) in expected {
-        let content = prestige_boss_content(id).expect("prestige boss");
-        assert_eq!(content.boss.depth, depth);
-        assert_eq!(content.boss.name, name);
-        assert_eq!(content.boss.prestige_required, 4);
-        assert_eq!(content.boss.archetype, archetype);
-        assert_eq!(content.trophy_relic_id, trophy);
+        let boss = boss_by_id(id).expect("prestige boss");
+        assert_eq!(boss.depth, depth);
+        assert_eq!(boss.name, name);
+        assert_eq!(boss.prestige_required, 4);
+        assert_eq!(boss.archetype, archetype);
+        assert_eq!(trophy_relic_for_boss(id), Some(trophy));
     }
 }
 
 #[test]
 fn test_reskins_keep_ids_change_names_and_add_trophies() {
-    let whisper = prestige_boss_content("xalatath").expect("whisper");
-    let red = prestige_boss_content("lilith").expect("red mother");
-    assert_eq!(whisper.boss.boss_id, "xalatath");
-    assert_eq!(whisper.boss.name, "The Whispering Edge");
-    assert_eq!(whisper.boss.prestige_required, 3);
-    assert_eq!(whisper.trophy_relic_id, "listening_shard");
-    assert_eq!(red.boss.boss_id, "lilith");
-    assert_eq!(red.boss.name, "The Red Mother");
-    assert_eq!(red.trophy_relic_id, "hateborn_ember");
+    let whisper = boss_by_id("xalatath").expect("whisper");
+    let red = boss_by_id("lilith").expect("red mother");
+    assert_eq!(whisper.boss_id, "xalatath");
+    assert_eq!(whisper.name, "The Whispering Edge");
+    assert_eq!(whisper.prestige_required, 3);
+    assert_eq!(trophy_relic_for_boss("xalatath"), Some("listening_shard"));
+    assert_eq!(red.boss_id, "lilith");
+    assert_eq!(red.name, "The Red Mother");
+    assert_eq!(trophy_relic_for_boss("lilith"), Some("hateborn_ember"));
 }
 
 #[test]
