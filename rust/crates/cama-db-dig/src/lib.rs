@@ -16,8 +16,6 @@ pub mod dig_boss_runtime;
 pub mod dig_carry_wager;
 #[path = "../../cama-db/src/dig_event_runtime.rs"]
 pub mod dig_event_runtime;
-#[path = "../../cama-db/src/dig_event_threats.rs"]
-pub mod dig_event_threats;
 #[path = "../../cama-db/src/dig_flavor_repository.rs"]
 pub mod dig_flavor_repository;
 #[path = "../../cama-db/src/dig_gear_runtime.rs"]

@@ -2029,3 +2029,153 @@ fn pending_legacy_relic_finale_uses_already_granted_artifact_metadata() {
     assert_eq!(reward_row_id, Some(relic_row));
     assert_eq!(fixture.count_actions(ACTOR, "quest_finale_relic"), 1);
 }
+
+/// The first authored, non-splash event whose `choice` failure satisfies
+/// `wanted` while its success neither costs streak days nor curses.
+fn authored_failure(
+    choice: &str,
+    wanted: impl Fn(&crate::dig_loot::CanonicalEventOutcome) -> bool,
+) -> (String, crate::dig_loot::CanonicalEventOutcome) {
+    crate::dig_loot::canonical_event_catalog()
+        .iter()
+        .filter(|event| event.splash.is_none())
+        .find_map(|event| {
+            let option = match choice {
+                "risky" => event.risky_option.as_ref(),
+                "desperate" => event.desperate_option.as_ref(),
+                _ => None,
+            }?;
+            let failure = option.failure.as_ref()?;
+            (wanted(failure)
+                && !failure.cave_in
+                && option.success.streak_loss == 0
+                && option.success.curse.is_none())
+            .then(|| (event.id.clone(), failure.clone()))
+        })
+        .unwrap_or_else(|| panic!("an authored {choice} failure"))
+}
+
+fn set_streak(fixture: &Fixture, streak_days: i64) {
+    fixture
+        .connection()
+        .execute(
+            "UPDATE tunnels SET streak_days=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![streak_days, ACTOR, GUILD],
+        )
+        .expect("seed streak");
+}
+
+#[test]
+fn event_streak_setback_is_partial_grows_with_the_streak_and_stops_at_zero() {
+    let (event_id, failure) = authored_failure("risky", |outcome| {
+        outcome.streak_loss > 0 && outcome.curse.is_none()
+    });
+    let loss = failure.streak_loss;
+    for streak in [10, 45, 60, 1] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 100, 50, 0);
+        set_streak(&fixture, streak);
+        let key = key_for_outcome(&fixture.snapshot(), &event_id, "risky", false);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request(&event_id, "risky", &key))
+            .expect("streak failure");
+
+        // One extra day of setback per twenty days already banked.
+        let expected_after = (streak - (loss + streak / 20)).max(0);
+        let resolution = outcome.resolution.as_ref().expect("resolution");
+        assert!(!resolution.succeeded);
+        assert_eq!(
+            fixture.snapshot().streak_days,
+            expected_after,
+            "streak {streak}"
+        );
+        assert_eq!(
+            resolution.streak_loss,
+            streak - expected_after,
+            "streak {streak}"
+        );
+    }
+
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    set_streak(&fixture, 10);
+    let key = key_for_outcome(&fixture.snapshot(), &event_id, "risky", true);
+    let outcome = fixture
+        .service()
+        .resolve_event(request(&event_id, "risky", &key))
+        .expect("streak success");
+    assert_eq!(
+        outcome.resolution.as_ref().expect("resolution").streak_loss,
+        0
+    );
+    assert_eq!(fixture.snapshot().streak_days, 10);
+}
+
+#[test]
+fn event_curse_is_strengthened_replaces_the_old_curse_and_keeps_the_buff() {
+    const BUFF: &str = r#"{"id":"power","digs_remaining":3}"#;
+    for choice in ["risky", "desperate"] {
+        let (event_id, failure) = authored_failure(choice, |outcome| {
+            outcome.curse.is_some() && outcome.streak_loss == 0
+        });
+        let curse = failure.curse.expect("authored curse");
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 100, 50, 0);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE tunnels SET temp_buffs=?1, temp_curses=?2
+                     WHERE discord_id=?3 AND guild_id=?4",
+                params![
+                    BUFF,
+                    r#"{"id":"old_hex","name":"Old Hex","digs_remaining":9,"effect":{"advance_bonus":-1}}"#,
+                    ACTOR,
+                    GUILD
+                ],
+            )
+            .expect("seed buff and old curse");
+        let key = key_for_outcome(&fixture.snapshot(), &event_id, choice, false);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request(&event_id, choice, &key))
+            .expect("curse failure");
+
+        // The result names the authored curse; the stored one runs two digs
+        // longer at one and a half times the strength.
+        let resolution = outcome.resolution.as_ref().expect("resolution");
+        assert_eq!(resolution.curse.as_ref(), Some(&curse), "{event_id}");
+        let snapshot = fixture.snapshot();
+        assert_eq!(snapshot.temp_buff_json.as_deref(), Some(BUFF), "{event_id}");
+        let stored: serde_json::Value =
+            serde_json::from_str(snapshot.temp_curse_json.as_deref().expect("stored curse"))
+                .expect("curse JSON");
+        assert_eq!(stored["id"], curse.id.as_str(), "{event_id}");
+        assert_eq!(
+            stored["digs_remaining"],
+            curse.duration_digs + 2,
+            "{event_id}"
+        );
+        let authored = curse.effect.as_object().expect("authored effect");
+        let strengthened = stored["effect"].as_object().expect("stored effect");
+        assert_eq!(
+            strengthened.keys().collect::<Vec<_>>(),
+            authored.keys().collect::<Vec<_>>()
+        );
+        for (name, value) in authored {
+            let scaled = value.as_f64().expect("numeric effect") * 1.5;
+            if matches!(name.as_str(), "cave_in_bonus" | "cooldown_penalty") {
+                let stored = strengthened[name].as_f64().expect("fractional effect");
+                assert!((stored - scaled).abs() < 1e-9, "{event_id} {name}");
+            } else {
+                assert_eq!(
+                    strengthened[name].as_i64(),
+                    Some(scaled.round_ties_even() as i64),
+                    "{event_id} {name}"
+                );
+            }
+        }
+    }
+}
