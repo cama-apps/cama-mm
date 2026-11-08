@@ -625,10 +625,6 @@ where
         self.reminders.as_ref()
     }
 
-    pub const fn reminders_mut(&mut self) -> Option<&mut M> {
-        self.reminders.as_mut()
-    }
-
     pub fn set_direct_death_delivery(&mut self, pet_id: i64, count: usize) {
         if count == 0 {
             self.direct_death_deliveries.remove(&pet_id);
@@ -1357,10 +1353,6 @@ impl ReminderCoordinator {
             now,
             tasks: BTreeMap::new(),
         }
-    }
-
-    pub fn set_now(&mut self, now: i64) {
-        self.now = now;
     }
 
     pub fn schedule_pet_reminder(

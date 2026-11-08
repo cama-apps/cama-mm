@@ -490,11 +490,6 @@ impl DigBonusRuntime {
         self
     }
 
-    #[must_use]
-    pub fn component_prefix(&self) -> &'static str {
-        DIG_BONUS_COMPONENT_PREFIX
-    }
-
     /// Return the number of currently live process-local views.
     #[must_use]
     pub fn active_session_count(&self) -> usize {

@@ -740,17 +740,6 @@ impl DigRouteService {
         Self { repository }
     }
 
-    pub fn get_route_status(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Option<RouteStatus>, DigRouteAppError> {
-        Ok(self
-            .repository
-            .tunnel(discord_id, guild_id)?
-            .map(|tunnel| route_status(tunnel.route_state.as_deref())))
-    }
-
     pub fn choose_route(
         &self,
         discord_id: i64,

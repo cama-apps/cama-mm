@@ -151,11 +151,6 @@ impl<E: TunnelNameEntropy> DigTunnelNamingService<E> {
             TUNNEL_NAME_SILLY[self.entropy.index(TUNNEL_NAME_SILLY.len())].to_owned()
         }
     }
-
-    #[must_use]
-    pub fn into_entropy(self) -> E {
-        self.entropy
-    }
 }
 
 #[must_use]

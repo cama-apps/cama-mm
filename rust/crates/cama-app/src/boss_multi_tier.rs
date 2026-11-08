@@ -762,10 +762,6 @@ impl InMemoryGearRepair {
     pub fn piece(&self, key: PlayerKey, gear_id: i64) -> Option<&GearRecord> {
         self.pieces.get(&(key, gear_id))
     }
-
-    pub fn set_repair_bill(&mut self, amount: i64) {
-        self.repair_bill = amount.max(0);
-    }
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]

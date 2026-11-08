@@ -28,15 +28,6 @@ pub enum CaveInBand {
     Endgame,
 }
 
-/// Stable shallow-band constant matching the Python facade.
-pub const CAVE_IN_BAND_SHALLOW: CaveInBand = CaveInBand::Shallow;
-/// Stable mid-band constant matching the Python facade.
-pub const CAVE_IN_BAND_MID: CaveInBand = CaveInBand::Mid;
-/// Stable deep-band constant matching the Python facade.
-pub const CAVE_IN_BAND_DEEP: CaveInBand = CaveInBand::Deep;
-/// Stable endgame-band constant matching the Python facade.
-pub const CAVE_IN_BAND_ENDGAME: CaveInBand = CaveInBand::Endgame;
-
 impl CaveInBand {
     /// Return the stable identifier persisted and exposed by the Python app.
     #[must_use]

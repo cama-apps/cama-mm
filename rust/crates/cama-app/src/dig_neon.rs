@@ -987,12 +987,6 @@ where
     }
 
     #[must_use]
-    pub fn with_renderer(mut self, renderer: Arc<dyn DigNeonRenderPort>) -> Self {
-        self.renderer = renderer;
-        self
-    }
-
-    #[must_use]
     pub fn with_caption(mut self, caption: Arc<dyn DigCaptionPort>) -> Self {
         self.caption = Some(caption);
         self
@@ -1037,10 +1031,6 @@ where
     #[must_use]
     pub const fn cooldown(&self) -> &C {
         &self.cooldown
-    }
-
-    pub fn cooldown_mut(&mut self) -> &mut C {
-        &mut self.cooldown
     }
 
     pub fn dig_caption(

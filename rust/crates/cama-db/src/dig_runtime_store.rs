@@ -618,36 +618,6 @@ pub fn update_tunnel_cas(
     )
 }
 
-/// Read one tunnel's depth.
-pub fn tunnel_depth(
-    connection: &Connection,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<Option<i64>, rusqlite::Error> {
-    connection
-        .query_row(
-            "SELECT depth FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
-            params![discord_id, guild_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-}
-
-/// Depth-only CAS used by the actor-scoped balance update.
-pub fn update_tunnel_depth_cas(
-    connection: &Connection,
-    depth_after: i64,
-    discord_id: i64,
-    guild_id: i64,
-    expected_depth: i64,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE tunnels SET depth=?1 WHERE discord_id=?2 AND guild_id=?3
-          AND depth=?4",
-        params![depth_after, discord_id, guild_id, expected_depth],
-    )
-}
-
 /// Clear the dig cooldown timestamp.
 pub fn reset_tunnel_cooldown(
     connection: &Connection,
@@ -674,9 +644,6 @@ pub fn set_tunnel_depth_reset_cooldown(
         params![depth, discord_id, guild_id],
     )
 }
-
-/// Strength, Smarts, Stamina, Survival, and the stat-point pool, in storage order.
-pub type TunnelStatAllocation = (i64, i64, i64, i64, i64);
 
 /// Depth-ordered top-ten tunnels for the runtime leaderboard rendering.
 pub fn top_tunnel_depth_rows(

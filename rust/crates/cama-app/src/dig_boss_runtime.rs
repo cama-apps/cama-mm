@@ -3060,16 +3060,6 @@ impl DigBossRuntimeService {
         finish_composed(&mut service, outcome)
     }
 
-    pub fn retreat_regular<E: EntropyPort>(
-        &self,
-        request: DigBossRuntimeRequest,
-        entropy: E,
-    ) -> Result<DigBossRuntimeResult<i32>, DigBossRuntimeError> {
-        let mut service = self.compose(request.now, entropy);
-        let outcome = service.retreat_boss(request.player_key());
-        finish_composed(&mut service, outcome)
-    }
-
     pub fn start_pinnacle<E: EntropyPort>(
         &self,
         request: DigBossRuntimeRequest,

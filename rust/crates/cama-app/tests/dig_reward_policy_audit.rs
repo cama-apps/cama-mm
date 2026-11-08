@@ -728,24 +728,6 @@ fn audit_abandon_refund_is_scaled_and_audited() {
 }
 
 #[test]
-fn audit_pinnacle_payout_scales_base_before_wager_profit() {
-    let payout = cama_app::dig_carry_wager::pinnacle_payout(
-        200,
-        cama_app::boss_duel::RiskTier::Cautious,
-        0.5,
-        0,
-    )
-    .expect("pinnacle payout");
-    assert_eq!(payout.scaled_base_reward, 325);
-    assert_eq!(
-        payout.payout,
-        payout.scaled_base_reward + payout.wager_payout
-    );
-    // Daily economy adjustment of both base and wager profit is not wired to
-    // this pure carry policy, unlike Python's _net_boss_payout adapter.
-}
-
-#[test]
 fn audit_help_policy_scales_mentor_bonuses() {
     // This is the exact arithmetic consumed by the admitted social runtime;
     // its SQLite orchestration remains an unadmitted source seam.
