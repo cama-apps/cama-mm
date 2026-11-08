@@ -1638,6 +1638,12 @@ impl PetInteractionHandler {
         }
         let target_member = TargetMember {
             id: target.0,
+            display_name: self
+                .state
+                .player_names
+                .resolve_names(guild_id, &[target.0])
+                .await
+                .resolve_or(target.0, &target.1),
             is_bot: target.2,
         };
         let (handle, recorder) = self

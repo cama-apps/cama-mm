@@ -74,6 +74,7 @@ use crate::dig_service::{
     defeated_boundaries_from_json, effective_dig_cooldown, layer_at, next_undefeated_boss,
     paid_dig_cost, scale_dig_minigame_jc, scale_dig_yield_once,
 };
+use crate::dig_tunnel_naming::DigTunnelNamingService;
 use crate::dig_tunnels::{
     aggregate_prestige_perk_effects, ascension_effects, mutation_effects, mutations_from_json,
     roll_corruption, round_prestige_perk_bonus_half_up,
@@ -323,11 +324,15 @@ pub struct DigRuntimeCanonicalEventRequest<'a> {
 
 impl DigRuntimeSnapshot {
     #[must_use]
-    pub fn fresh(discord_id: i64, guild_id: i64, balance: i64, now: i64) -> Self {
+    pub fn fresh(discord_id: i64, guild_id: i64, balance: i64, _now: i64) -> Self {
         Self {
             registered: true,
             balance,
-            tunnel: Some(DigRuntimeTunnel::new(discord_id, guild_id, now)),
+            tunnel: Some(DigRuntimeTunnel::new(
+                discord_id,
+                guild_id,
+                DigTunnelNamingService::default().generate_tunnel_name(),
+            )),
             inventory: Vec::new(),
             artifacts: Vec::new(),
             gear: Vec::new(),
@@ -1613,7 +1618,7 @@ where
             current.tunnel = Some(DigRuntimeTunnel::new(
                 request.discord_id,
                 request.guild_id,
-                now,
+                DigTunnelNamingService::default().generate_tunnel_name(),
             ));
         }
         let tunnel = current

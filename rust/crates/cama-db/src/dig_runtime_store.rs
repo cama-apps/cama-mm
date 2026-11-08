@@ -114,7 +114,7 @@ pub struct DigRuntimeTunnel {
 
 impl DigRuntimeTunnel {
     #[must_use]
-    pub fn new(discord_id: i64, guild_id: i64, _now: i64) -> Self {
+    pub fn new(discord_id: i64, guild_id: i64, tunnel_name: impl Into<String>) -> Self {
         Self {
             discord_id,
             guild_id,
@@ -124,7 +124,7 @@ impl DigRuntimeTunnel {
             total_jc_earned: 0,
             last_dig_at: None,
             luminosity: 100,
-            tunnel_name: format!("Miner {discord_id}"),
+            tunnel_name: tunnel_name.into(),
             prestige_level: 0,
             prestige_perks: "[]".to_owned(),
             boss_progress: "{}".to_owned(),
@@ -286,7 +286,7 @@ pub fn clear_ledger_context(connection: &Connection) -> Result<(), rusqlite::Err
 // ---------------------------------------------------------------------------
 
 const TUNNEL_SELECT: &str = "SELECT depth,max_depth,total_digs,total_jc_earned,last_dig_at,
-        luminosity,COALESCE(tunnel_name,?3),prestige_level,
+        luminosity,COALESCE(tunnel_name,'Unnamed Tunnel'),prestige_level,
         COALESCE(prestige_perks,'[]'),COALESCE(boss_progress,'{}'),
         COALESCE(boss_attempts,'{}'),route_state,injury_state,
         hard_hat_charges,COALESCE(reinforced_until,0),void_bait_digs,
@@ -386,11 +386,9 @@ pub fn tunnel(
     guild_id: i64,
 ) -> Result<Option<DigRuntimeTunnel>, rusqlite::Error> {
     connection
-        .query_row(
-            TUNNEL_SELECT,
-            params![discord_id, guild_id, format!("Miner {discord_id}")],
-            |row| load_tunnel_row(row, discord_id, guild_id),
-        )
+        .query_row(TUNNEL_SELECT, params![discord_id, guild_id], |row| {
+            load_tunnel_row(row, discord_id, guild_id)
+        })
         .optional()
 }
 

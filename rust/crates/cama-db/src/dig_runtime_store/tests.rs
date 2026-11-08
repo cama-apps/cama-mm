@@ -39,7 +39,7 @@ fn tunnel_roundtrips_through_insert_and_full_select() {
     let connection = open(&database);
     assert_eq!(tunnel(&connection, USER, GUILD).expect("select"), None);
 
-    let mut row = DigRuntimeTunnel::new(USER, GUILD, 1_700_000_000);
+    let mut row = DigRuntimeTunnel::new(USER, GUILD, "The Test Burrow");
     row.depth = 12;
     row.max_depth = 20;
     row.total_digs = 3;
@@ -56,10 +56,32 @@ fn tunnel_roundtrips_through_insert_and_full_select() {
 }
 
 #[test]
+fn null_tunnel_name_loads_as_unnamed_tunnel_without_the_owner_id() {
+    let database = fixture();
+    let connection = open(&database);
+    insert_tunnel(
+        &connection,
+        &DigRuntimeTunnel::new(USER, GUILD, "The Test Burrow"),
+    )
+    .expect("insert");
+    connection
+        .execute(
+            "UPDATE tunnels SET tunnel_name=NULL WHERE discord_id=?1 AND guild_id=?2",
+            rusqlite::params![USER, GUILD],
+        )
+        .expect("clear name");
+    let loaded = tunnel(&connection, USER, GUILD)
+        .expect("select")
+        .expect("tunnel row");
+    assert_eq!(loaded.tunnel_name, "Unnamed Tunnel");
+    assert!(!loaded.tunnel_name.contains(&USER.to_string()));
+}
+
+#[test]
 fn update_tunnel_cas_requires_the_expected_version() {
     let database = fixture();
     let connection = open(&database);
-    let mut row = DigRuntimeTunnel::new(USER, GUILD, 0);
+    let mut row = DigRuntimeTunnel::new(USER, GUILD, "The Test Burrow");
     insert_tunnel(&connection, &row).expect("insert");
 
     row.depth = 5;
@@ -360,7 +382,7 @@ fn leaderboard_projections_keep_their_ordering() {
     let database = fixture();
     let connection = open(&database);
     for (offset, depth, prestige, best_run) in [(0, 10, 0, 5), (1, 30, 0, 0), (2, 20, 1, 9)] {
-        let mut row = DigRuntimeTunnel::new(USER + offset, GUILD, 0);
+        let mut row = DigRuntimeTunnel::new(USER + offset, GUILD, "The Test Burrow");
         row.depth = depth;
         row.prestige_level = prestige;
         row.best_run_score = best_run;

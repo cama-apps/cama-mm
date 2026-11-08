@@ -70,6 +70,7 @@ use crate::dig_carry_wager::{
 };
 use crate::dig_relic_rework::{SHIFTING_IDOL_PLAYER_HIT_CEILING, ShiftingIdolBonus};
 use crate::dig_service::{BOSS_REST_PENDING_KEY, DIG_STARTING_STAT_POINTS};
+use crate::dig_tunnel_naming::DigTunnelNamingService;
 use crate::economy_event_service::EconomyEventConfig;
 use crate::economy_event_sqlite::SqliteEconomyEventService;
 use crate::service_container::PersistentVanityTaxService;
@@ -2709,7 +2710,8 @@ impl DigBossRuntimeService {
                     expected: &snapshot,
                     proposed_target_cheer_data_json: &encoded,
                     cheerer_last_cheer_at: now,
-                    create_cheerer_tunnel_name: &format!("Miner {cheerer_id}"),
+                    create_cheerer_tunnel_name: &DigTunnelNamingService::default()
+                        .generate_tunnel_name(),
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
