@@ -9,11 +9,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use cama_db::package_deal_repository::calculate_package_deal_cost;
-use cama_domain::economy_scaling::{
-    DailyRewardPolicy, adjust_generated_jc_reward, scale_deflationary_minigame_jc_delta,
-    scale_minigame_jc_delta,
-};
-use cama_domain::mana::ManaEffects;
+use cama_domain::economy_scaling::{DailyRewardPolicy, adjust_generated_jc_reward};
 
 pub const SHOP_ANNOUNCE_COST: i64 = 10;
 pub const SHOP_ANNOUNCE_TARGET_COST: i64 = 100;
@@ -222,7 +218,6 @@ pub struct DoubleOrNothingSettlement {
 #[derive(Clone, Debug, Default)]
 struct AccountState {
     balance: i64,
-    last_paid_ping: HashMap<PaidPingKind, i64>,
     last_double_or_nothing: Option<i64>,
 }
 
@@ -299,79 +294,6 @@ impl InMemoryShopSettlement {
             .expect("shop settlement mutex poisoned")
             .spins
             .clone()
-    }
-
-    #[must_use]
-    pub fn last_paid_ping(
-        &self,
-        account_id: i64,
-        guild_id: i64,
-        kind: PaidPingKind,
-    ) -> Option<i64> {
-        self.state
-            .lock()
-            .expect("shop settlement mutex poisoned")
-            .accounts
-            .get(&(account_id, guild_id))
-            .and_then(|account| account.last_paid_ping.get(&kind).copied())
-    }
-
-    #[must_use]
-    pub fn try_purchase_paid_ping(
-        &self,
-        account_id: i64,
-        guild_id: i64,
-        kind: PaidPingKind,
-        cost: i64,
-        now: i64,
-        cooldown_seconds: i64,
-    ) -> PaidPingPurchase {
-        let mut state = self.state.lock().expect("shop settlement mutex poisoned");
-        let Some(account) = state.accounts.get_mut(&(account_id, guild_id)) else {
-            return PaidPingPurchase {
-                success: false,
-                reason: Some(PurchaseFailureReason::NotRegistered),
-                balance: 0,
-                cooldown_ends_at: None,
-            };
-        };
-        if let Some(last_used) = account.last_paid_ping.get(&kind).copied() {
-            let cooldown_ends_at = last_used.saturating_add(cooldown_seconds);
-            if now < cooldown_ends_at {
-                return PaidPingPurchase {
-                    success: false,
-                    reason: Some(PurchaseFailureReason::OnCooldown),
-                    balance: account.balance,
-                    cooldown_ends_at: Some(cooldown_ends_at),
-                };
-            }
-        }
-        if account.balance < cost {
-            return PaidPingPurchase {
-                success: false,
-                reason: Some(PurchaseFailureReason::InsufficientBalance),
-                balance: account.balance,
-                cooldown_ends_at: None,
-            };
-        }
-
-        account.balance -= cost;
-        account.last_paid_ping.insert(kind, now);
-        let balance = account.balance;
-        state.ledger.push(LedgerEntry {
-            account_id,
-            guild_id,
-            delta: -cost,
-            source: kind.command_name().to_owned(),
-            related_type: "command".to_owned(),
-            related_id: kind.command_name().to_owned(),
-        });
-        PaidPingPurchase {
-            success: true,
-            reason: None,
-            balance,
-            cooldown_ends_at: Some(now.saturating_add(cooldown_seconds)),
-        }
     }
 
     /// Settle the entire gamble under one lock.  `persist_spin=false` models a
@@ -613,45 +535,6 @@ pub fn item_autocomplete(
     }
     choices.truncate(25);
     choices
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShopRoute {
-    Announce,
-    AnnounceTarget(i64),
-    JopaCoin,
-    MysteryGift,
-    DoubleOrNothing,
-    SoftAvoid(i64),
-    PackageDeal(i64),
-    Recalibrate,
-    RecalibrateCooldown,
-}
-
-pub fn route_shop_buy(item: &str, target: Option<i64>) -> Result<ShopRoute, CommandResponse> {
-    match (item, target) {
-        ("announce", _) => Ok(ShopRoute::Announce),
-        ("announce_target", Some(target)) => Ok(ShopRoute::AnnounceTarget(target)),
-        ("announce_target", None) => Err(CommandResponse::initial_ephemeral(
-            "You selected 'Announce + Tag User' but didn't specify a target. Please provide a user to tag!",
-        )),
-        ("jopa_coin", _) => Ok(ShopRoute::JopaCoin),
-        ("mystery_gift", _) => Ok(ShopRoute::MysteryGift),
-        ("double_or_nothing", _) => Ok(ShopRoute::DoubleOrNothing),
-        ("soft_avoid", Some(target)) => Ok(ShopRoute::SoftAvoid(target)),
-        ("soft_avoid", None) => Err(CommandResponse::initial_ephemeral(
-            "You selected 'Soft Avoid' but didn't specify a target.",
-        )),
-        ("package_deal", Some(target)) => Ok(ShopRoute::PackageDeal(target)),
-        ("package_deal", None) => Err(CommandResponse::initial_ephemeral(
-            "You selected 'Package Deal' but didn't specify a target.",
-        )),
-        ("recalibrate", _) => Ok(ShopRoute::Recalibrate),
-        ("recalibrate_cooldown", _) => Ok(ShopRoute::RecalibrateCooldown),
-        _ => Err(CommandResponse::initial_ephemeral(
-            "That shop item is no longer available.",
-        )),
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1214,108 +1097,6 @@ pub struct ManaPurchaseResult {
     pub item_key: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ManaValidation {
-    pub response: Option<CommandResponse>,
-    pub request: Option<ManaPurchaseRequest>,
-    pub defer_public: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-#[must_use]
-pub fn validate_mana_purchase(
-    user_id: i64,
-    guild_id: i64,
-    registered: bool,
-    mana_system_available: bool,
-    tapped: bool,
-    effects: &ManaEffects,
-    item_key: &'static str,
-    target_id: Option<i64>,
-    observed_balance: i64,
-    atomic_result: Option<&ManaPurchaseResult>,
-) -> ManaValidation {
-    let reject = |message: String| ManaValidation {
-        response: Some(CommandResponse::initial_ephemeral(message)),
-        request: None,
-        defer_public: false,
-    };
-    if !registered {
-        return reject("You need to `/player register` first.".to_owned());
-    }
-    if !mana_system_available {
-        return reject("Mana system not available.".to_owned());
-    }
-    if tapped {
-        return reject("Your mana is spent — come back tomorrow.".to_owned());
-    }
-    let Some(color) = effects.color.as_deref() else {
-        return reject("You have no active mana today. Use `/mana` first.".to_owned());
-    };
-    let Some(spec) = mana_item(item_key) else {
-        return reject("Unknown item.".to_owned());
-    };
-    if color != spec.color {
-        return reject(format!(
-            "**{}** requires **{}** mana. Your current mana is **{color}**.",
-            spec.name, spec.color
-        ));
-    }
-    if spec.target_required && target_id.is_none() {
-        return reject(format!("**{}** requires a `target` player.", spec.name));
-    }
-    if !spec.self_target_allowed && target_id == Some(user_id) {
-        return reject(format!("**{}** must target another player.", spec.name));
-    }
-    if observed_balance < spec.cost {
-        return reject(format!(
-            "You need {} jopacoin for {}. You have {observed_balance}.",
-            spec.cost, spec.name
-        ));
-    }
-    let request = ManaPurchaseRequest {
-        account_id: user_id,
-        guild_id,
-        item_key: spec.key,
-        day_key: "today-pst",
-        cost: spec.cost,
-        tap_mana: spec.tier == ManaTier::Ultimate,
-    };
-    if let Some(result) = atomic_result
-        && !result.success
-    {
-        let message = match result.reason {
-            Some(ManaPurchaseFailure::AlreadyUsed) => {
-                format!("**{}** is once-per-day. Already used today.", spec.name)
-            }
-            Some(ManaPurchaseFailure::PurchaseInProgress) => format!(
-                "Your previous **{}** purchase is still starting. Try again shortly.",
-                spec.name
-            ),
-            Some(ManaPurchaseFailure::ManaTapped) => {
-                "Your mana was already tapped this turn. Try again tomorrow.".to_owned()
-            }
-            Some(ManaPurchaseFailure::NotRegistered) => {
-                "You need to `/player register` first.".to_owned()
-            }
-            _ => format!(
-                "You need {} jopacoin for {}. You have {}.",
-                spec.cost, spec.name, result.balance
-            ),
-        };
-        return ManaValidation {
-            response: Some(CommandResponse::initial_ephemeral(message)),
-            request: Some(request),
-            defer_public: false,
-        };
-    }
-    ManaValidation {
-        response: None,
-        request: Some(request),
-        defer_public: true,
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LossKind {
     Bet {
@@ -1396,13 +1177,6 @@ pub fn generated_recovery(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HostileCandidate {
-    pub account_id: i64,
-    pub name: String,
-    pub balance: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostileLossRequest {
     pub victim_id: i64,
     pub guild_id: i64,
@@ -1412,20 +1186,6 @@ pub struct HostileLossRequest {
     pub destination: &'static str,
     pub recipient_id: Option<i64>,
     pub clamp_to_balance: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProtectionOutcome {
-    pub attempted_loss: i64,
-    pub absorbed_amount: i64,
-    pub applied_loss: i64,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct HostileSummary {
-    pub applied_loss: i64,
-    pub absorbed_amount: i64,
-    pub reward: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1440,181 +1200,6 @@ pub fn hostile_purchase_disposition(requests: &[HostileLossRequest]) -> HostileP
         HostilePurchaseDisposition::RefundAndReleaseDailySlot
     } else {
         HostilePurchaseDisposition::Apply
-    }
-}
-
-fn eligible_hostile_targets(
-    buyer_id: i64,
-    candidates: &[HostileCandidate],
-) -> impl Iterator<Item = &HostileCandidate> {
-    candidates
-        .iter()
-        .filter(move |candidate| candidate.account_id != buyer_id)
-        .filter(|candidate| candidate.balance >= HOSTILE_LOSS_MIN_BALANCE)
-}
-
-#[must_use]
-pub fn pyroclasm_requests(
-    buyer_id: i64,
-    guild_id: i64,
-    candidates: &[HostileCandidate],
-    rolls: &[i64],
-    purchase_id: &str,
-) -> Vec<HostileLossRequest> {
-    eligible_hostile_targets(buyer_id, candidates)
-        .take(3)
-        .zip(rolls.iter().copied())
-        .filter_map(|(candidate, roll)| {
-            let amount =
-                scale_deflationary_minigame_jc_delta(roll as f64, 1.0).min(candidate.balance);
-            (amount > 0).then(|| HostileLossRequest {
-                victim_id: candidate.account_id,
-                guild_id,
-                amount,
-                kind: "pyroclasm",
-                event_key: format!("pyroclasm:{purchase_id}:{}", candidate.account_id),
-                destination: "burn",
-                recipient_id: None,
-                clamp_to_balance: true,
-            })
-        })
-        .collect()
-}
-
-#[must_use]
-pub fn settle_pyroclasm(outcomes: &[ProtectionOutcome]) -> HostileSummary {
-    let applied_loss = outcomes.iter().map(|outcome| outcome.applied_loss).sum();
-    let absorbed_amount = outcomes.iter().map(|outcome| outcome.absorbed_amount).sum();
-    HostileSummary {
-        applied_loss,
-        absorbed_amount,
-        reward: (applied_loss / 2).min(35),
-    }
-}
-
-#[must_use]
-pub fn soul_harvest_requests(
-    buyer_id: i64,
-    guild_id: i64,
-    candidates: &[HostileCandidate],
-    bonus_rolls: &[f64],
-    purchase_id: &str,
-) -> Vec<HostileLossRequest> {
-    let base = scale_minigame_jc_delta(2.0, 1.0);
-    eligible_hostile_targets(buyer_id, candidates)
-        .zip(bonus_rolls.iter().copied())
-        .map(|(candidate, bonus_roll)| {
-            let amount = (base + i64::from(bonus_roll < 0.20)).min(candidate.balance);
-            HostileLossRequest {
-                victim_id: candidate.account_id,
-                guild_id,
-                amount,
-                kind: "soul_harvest",
-                event_key: format!("soul_harvest:{purchase_id}:{}", candidate.account_id),
-                destination: "player",
-                recipient_id: Some(buyer_id),
-                clamp_to_balance: true,
-            }
-        })
-        .collect()
-}
-
-#[must_use]
-pub fn settle_soul_harvest(outcomes: &[ProtectionOutcome]) -> HostileSummary {
-    let applied_loss = outcomes.iter().map(|outcome| outcome.applied_loss).sum();
-    let absorbed_amount = outcomes.iter().map(|outcome| outcome.absorbed_amount).sum();
-    HostileSummary {
-        applied_loss,
-        absorbed_amount,
-        reward: applied_loss,
-    }
-}
-
-#[must_use]
-pub fn wildfire_requests(
-    buyer_id: i64,
-    guild_id: i64,
-    candidates: &[HostileCandidate],
-    rolls: &[i64],
-    purchase_id: &str,
-) -> Vec<HostileLossRequest> {
-    eligible_hostile_targets(buyer_id, candidates)
-        .zip(rolls.iter().copied())
-        .filter_map(|(candidate, roll)| {
-            let amount =
-                scale_deflationary_minigame_jc_delta(roll as f64, 1.0).min(candidate.balance);
-            (amount > 0).then(|| HostileLossRequest {
-                victim_id: candidate.account_id,
-                guild_id,
-                amount,
-                kind: "wildfire",
-                event_key: format!("wildfire:{purchase_id}:{}", candidate.account_id),
-                destination: "burn",
-                recipient_id: None,
-                clamp_to_balance: true,
-            })
-        })
-        .collect()
-}
-
-#[must_use]
-pub fn settle_wildfire(outcomes: &[ProtectionOutcome]) -> HostileSummary {
-    let applied_loss = outcomes.iter().map(|outcome| outcome.applied_loss).sum();
-    let absorbed_amount = outcomes.iter().map(|outcome| outcome.absorbed_amount).sum();
-    HostileSummary {
-        applied_loss,
-        absorbed_amount,
-        reward: (applied_loss as f64 * 0.45) as i64,
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReprieveEffect {
-    pub pool: i64,
-    pub recovered: i64,
-    pub lookback_seconds: i64,
-}
-
-#[must_use]
-pub const fn reprieve_effect(recovered: i64) -> ReprieveEffect {
-    ReprieveEffect {
-        pool: 25,
-        recovered,
-        lookback_seconds: 24 * 3_600,
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SanctuaryEffect {
-    pub cost: i64,
-    pub shared_pool: i64,
-    pub match_bonus: i64,
-}
-
-#[must_use]
-pub const fn sanctuary_effect() -> SanctuaryEffect {
-    SanctuaryEffect {
-        cost: 90,
-        shared_pool: 150,
-        match_bonus: 0,
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DarkBargainTerms {
-    pub cost: i64,
-    pub principal: i64,
-    pub amount_due: i64,
-    pub due_in_days: i64,
-}
-
-#[must_use]
-pub const fn dark_bargain_terms() -> DarkBargainTerms {
-    DarkBargainTerms {
-        cost: 150,
-        principal: 800,
-        amount_due: 700,
-        due_in_days: 7,
     }
 }
 

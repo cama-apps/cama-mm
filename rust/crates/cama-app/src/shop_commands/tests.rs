@@ -2,7 +2,6 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use cama_domain::economy_scaling::DailyRewardPolicy;
-use cama_domain::mana::ManaEffects;
 
 use super::*;
 
@@ -27,35 +26,6 @@ fn package_success(cost: i64, active: i64, added: i64) -> PackageDealSuccess {
         games_added: added,
         games_remaining: 10,
     }
-}
-
-fn mana_effects(color: &str) -> ManaEffects {
-    ManaEffects::for_color(Some(color), None)
-}
-
-fn mana_purchase_failure(
-    item_key: &str,
-    reason: ManaPurchaseFailure,
-    balance: i64,
-) -> ManaPurchaseResult {
-    ManaPurchaseResult {
-        success: false,
-        reason: Some(reason),
-        balance,
-        purchase_id: None,
-        item_key: item_key.to_owned(),
-    }
-}
-
-fn candidates(ids_and_balances: &[(i64, i64)]) -> Vec<HostileCandidate> {
-    ids_and_balances
-        .iter()
-        .map(|(account_id, balance)| HostileCandidate {
-            account_id: *account_id,
-            name: format!("Player {account_id}"),
-            balance: *balance,
-        })
-        .collect()
 }
 
 struct ContractPort;
@@ -164,13 +134,6 @@ fn test_protect_hero_is_not_a_shop_item() {
 #[test]
 fn test_shop_buy_has_no_protect_hero_parameter() {
     assert!(!SHOP_BUY_PARAMETER_NAMES.contains(&"hero"));
-}
-
-#[test]
-fn test_shop_rejects_retired_protect_hero_value() {
-    let response = route_shop_buy("protect_hero", None).unwrap_err();
-    assert_eq!(response.visibility, Visibility::Ephemeral);
-    assert_eq!(response.content, "That shop item is no longer available.");
 }
 
 #[test]
@@ -302,81 +265,6 @@ fn test_pingedkevin_cooldown_response_is_private() {
 }
 
 #[test]
-fn test_pingedash_purchase_debits_once_per_cooldown() {
-    let store = InMemoryShopSettlement::new();
-    store.register(1001, 9000, 30);
-    let now = 1_700_000_000;
-    let first = store.try_purchase_paid_ping(1001, 9000, PaidPingKind::Dash, 10, now, 86_400);
-    let blocked =
-        store.try_purchase_paid_ping(1001, 9000, PaidPingKind::Dash, 10, now + 86_399, 86_400);
-    let second =
-        store.try_purchase_paid_ping(1001, 9000, PaidPingKind::Dash, 10, now + 86_400, 86_400);
-    assert_eq!(first.balance, 20);
-    assert_eq!(blocked.reason, Some(PurchaseFailureReason::OnCooldown));
-    assert_eq!(second.balance, 10);
-    assert_eq!(store.balance(1001, 9000), Some(10));
-    assert_eq!(
-        store
-            .ledger()
-            .iter()
-            .filter(|entry| entry.source == "pingedash")
-            .count(),
-        2
-    );
-}
-
-#[test]
-fn test_pingedkevin_has_an_independent_cooldown_and_ledger_source() {
-    let store = InMemoryShopSettlement::new();
-    store.register(1001, 9000, 30);
-    let now = 1_700_000_000;
-    assert!(
-        store
-            .try_purchase_paid_ping(1001, 9000, PaidPingKind::Dash, 10, now, 86_400)
-            .success
-    );
-    let kevin = store.try_purchase_paid_ping(1001, 9000, PaidPingKind::Kevin, 10, now, 86_400);
-    let blocked =
-        store.try_purchase_paid_ping(1001, 9000, PaidPingKind::Kevin, 10, now + 1, 86_400);
-    assert_eq!(kevin.balance, 10);
-    assert_eq!(blocked.reason, Some(PurchaseFailureReason::OnCooldown));
-    assert_eq!(
-        store.last_paid_ping(1001, 9000, PaidPingKind::Dash),
-        Some(now)
-    );
-    assert_eq!(
-        store.last_paid_ping(1001, 9000, PaidPingKind::Kevin),
-        Some(now)
-    );
-    assert_eq!(
-        store
-            .ledger()
-            .iter()
-            .map(|entry| entry.source.as_str())
-            .collect::<Vec<_>>(),
-        vec!["pingedash", "pingedkevin"]
-    );
-}
-
-#[test]
-fn test_pingedash_insufficient_balance_does_not_claim_cooldown() {
-    let store = InMemoryShopSettlement::new();
-    store.register(1001, 9000, 9);
-    let rejected =
-        store.try_purchase_paid_ping(1001, 9000, PaidPingKind::Dash, 10, 1_700_000_000, 86_400);
-    assert_eq!(
-        rejected.reason,
-        Some(PurchaseFailureReason::InsufficientBalance)
-    );
-    assert_eq!(store.last_paid_ping(1001, 9000, PaidPingKind::Dash), None);
-    store.set_balance(1001, 9000, 10);
-    let purchased =
-        store.try_purchase_paid_ping(1001, 9000, PaidPingKind::Dash, 10, 1_700_000_000, 86_400);
-    assert!(purchased.success);
-    assert_eq!(purchased.balance, 0);
-}
-
-#[test]
 fn test_double_or_nothing_settlement_rolls_back_and_retries_once() {
     let store = InMemoryShopSettlement::new();
     store.register(1001, 9000, 200);
@@ -455,13 +343,6 @@ fn test_concurrent_double_or_nothing_settlements_store_one_outcome() {
             .collect::<Vec<_>>(),
         vec![Some(PurchaseFailureReason::OnCooldown)]
     );
-}
-
-#[test]
-fn test_shop_requires_target_for_announce_target() {
-    let response = route_shop_buy("announce_target", None).unwrap_err();
-    assert!(response.content.contains("didn't specify a target"));
-    assert_eq!(response.visibility, Visibility::Ephemeral);
 }
 
 #[test]
@@ -901,30 +782,6 @@ fn test_handle_mystery_gift_shortfall_tolerates_lapsed_interaction() {
 }
 
 #[test]
-fn test_shop_mystery_gift_routes_to_handler() {
-    assert_eq!(
-        route_shop_buy("mystery_gift", None),
-        Ok(ShopRoute::MysteryGift)
-    );
-    let outcome = simple_purchase(SimpleProduct::MysteryGift, 1001, false, 0, false, true);
-    assert!(outcome.response.content.contains("`/player register`"));
-}
-
-#[test]
-fn test_shop_jopa_coin_routes_to_handler() {
-    assert_eq!(route_shop_buy("jopa_coin", None), Ok(ShopRoute::JopaCoin));
-    let outcome = simple_purchase(SimpleProduct::JopaCoin, 1001, false, 0, false, true);
-    assert!(outcome.response.content.contains("`/player register`"));
-}
-
-#[test]
-fn test_shop_rejects_retired_witchs_curse_value() {
-    let response = route_shop_buy("witchs_curse", None).unwrap_err();
-    assert!(response.content.contains("no longer available"));
-    assert_eq!(response.visibility, Visibility::Ephemeral);
-}
-
-#[test]
 fn test_handle_recalibrate_success() {
     let outcome = recalibration_purchase(
         1001,
@@ -1211,49 +1068,6 @@ fn test_recent_loss_aggregate_combines_only_recent_losing_bets_and_wheel() {
     );
 }
 
-#[test]
-fn test_manashop_failure_notices_precede_the_public_defer() {
-    let validation = validate_mana_purchase(
-        1001,
-        9000,
-        true,
-        true,
-        false,
-        &mana_effects("Red"),
-        "regrowth",
-        None,
-        500,
-        None,
-    );
-    let response = validation.response.unwrap();
-    assert_eq!(response.phase, ResponsePhase::Initial);
-    assert_eq!(response.visibility, Visibility::Ephemeral);
-    assert!(response.content.contains("requires"));
-    assert!(!validation.defer_public);
-}
-
-#[test]
-fn test_manashop_atomic_shortfall_rejects_before_effects() {
-    let atomic = mana_purchase_failure("pyroclasm", ManaPurchaseFailure::InsufficientBalance, 10);
-    let validation = validate_mana_purchase(
-        1001,
-        9000,
-        true,
-        true,
-        false,
-        &mana_effects("Red"),
-        "pyroclasm",
-        None,
-        500,
-        Some(&atomic),
-    );
-    let request = validation.request.unwrap();
-    assert_eq!(request.cost, 25);
-    assert!(!request.tap_mana);
-    assert!(!validation.defer_public);
-    assert_eq!(validation.response.unwrap().phase, ResponsePhase::Initial);
-}
-
 struct RewardEvent {
     received: Option<(Option<i64>, i64)>,
     result: i64,
@@ -1288,185 +1102,6 @@ fn test_manashop_generated_recovery_scales_before_daily_event_regrowth() {
     assert_eq!(reward.base_reward, 120);
     assert_eq!(event.received, Some((Some(9000), 120)));
     assert_eq!(reward.adjusted_reward, 41);
-}
-
-#[test]
-fn test_manashop_reprieve_grants_pool_and_reconciles_rolling_losses() {
-    let effect = reprieve_effect(10);
-    assert_eq!(effect.pool, 25);
-    assert_eq!(effect.recovered, 10);
-    assert_eq!(effect.lookback_seconds, 24 * 3_600);
-    assert_eq!(100 - 15 + effect.recovered, 95);
-}
-
-#[test]
-fn test_manashop_pyroclasm_uses_applied_losses_for_bounty() {
-    let targets = candidates(&[(5000, 100), (5001, 100), (5002, 100)]);
-    let requests = pyroclasm_requests(4242, 9001, &targets, &[20, 20, 20], "purchase-1");
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.amount)
-            .collect::<Vec<_>>(),
-        vec![22, 22, 22]
-    );
-    let summary = settle_pyroclasm(&[
-        ProtectionOutcome {
-            attempted_loss: 22,
-            absorbed_amount: 18,
-            applied_loss: 0,
-        },
-        ProtectionOutcome {
-            attempted_loss: 22,
-            absorbed_amount: 9,
-            applied_loss: 9,
-        },
-        ProtectionOutcome {
-            attempted_loss: 22,
-            absorbed_amount: 0,
-            applied_loss: 18,
-        },
-    ]);
-    assert_eq!(summary.applied_loss, 27);
-    assert_eq!(summary.absorbed_amount, 27);
-    assert_eq!(summary.reward, 13);
-}
-
-#[test]
-fn test_manashop_pyroclasm_batches_real_protection_gateway() {
-    let targets = candidates(&[(5100, 100), (5101, 100), (5102, 100)]);
-    let requests = pyroclasm_requests(4242, 9001, &targets, &[20, 20, 20], "purchase-1");
-    assert_eq!(requests.len(), 3);
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.victim_id)
-            .collect::<Vec<_>>(),
-        vec![5100, 5101, 5102]
-    );
-    assert!(requests.iter().all(|request| request.kind == "pyroclasm"));
-    assert!(requests.iter().all(|request| request.destination == "burn"));
-    assert!(requests.iter().all(|request| request.clamp_to_balance));
-    let prefix = requests[0].event_key.rsplit_once(':').unwrap().0;
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.event_key.rsplit_once(':').unwrap().0 == prefix)
-    );
-}
-
-#[test]
-fn test_manashop_soul_harvest_gateway_moves_only_applied_loss() {
-    let targets = candidates(&[(5001, 100), (5002, 100)]);
-    let requests = soul_harvest_requests(4242, 9001, &targets, &[0.19, 0.20], "purchase-1");
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.amount)
-            .collect::<Vec<_>>(),
-        vec![3, 2]
-    );
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.destination == "player" && request.recipient_id == Some(4242))
-    );
-    let summary = settle_soul_harvest(&[
-        ProtectionOutcome {
-            attempted_loss: 3,
-            absorbed_amount: 2,
-            applied_loss: 1,
-        },
-        ProtectionOutcome {
-            attempted_loss: 2,
-            absorbed_amount: 1,
-            applied_loss: 1,
-        },
-    ]);
-    assert_eq!(summary.reward, 2);
-    assert_eq!(summary.absorbed_amount, 3);
-}
-
-#[test]
-fn test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot() {
-    let targets = candidates(&[
-        (5000, 100),
-        (5001, 100),
-        (5002, 100),
-        (6666, 49),
-        (7777, 0),
-        (8888, -10),
-    ]);
-    let requests = soul_harvest_requests(
-        4242,
-        9001,
-        &targets,
-        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        "purchase-1",
-    );
-    assert_eq!(requests.len(), 3);
-    assert!(requests.iter().all(|request| request.amount == 2));
-    let outcomes: Vec<_> = requests
-        .iter()
-        .map(|request| ProtectionOutcome {
-            attempted_loss: request.amount,
-            absorbed_amount: 0,
-            applied_loss: request.amount,
-        })
-        .collect();
-    assert_eq!(settle_soul_harvest(&outcomes).reward, 6);
-    assert_eq!(
-        hostile_purchase_disposition(&requests),
-        HostilePurchaseDisposition::Apply
-    );
-}
-
-#[test]
-fn test_manashop_soul_harvest_refunds_and_releases_daily_slot_without_targets() {
-    let targets = candidates(&[(7777, 0), (8888, 0), (9999, -100)]);
-    let requests = soul_harvest_requests(4242, 9001, &targets, &[1.0, 1.0, 1.0], "purchase-1");
-    assert!(requests.is_empty());
-    assert_eq!(
-        hostile_purchase_disposition(&requests),
-        HostilePurchaseDisposition::RefundAndReleaseDailySlot
-    );
-}
-
-#[test]
-fn test_manashop_wildfire_reward_uses_post_shield_loss() {
-    let targets = candidates(&[(5001, 100)]);
-    let requests = wildfire_requests(4242, 9001, &targets, &[10], "purchase-1");
-    assert_eq!(requests[0].amount, 11);
-    assert_eq!(requests[0].kind, "wildfire");
-    assert_eq!(requests[0].destination, "burn");
-    let summary = settle_wildfire(&[ProtectionOutcome {
-        attempted_loss: 11,
-        absorbed_amount: 5,
-        applied_loss: 4,
-    }]);
-    assert_eq!(summary.applied_loss, 4);
-    assert_eq!(summary.absorbed_amount, 5);
-    assert_eq!(summary.reward, 1);
-}
-
-#[test]
-fn test_manashop_sanctuary_costs_90_without_match_bonus() {
-    let effect = sanctuary_effect();
-    assert_eq!(effect.cost, 90);
-    assert_eq!(effect.shared_pool, 150);
-    assert_eq!(effect.match_bonus, 0);
-    let spec = mana_item("sanctuary").unwrap();
-    assert_eq!(spec.tier, ManaTier::Ultimate);
-    assert!(spec.target_required);
-}
-
-#[test]
-fn test_dark_bargain_due_amount_matches_loan_principal() {
-    let terms = dark_bargain_terms();
-    assert_eq!(terms.principal, 800);
-    assert_eq!(terms.amount_due, 700);
-    assert_eq!(terms.due_in_days, 7);
-    assert_eq!(terms.cost, 150);
 }
 
 #[test]
@@ -1522,29 +1157,4 @@ fn test_handle_announce_shortfall_tolerates_lapsed_interaction() {
     assert!(outcome.notice_transport_lapsed);
     assert!(!outcome.delivered);
     assert_eq!(outcome.response.phase, ResponsePhase::Initial);
-}
-
-#[test]
-fn stronger_invariant_paid_ping_failures_never_write_ledger_or_cooldown() {
-    let store = InMemoryShopSettlement::new();
-    store.register(7, 9, 0);
-    let result = store.try_purchase_paid_ping(7, 9, PaidPingKind::Kevin, 10, 123, 86_400);
-    assert!(!result.success);
-    assert!(store.ledger().is_empty());
-    assert_eq!(store.last_paid_ping(7, 9, PaidPingKind::Kevin), None);
-}
-
-#[test]
-fn stronger_invariant_retired_items_cannot_route_even_with_a_target() {
-    for item in ["protect_hero", "witchs_curse", "dig_dynamite"] {
-        assert!(route_shop_buy(item, Some(99)).is_err());
-    }
-}
-
-#[test]
-fn stronger_invariant_hostile_effects_never_target_buyer_or_low_balances() {
-    let targets = candidates(&[(42, 10_000), (43, 49), (44, 50)]);
-    let requests = wildfire_requests(42, 9000, &targets, &[10, 10, 10], "purchase-1");
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].victim_id, 44);
 }
