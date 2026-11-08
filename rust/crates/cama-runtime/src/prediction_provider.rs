@@ -48,7 +48,7 @@ use crate::discord_transport::{
 use crate::gamba_guild_source::GambaGuildSource;
 use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, string_option};
-use crate::prediction_workers::PredictionDiscordPort;
+use crate::prediction_workers::{PredictionDiscordPort, unresolved_prediction_text};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionAcknowledgementPolicy, InteractionActionRow, InteractionAttachment,
@@ -1194,22 +1194,22 @@ impl PredictionInteractionHandler {
                 let recent_trade_names = self
                     .render_trade_names(snapshot.market.guild_id, &snapshot.recent_trades)
                     .await;
-                let chart_title = self
-                    .command_discord
-                    .prediction_display_text(snapshot.market.guild_id, &snapshot.market.question)
-                    .await
-                    .unwrap_or_else(|_| snapshot.market.question.clone());
-                let chart = draw_prediction_market_chart(
+                let question = self.display_question(&snapshot.market).await;
+                let chart = render_market_chart(
                     prediction_id,
-                    Some(&chart_title),
-                    &history,
+                    question.clone(),
+                    history,
                     snapshot.market.created_at,
-                    now_seconds(),
                 )
-                .into_inner();
+                .await?;
                 let filename = format!("predict_{prediction_id}.png");
                 response = response
-                    .embed(self.open_market_embed(&snapshot, Some(&filename), &recent_trade_names))
+                    .embed(self.open_market_embed(
+                        &snapshot,
+                        &question,
+                        Some(&filename),
+                        &recent_trade_names,
+                    ))
                     .attachment(InteractionAttachment::bytes(filename, chart));
                 if persistent_buttons {
                     response = response.action_row(persistent_market_buttons());
@@ -1224,9 +1224,18 @@ impl PredictionInteractionHandler {
         })
     }
 
+    /// The market question with mentions rendered as readable names.
+    async fn display_question(&self, market: &Market) -> String {
+        self.command_discord
+            .prediction_display_text(market.guild_id, &market.question)
+            .await
+            .unwrap_or_else(|_| unresolved_prediction_text(&market.question))
+    }
+
     fn open_market_embed(
         &self,
         snapshot: &MarketSnapshot,
+        question: &str,
         chart_filename: Option<&str>,
         recent_trade_names: &BTreeMap<i64, String>,
     ) -> InteractionEmbed {
@@ -1235,7 +1244,7 @@ impl PredictionInteractionHandler {
             .current_price
             .map_or_else(|| "?".to_owned(), |value| format!("{value}%"));
         let mut embed = InteractionEmbed::titled(format!("📈 Market #{}", market.prediction_id))
-            .description(format!("\"{}\"", market.question))
+            .description(format!("\"{question}\""))
             .color(0x3498DB)
             .field(
                 "Current",
@@ -2160,11 +2169,7 @@ impl PredictionInteractionHandler {
         else {
             return Ok(());
         };
-        let display_question = self
-            .command_discord
-            .prediction_display_text(market.guild_id, &market.question)
-            .await
-            .unwrap_or_else(|_| market.question.clone());
+        let display_question = self.display_question(&market).await;
         let taxable = self.vanity_tax.taxable_ids(market.guild_id);
         let repository = self.predictions.clone();
         let resolutions = self.resolutions.clone();
@@ -2301,21 +2306,10 @@ impl PredictionInteractionHandler {
             .load_market_display(prediction_id, None)
             .await?
             .ok_or_else(|| "Prediction not found.".to_owned())?;
-        let title = self
-            .command_discord
-            .prediction_display_text(snapshot.market.guild_id, &snapshot.market.question)
-            .await
-            .unwrap_or(snapshot.market.question);
+        let title = self.display_question(&snapshot.market).await;
         Ok(InteractionAttachment::bytes(
             format!("predict_{prediction_id}.png"),
-            draw_prediction_market_chart(
-                prediction_id,
-                Some(&title),
-                &history,
-                snapshot.market.created_at,
-                now_seconds(),
-            )
-            .into_inner(),
+            render_market_chart(prediction_id, title, history, snapshot.market.created_at).await?,
         ))
     }
 
@@ -2528,6 +2522,27 @@ where
     .await
 }
 
+/// Rasterize a market chart PNG on the blocking pool; it is CPU work that
+/// must not run on the async worker handling a trade or command.
+async fn render_market_chart(
+    prediction_id: i64,
+    title: String,
+    history: Vec<(i64, i64)>,
+    created_at: i64,
+) -> Result<Vec<u8>, String> {
+    crate::ids::blocking("render prediction market chart", move || {
+        Ok(draw_prediction_market_chart(
+            prediction_id,
+            Some(&title),
+            &history,
+            created_at,
+            now_seconds(),
+        )
+        .into_inner())
+    })
+    .await
+}
+
 async fn respond_ephemeral(
     responder: &Arc<dyn InteractionResponder>,
     content: impl Into<String>,
@@ -2714,7 +2729,7 @@ pub(super) fn ladder_body(book: &Book) -> String {
     format!("```ansi\n{}\n```", lines.join("\n"))
 }
 
-fn recent_trade_text(trades: &[Trade], display_names: &BTreeMap<i64, String>) -> String {
+pub(crate) fn recent_trade_text(trades: &[Trade], display_names: &BTreeMap<i64, String>) -> String {
     if trades.is_empty() {
         return "_no trades yet_".to_owned();
     }
@@ -2724,7 +2739,7 @@ fn recent_trade_text(trades: &[Trade], display_names: &BTreeMap<i64, String>) ->
             let name = display_names
                 .get(&trade.discord_id)
                 .cloned()
-                .unwrap_or_else(|| trade.discord_id.to_string());
+                .unwrap_or_else(|| cama_domain::discord_content::UNKNOWN_PLAYER.to_owned());
             let verb = if trade.action.starts_with("buy") {
                 "bought"
             } else {

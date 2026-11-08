@@ -713,6 +713,50 @@ fn ready_context() -> ReadyRecoveryContext {
     ReadyRecoveryContext::new(Arc::<[u64]>::from([22]), Arc::new(EmptyMembers))
 }
 
+fn active_recovery_guilds(provider: &SurveyRegistrationProvider) -> Vec<i64> {
+    provider
+        .state
+        .recovery_scopes(None)
+        .into_iter()
+        .map(SurveyRecoveryScope::guild_id)
+        .collect()
+}
+
+#[tokio::test]
+async fn joined_guild_recovery_adds_to_session_guilds_and_keeps_their_retries() {
+    let (_directory, _path, provider, _discord, _registry) = fixture();
+    let observer = provider.gateway_observer();
+    let report = observer.ready_recovery(ready_context()).await;
+    assert!(report.failures.is_empty());
+    let retry_key = (11, 44);
+    provider.state.defer_response_edit(retry_key);
+    assert!(!provider.state.response_edit_is_due(retry_key));
+
+    let report = observer
+        .ready_recovery(ReadyRecoveryContext::joined(
+            Arc::<[u64]>::from([33]),
+            Arc::new(EmptyMembers),
+        ))
+        .await;
+
+    assert!(report.failures.is_empty());
+    assert_eq!(active_recovery_guilds(&provider), vec![22, 33]);
+    assert!(
+        !provider.state.response_edit_is_due(retry_key),
+        "a guild join must not reset another guild's response-edit backoff"
+    );
+
+    // A new session snapshot is still authoritative.
+    observer
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from([33]),
+            Arc::new(EmptyMembers),
+        ))
+        .await;
+    assert_eq!(active_recovery_guilds(&provider), vec![33]);
+    assert!(provider.state.response_edit_is_due(retry_key));
+}
+
 #[tokio::test]
 async fn ambiguous_history_receipt_is_recovered_without_resending() {
     let (directory, path, provider, discord, _registry) = fixture();

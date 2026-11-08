@@ -46,13 +46,20 @@ pub trait GuildMemberPageSource: Send + Sync {
     ) -> Result<Vec<GatewayMember>, String>;
 }
 
+/// The guilds a ready-recovery pass should recover.
+///
+/// READY and RESUMED carry every guild in the gateway session. A guild that
+/// joins an established session is recovered alone, so observers that keep a
+/// per-session guild registry must add it rather than replace the registry.
 #[derive(Clone)]
 pub struct ReadyRecoveryContext {
     guild_ids: Arc<[u64]>,
     member_source: Arc<dyn GuildMemberPageSource>,
+    session_snapshot: bool,
 }
 
 impl ReadyRecoveryContext {
+    /// Recovery for every guild in a new or resumed gateway session.
     #[must_use]
     pub fn new(
         guild_ids: impl Into<Arc<[u64]>>,
@@ -61,12 +68,33 @@ impl ReadyRecoveryContext {
         Self {
             guild_ids: guild_ids.into(),
             member_source,
+            session_snapshot: true,
+        }
+    }
+
+    /// Recovery for guilds that joined an established session; `guild_ids`
+    /// lists only the new guilds, not every guild the session serves.
+    #[must_use]
+    pub fn joined(
+        guild_ids: impl Into<Arc<[u64]>>,
+        member_source: Arc<dyn GuildMemberPageSource>,
+    ) -> Self {
+        Self {
+            session_snapshot: false,
+            ..Self::new(guild_ids, member_source)
         }
     }
 
     #[must_use]
     pub fn guild_ids(&self) -> &[u64] {
         &self.guild_ids
+    }
+
+    /// Whether [`Self::guild_ids`] is every guild in the session rather than
+    /// only newly joined ones.
+    #[must_use]
+    pub const fn is_session_snapshot(&self) -> bool {
+        self.session_snapshot
     }
 
     #[must_use]
@@ -80,6 +108,7 @@ impl fmt::Debug for ReadyRecoveryContext {
         formatter
             .debug_struct("ReadyRecoveryContext")
             .field("guild_ids", &self.guild_ids)
+            .field("session_snapshot", &self.session_snapshot)
             .finish_non_exhaustive()
     }
 }
