@@ -4576,7 +4576,8 @@ async fn guild_and_admin_gates_match_python_commands() {
         )
         .await
         .expect("admin sample");
-    let response = admin.responses.lock().expect("responses")[0].clone();
+    assert_eq!(*admin.defers.lock().expect("defers"), [false]);
+    let response = admin.original_edits.lock().expect("original edits")[0].clone();
     assert_eq!(response.content, "**[SAMPLE UI - Not a real draft]**");
     assert!(!response.embeds.is_empty());
     assert!(!response.components.is_empty());
@@ -4600,6 +4601,85 @@ async fn guild_and_admin_gates_match_python_commands() {
     );
 }
 
+/// Records whether the sample players were already stored when a command
+/// acknowledged its interaction.
+struct AckProbeResponder {
+    database: std::path::PathBuf,
+    stored_at_ack: StdMutex<Vec<bool>>,
+    edits: StdMutex<Vec<InteractionResponse>>,
+}
+
+#[async_trait]
+impl InteractionResponder for AckProbeResponder {
+    async fn respond(
+        &self,
+        _response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        Err(InteractionResponseError::new(
+            "sample commands must acknowledge before answering",
+        ))
+    }
+
+    async fn defer(&self, _ephemeral: bool) -> Result<(), InteractionResponseError> {
+        let stored = PlayerRepository::new(&self.database)
+            .get_by_id(-101, Some(42))
+            .expect("read sample player")
+            .is_some();
+        self.stored_at_ack.lock().expect("ack probe").push(stored);
+        Ok(())
+    }
+
+    async fn followup(
+        &self,
+        _response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        Ok(())
+    }
+
+    async fn edit_original(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        self.edits.lock().expect("edits").push(response);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn sample_commands_acknowledge_before_seeding_sample_players() {
+    for subcommand in ["sampleinprogress", "samplecomplete"] {
+        let (database, provider, _drafts, _discord) = provider_fixture();
+        let mut builder = RegistryBuilder::default();
+        provider.register(&mut builder).expect("register");
+        let handler = builder.build().command_handler("draft").expect("handler");
+        let responder = Arc::new(AckProbeResponder {
+            database: database.path().to_path_buf(),
+            stored_at_ack: StdMutex::new(Vec::new()),
+            edits: StdMutex::new(Vec::new()),
+        });
+        handler
+            .handle(
+                draft_request(9001, Some(42), Some(1 << 3), subcommand),
+                responder.clone(),
+            )
+            .await
+            .expect("sample command");
+
+        assert_eq!(
+            *responder.stored_at_ack.lock().expect("ack probe"),
+            [false],
+            "{subcommand} must acknowledge before writing sample players"
+        );
+        assert!(
+            PlayerRepository::new(database.path())
+                .get_by_id(-101, Some(42))
+                .expect("read sample player")
+                .is_some()
+        );
+        assert_eq!(responder.edits.lock().expect("edits").len(), 1);
+    }
+}
+
 #[tokio::test]
 async fn sample_complete_is_admin_only_and_has_no_real_manager_state() {
     let (_database, provider, drafts, _discord) = provider_fixture();
@@ -4614,12 +4694,9 @@ async fn sample_complete_is_admin_only_and_has_no_real_manager_state() {
         )
         .await
         .expect("sample complete");
-    assert!(
-        responder.responses.lock().expect("responses")[0]
-            .content
-            .contains("SAMPLE UI")
-    );
-    let sample = responder.responses.lock().expect("responses")[0].clone();
+    assert_eq!(*responder.defers.lock().expect("defers"), [false]);
+    let sample = responder.original_edits.lock().expect("original edits")[0].clone();
+    assert!(sample.content.contains("SAMPLE UI"));
     let fields = &sample.embeds[0].fields;
     assert!(fields.iter().any(|field| field.name == "🎲 Blind Bets"));
     assert!(
