@@ -18,15 +18,6 @@ use std::time::{Duration, Instant};
 pub const SQL_TOOL_NAME: &str = "execute_sql_query";
 pub const FLAVOR_TOOL_NAME: &str = "generate_flavor_text";
 
-/// Match the noisy LiteLLM/Pydantic serializer warning suppressed by Python.
-#[must_use]
-pub fn is_suppressed_provider_warning(message: &str) -> bool {
-    message.starts_with("Pydantic serializer warnings:")
-        && message.contains("PydanticSerializationUnexpectedValue")
-        && message.contains("Expected 10 fields but got 5")
-        && message.contains("Expected `Message`")
-}
-
 /// Secret provider material.  Debug and Display intentionally reveal nothing.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProviderCredential(String);
@@ -602,11 +593,6 @@ impl AIService {
     pub fn with_attempt_recorder(mut self, recorder: Arc<dyn AttemptRecorder>) -> Self {
         self.recorder = Some(recorder);
         self
-    }
-
-    #[must_use]
-    pub fn provider_count(&self) -> usize {
-        self.candidates.len()
     }
 
     fn options_for(config: &ProviderConfig, tool_call: bool) -> ProviderOptions {

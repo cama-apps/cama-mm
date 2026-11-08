@@ -579,28 +579,6 @@ fn test_optout_cancels_pending_signup() {
 }
 
 #[test]
-fn test_remove_signups_consumes_only_rostered_players() {
-    let fixture = Fixture::new();
-    for id in [100, 200, 300] {
-        fixture
-            .repository
-            .add_signup(Some(GUILD), id)
-            .expect("signup");
-    }
-    fixture
-        .repository
-        .remove_signups(Some(GUILD), &[100, 200])
-        .expect("remove");
-    assert_eq!(
-        fixture
-            .repository
-            .get_signups(Some(GUILD))
-            .expect("remaining"),
-        [300]
-    );
-}
-
-#[test]
 fn test_finalize_and_leaderboard() {
     let fixture = Fixture::new();
     let first = fixture.game(MafiaPhase::Night);

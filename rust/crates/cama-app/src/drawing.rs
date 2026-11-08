@@ -1084,14 +1084,6 @@ pub fn draw_hero_performance_chart(
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct AttributeValues {
-    pub strength: f64,
-    pub agility: f64,
-    pub intelligence: f64,
-    pub universal: f64,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RatingHistoryEntry {
     pub rating: Option<f64>,
     pub openskill_mu: Option<f64>,

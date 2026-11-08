@@ -21,7 +21,6 @@ use thiserror::Error;
 
 use crate::trivia_questions::TriviaCatalog;
 
-pub const PRODUCTION_TRIVIA_CACHE_PATH: &str = ".cache/trivia";
 pub const STEAM_IMAGE_CACHE_ROOT_ENV: &str = "STEAM_IMAGE_CACHE_ROOT";
 pub const DEFAULT_STEAM_IMAGE_CACHE_ROOT: &str = ".cache";
 

@@ -953,12 +953,6 @@ impl OpenDotaHttpClient {
         self.get_json(&format!("/players/{steam_id}"), &[]).await
     }
 
-    /// Fetch the raw hero history used by role calculations.
-    pub async fn get_player_roles(&self, steam_id: i64) -> Option<Value> {
-        self.get_json(&format!("/players/{steam_id}/heroes"), &[])
-            .await
-    }
-
     /// Fetch a bounded recent-match list. The `limit` query parameter is
     /// always present. Discovery only needs identity and time, so project
     /// those two fields instead of downloading full historical stat rows.
