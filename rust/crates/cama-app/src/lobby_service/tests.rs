@@ -1408,6 +1408,80 @@ fn test_durable_writes_never_hold_the_reader_lock() {
 }
 
 #[test]
+fn test_a_join_survives_a_concurrent_removal_that_cloned_before_it() {
+    let persistence = Arc::new(HookPersistence::default());
+    let service = Arc::new(
+        service(FakePlayers::default(), 12)
+            .with_persistence(persistence.clone())
+            .expect("hydrate hook persistence"),
+    );
+    assert_joined(&service.join_lobby(UserId(10), scope(LobbyKind::Open)));
+    assert_joined(&service.join_lobby(UserId(11), scope(LobbyKind::Open)));
+
+    // The removal cloned {10, 11} under the writer lock and is now inside its
+    // save. A join seats player 12 provisionally, then waits for the writer
+    // lock while the removal publishes its stale clone.
+    let join = Arc::new(Mutex::new(None));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let weak_service = Arc::downgrade(&service);
+    persistence.set_hook({
+        let join = Arc::clone(&join);
+        move || {
+            if !armed.swap(false, Ordering::SeqCst) {
+                return;
+            }
+            let service = weak_service.upgrade().expect("service remains alive");
+            let joiner = Arc::clone(&service);
+            *join.lock().unwrap_or_else(|error| error.into_inner()) =
+                Some(std::thread::spawn(move || {
+                    joiner.join_lobby(UserId(12), scope(LobbyKind::Open))
+                }));
+            for _ in 0..1_000 {
+                if service
+                    .get_lobby(scope(LobbyKind::Open))
+                    .is_some_and(|lobby| lobby.players.contains(&UserId(12)))
+                {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            panic!("the join never seated its provisional member");
+        }
+    });
+
+    assert_eq!(
+        service
+            .try_remove_players_from_lobby(&users(&[11]), scope(LobbyKind::Open))
+            .expect("remove players"),
+        users(&[11])
+    );
+    let outcome = join
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+        .expect("join thread started")
+        .join()
+        .expect("join thread");
+    assert_joined(&outcome);
+
+    assert_eq!(
+        service
+            .get_lobby(scope(LobbyKind::Open))
+            .expect("lobby remains")
+            .players,
+        users(&[10, 12])
+    );
+    let saved = persistence
+        .inner
+        .rows()
+        .into_iter()
+        .find(|row| row.lobby_id == scope(LobbyKind::Open).lobby_id())
+        .expect("saved lobby row");
+    assert_eq!(saved.players, vec![10, 12]);
+    assert!(saved.player_join_times.contains_key(&12));
+}
+
+#[test]
 fn test_a_concurrent_readycheck_survives_a_durable_write() {
     let persistence = Arc::new(HookPersistence::default());
     let service = Arc::new(

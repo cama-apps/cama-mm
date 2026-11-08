@@ -727,18 +727,44 @@ where
                 return JoinOutcome::suspended(suspension);
             }
         }
-        // The provisional add already mutated the live record; this clone only
-        // feeds the durable write, so there is nothing to publish afterwards.
-        let Some(candidate) = ({
+        // Another writer may have published a record it cloned before the
+        // provisional add, erasing this seat. Re-seat the joiner in the clone
+        // under the writer lock so the durable row and the published record
+        // both keep the join that is about to be reported.
+        let (reserved_elsewhere, live) = {
             let state = self.lock_state();
-            state.lobbies.get(&scope).cloned()
-        }) else {
+            (
+                state
+                    .in_flight
+                    .get(&(scope.guild_id, player_id))
+                    .is_some_and(|reserved_kind| *reserved_kind != scope.kind),
+                state.lobbies.get(&scope).cloned(),
+            )
+        };
+        if reserved_elsewhere {
+            self.rollback_provisional_join(scope, player_id, created_shell);
+            return JoinOutcome::failed(JoinFailure::InFlight);
+        }
+        let Some(mut candidate) = live else {
             return JoinOutcome::failed(JoinFailure::Persistence);
         };
+        if !candidate.players.contains(&player_id) {
+            if candidate.players.len() >= self.max_players {
+                self.rollback_provisional_join(scope, player_id, created_shell);
+                return JoinOutcome::failed(JoinFailure::LobbyFull);
+            }
+            candidate.players.insert(player_id);
+            #[allow(clippy::cast_precision_loss)]
+            candidate
+                .player_join_times
+                .insert(player_id, joined_at_ns as f64 / 1_000_000_000.0);
+        }
         if self.persist_record(&candidate).is_err() {
             self.rollback_provisional_join(scope, player_id, created_shell);
             return JoinOutcome::failed(JoinFailure::Persistence);
         }
+        let mut state = self.lock_state();
+        self.publish_record(&mut state, candidate);
         JoinOutcome::joined(joined_at_ns)
     }
 
