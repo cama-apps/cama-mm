@@ -4114,6 +4114,65 @@ fn catastrophic_cave_in_keeps_the_route_loss_cap_above_the_milestone() {
     );
 }
 
+/// Python's `_effective_cave_in_loss_cap` keeps the tightest active cap; a
+/// looser weather cap never overrides a stricter route cap.
+#[test]
+fn cave_in_loss_caps_combine_to_the_tightest_one() {
+    assert_eq!(
+        super::effective_cave_in_loss_cap(&[Some(9), Some(6)]),
+        Some(6)
+    );
+    assert_eq!(
+        super::effective_cave_in_loss_cap(&[Some(3), Some(7)]),
+        Some(3)
+    );
+    assert_eq!(super::effective_cave_in_loss_cap(&[None, Some(7)]), Some(7));
+    assert_eq!(super::effective_cave_in_loss_cap(&[None, None]), None);
+}
+
+/// Python passed the reinforcement cap into the catastrophic rollback, so a
+/// reinforced tunnel loses at most 8 blocks instead of falling to the
+/// milestone.
+#[test]
+fn reinforcement_bounds_a_live_catastrophic_rollback() {
+    let actor = 62_391;
+    let guild = 62_392;
+    let seed_now = 1_900_096_000;
+    let roll = find_live_cave_roll(actor, guild, seed_now, 240, Some(true), None, false);
+    let database = fast_migrated_database();
+    seed_live_cave_in_fixture(
+        &database, actor, guild, seed_now, roll.now, 240, 100, None, None,
+    );
+    Connection::open(database.path())
+        .expect("reinforced cave connection")
+        .execute(
+            "UPDATE tunnels SET reinforced_until=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![roll.now + 3_600, actor, guild],
+        )
+        .expect("seed reinforcement");
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: roll.now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("reinforced catastrophic Dig");
+    let detail = serde_json::from_str::<Value>(
+        outcome
+            .cave_in_detail
+            .as_deref()
+            .expect("reinforced cave detail"),
+    )
+    .expect("reinforced cave detail JSON");
+    assert!(outcome.success && outcome.cave_in);
+    assert_eq!(detail["type"], "catastrophic");
+    assert_eq!(detail["depth_after"], 232);
+    assert_eq!(outcome.depth_after, 232);
+}
+
 /// Run one non-cave Dig at depth 180 under neutral weather, optionally on a
 /// selected route.
 fn live_route_plain_dig(route_id: Option<&str>, now: i64) -> super::DigRuntimeOutcome {

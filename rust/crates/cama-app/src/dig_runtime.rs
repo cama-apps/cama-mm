@@ -727,8 +727,9 @@ pub use delivery::{
 use effects::{
     CaveInLootRng, DigPrestige4Entropy, LootRelicEntropy, active_buff_effects,
     active_curse_effects, active_curse_summary, active_pickaxe_tier, apply_mana_base_yield,
-    bonus_basis_points, event_chance_factor, gear_effects, luminosity_jc_multiplier,
-    multiplier_millionths, proportional_mana_yield_tax, weather_code, weather_effects,
+    bonus_basis_points, effective_cave_in_loss_cap, event_chance_factor, gear_effects,
+    luminosity_jc_multiplier, multiplier_millionths, proportional_mana_yield_tax, weather_code,
+    weather_effects,
 };
 pub use effects::{DigWeatherEffects, apply_cave_in_gear_ticks, catastrophic_cave_in_depth};
 pub use store::SqliteDigRuntimeStore;
@@ -2254,11 +2255,12 @@ where
             } else {
                 weather_fx.cave_in_loss_bonus + route_number("cave_in_loss_bonus") as i64
             },
-            cave_in_loss_cap: weather_fx.cave_in_loss_cap.or_else(|| {
+            cave_in_loss_cap: effective_cave_in_loss_cap(&[
+                weather_fx.cave_in_loss_cap,
                 active_route
                     .and_then(|route| route_effect(route, "cave_in_loss_cap"))
-                    .map(|value| value as i64)
-            }),
+                    .map(|value| value as i64),
+            ]),
             cave_in_policy: Some(cave_in_policy),
             defer_event_selection: true,
         };
@@ -2572,10 +2574,14 @@ where
             } else if catastrophic {
                 catastrophic_cave_in = true;
                 let insured = tunnel.insured_until.is_some_and(|expires| expires > now);
+                // Reinforcement also bounds the catastrophic rollback.
                 let (depth_after, insurance_saved, total_loss) = catastrophic_cave_in_depth(
                     depth_before,
                     cave_loss,
-                    loot_modifiers.cave_in_loss_cap,
+                    effective_cave_in_loss_cap(&[
+                        loot_modifiers.cave_in_loss_cap,
+                        (tunnel.reinforced_until > now).then_some(8),
+                    ]),
                     insured,
                 );
                 catastrophic_depth_after = Some(depth_after);
