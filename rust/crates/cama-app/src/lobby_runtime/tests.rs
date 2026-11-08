@@ -811,16 +811,21 @@ async fn test_abort_resets_lobby_message_id() {
     for player_id in 1..=10 {
         seat(&runtime, player_id, &[LobbyKind::Open]);
     }
-    assert!(runtime.service().set_lobby_message_ids(
-        open,
-        LobbyMessageIds {
-            channel_id: Some(ChannelId(456)),
-            message_id: Some(MessageId(12_345)),
-            ..LobbyMessageIds::default()
-        }
-    ));
+    assert!(
+        runtime.service().try_set_lobby_message_ids(
+            open,
+            LobbyMessageIds {
+                channel_id: Some(ChannelId(456)),
+                message_id: Some(MessageId(12_345)),
+                ..LobbyMessageIds::default()
+            }
+        ) == Ok(true)
+    );
     assert_eq!(
-        runtime.service().get_lobby_message_id(open),
+        runtime
+            .service()
+            .get_lobby(open)
+            .and_then(|lobby| lobby.message_ids.message_id),
         Some(MessageId(12_345))
     );
 
@@ -833,7 +838,13 @@ async fn test_abort_resets_lobby_message_id() {
     )
     .await;
     assert!(matches!(outcome, ResetLobbyOutcome::Reset { .. }));
-    assert_eq!(runtime.service().get_lobby_message_id(open), None);
+    assert_eq!(
+        runtime
+            .service()
+            .get_lobby(open)
+            .and_then(|lobby| lobby.message_ids.message_id),
+        None
+    );
     assert!(runtime.service().get_lobby(open).is_none());
 
     let fresh = runtime
@@ -841,16 +852,21 @@ async fn test_abort_resets_lobby_message_id() {
         .get_or_create_lobby(Some(UserId(99)), open)
         .expect("create fresh lobby after abort/reset");
     assert!(fresh.players.is_empty());
-    assert!(runtime.service().set_lobby_message_ids(
-        open,
-        LobbyMessageIds {
-            channel_id: Some(ChannelId(456)),
-            message_id: Some(MessageId(99_999)),
-            ..LobbyMessageIds::default()
-        }
-    ));
+    assert!(
+        runtime.service().try_set_lobby_message_ids(
+            open,
+            LobbyMessageIds {
+                channel_id: Some(ChannelId(456)),
+                message_id: Some(MessageId(99_999)),
+                ..LobbyMessageIds::default()
+            }
+        ) == Ok(true)
+    );
     assert_eq!(
-        runtime.service().get_lobby_message_id(open),
+        runtime
+            .service()
+            .get_lobby(open)
+            .and_then(|lobby| lobby.message_ids.message_id),
         Some(MessageId(99_999))
     );
 }
@@ -959,15 +975,17 @@ async fn reset_cleanup_failures_are_reported_but_do_not_resurrect_the_lobby() {
     let runtime = runtime();
     open_lobby(&runtime, LobbyKind::Open, 7);
     seat(&runtime, 7, &[LobbyKind::Open]);
-    assert!(runtime.service().set_lobby_message_ids(
-        scope(LobbyKind::Open),
-        LobbyMessageIds {
-            message_id: Some(MessageId(10)),
-            channel_id: Some(ChannelId(20)),
-            thread_id: Some(ChannelId(30)),
-            ..LobbyMessageIds::default()
-        }
-    ));
+    assert!(
+        runtime.service().try_set_lobby_message_ids(
+            scope(LobbyKind::Open),
+            LobbyMessageIds {
+                message_id: Some(MessageId(10)),
+                channel_id: Some(ChannelId(20)),
+                thread_id: Some(ChannelId(30)),
+                ..LobbyMessageIds::default()
+            }
+        ) == Ok(true)
+    );
     let transport = RecordingTransport::default();
     transport.state().fail_cleanup = true;
 

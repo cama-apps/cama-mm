@@ -2423,7 +2423,7 @@ async fn recreated_provider_reconciles_finalization_publication_once() {
         .expect("recreated provider");
 
     let first = recreated
-        .recover_finalizing()
+        .recover_finalizing_scoped(None)
         .await
         .expect("recover finalization");
     assert_eq!(first, 1);
@@ -2442,7 +2442,7 @@ async fn recreated_provider_reconciles_finalization_publication_once() {
     // additional Discord publication.
     assert_eq!(
         recreated
-            .recover_finalizing()
+            .recover_finalizing_scoped(None)
             .await
             .expect("repeat recovery"),
         0
@@ -2490,7 +2490,7 @@ async fn required_live_delivery_failure_retains_job_and_envelope() {
         .expect("run financial setup");
     discord.fail_delivery_sends.store(true, Ordering::Release);
     let error = provider
-        .recover_finalizing()
+        .recover_finalizing_scoped(None)
         .await
         .expect_err("required delivery failure must remain retryable");
     assert!(error.contains("ambiguous Discord delivery failure"));
@@ -2551,7 +2551,7 @@ async fn a_deleted_announcement_channel_is_skipped_instead_of_wedging_the_guild(
 
     assert_eq!(
         provider
-            .recover_finalizing()
+            .recover_finalizing_scoped(None)
             .await
             .expect("an undeliverable destination must not fail recovery"),
         1
@@ -2614,7 +2614,7 @@ async fn history_cap_failure_does_not_resend_or_terminalize() {
         .expect("run financial setup");
     discord.fail_delivery_history.store(true, Ordering::Release);
     let sent_before = discord.sent.lock().expect("sent").len();
-    assert!(provider.recover_finalizing().await.is_err());
+    assert!(provider.recover_finalizing_scoped(None).await.is_err());
     assert_eq!(discord.sent.lock().expect("sent").len(), sent_before);
     assert_eq!(
         persistence
@@ -2658,7 +2658,7 @@ async fn ambiguous_accepted_send_is_reconciled_from_history_without_duplicate() 
         .store(true, Ordering::Release);
     let sent_before = discord.sent.lock().expect("sent").len();
     provider
-        .recover_finalizing()
+        .recover_finalizing_scoped(None)
         .await
         .expect("history must reconcile accepted send");
     let sent = discord.sent.lock().expect("sent");
@@ -2742,14 +2742,14 @@ async fn recreated_ready_with_reminder_marker_rebuilds_timers_without_notify() {
         )
         .expect("recreated provider");
     recreated
-        .recover_finalizing()
+        .recover_finalizing_scoped(None)
         .await
         .expect("recover marked reminder job");
     assert_eq!(scheduler.normal_calls.load(Ordering::Acquire), 0);
     assert_eq!(scheduler.recovery_calls.load(Ordering::Acquire), 1);
     assert_eq!(
         recreated
-            .recover_finalizing()
+            .recover_finalizing_scoped(None)
             .await
             .expect("repeat recovery"),
         0
@@ -2832,7 +2832,7 @@ async fn corrupt_first_guild_does_not_starve_later_finalization_recovery() {
         .expect("corrupt first immutable plan");
 
     let error = provider
-        .recover_finalizing()
+        .recover_finalizing_scoped(None)
         .await
         .expect_err("aggregate recovery reports the corrupt first guild");
     assert!(error.contains("guild 42"));
@@ -2920,7 +2920,7 @@ async fn finalization_retries_uncertain_send_by_delivery_key_after_progress_cras
         .iter()
         .filter(|(channel_id, _)| *channel_id == 700)
         .count();
-    assert!(recreated.recover_finalizing().await.is_err());
+    assert!(recreated.recover_finalizing_scoped(None).await.is_err());
     let lobby_sends_after_crash = discord
         .sent
         .lock()
@@ -2939,7 +2939,7 @@ async fn finalization_retries_uncertain_send_by_delivery_key_after_progress_cras
         .expect("remove progress crash trigger");
 
     recreated
-        .recover_finalizing()
+        .recover_finalizing_scoped(None)
         .await
         .expect("retry finalization after crash");
     let lobby_sends_after_retry = discord
@@ -3044,30 +3044,6 @@ async fn pre_job_finalizing_row_is_left_for_explicit_manual_recovery() {
     );
 }
 
-#[tokio::test]
-async fn sqlite_persistence_constructor_rejects_split_pending_database() {
-    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
-    let separate_persistence = migrated_database();
-    let config = ApplicationConfig::from_lookup(|name| match name {
-        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
-        _ => None,
-    })
-    .expect("draft config");
-
-    assert!(matches!(
-        DraftRegistrationProvider::new_with_persistence(
-            database.path(),
-            &config,
-            lobbies,
-            drafts,
-            discord,
-            separate_persistence.path(),
-        ),
-        Err(DraftProviderBuildError::Database(message))
-            if message.contains("must share one SQLite database")
-    ));
-}
-
 #[tokio::test(start_paused = true)]
 async fn final_pick_defer_failure_reopens_fenced_row_for_recovery() {
     let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
@@ -3135,7 +3111,7 @@ async fn final_pick_defer_failure_reopens_fenced_row_for_recovery() {
     assert_final_pick_reopened(&provider, &drafts, &persistence);
     assert_eq!(
         provider
-            .recover_finalizing()
+            .recover_finalizing_scoped(None)
             .await
             .expect("nothing left for READY recovery"),
         0

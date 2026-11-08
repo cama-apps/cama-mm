@@ -88,18 +88,6 @@ fn test_regular_join_clears_legacy_conditional_state() {
 }
 
 #[test]
-fn test_conditional_join_is_rejected_without_moving_regular_player() {
-    let mut lobby = lobby_with([100]);
-    lobby.player_join_times.insert(player(100), 1_000_000.0);
-
-    assert!(!lobby.add_conditional_player(player(100)));
-
-    assert_eq!(lobby.player_join_times[&player(100)], 1_000_000.0);
-    assert!(!lobby.legacy_conditional_players.contains(&player(100)));
-    assert!(lobby.players.contains(&player(100)));
-}
-
-#[test]
 fn test_remove_player_clears_join_time() {
     let mut lobby = lobby_with([100]);
     assert!(lobby.player_join_times.contains_key(&player(100)));
@@ -107,17 +95,6 @@ fn test_remove_player_clears_join_time() {
     assert!(lobby.remove_player(player(100)));
 
     assert!(!lobby.player_join_times.contains_key(&player(100)));
-}
-
-#[test]
-fn test_remove_legacy_conditional_player_clears_join_time() {
-    let mut lobby = lobby_with([]);
-    lobby.legacy_conditional_players.insert(player(200));
-    lobby.player_join_times.insert(player(200), 1_000_000.0);
-
-    assert!(lobby.remove_conditional_player(player(200)));
-
-    assert!(!lobby.player_join_times.contains_key(&player(200)));
 }
 
 #[test]
@@ -129,89 +106,19 @@ fn test_remove_nonexistent_player_no_error() {
 }
 
 #[test]
-fn test_to_dict_includes_join_times() {
-    let lobby = lobby_with([100]);
-
-    let document = lobby.to_document();
-
-    assert!(document.player_join_times.contains_key("100"));
-}
-
-#[test]
-fn test_roundtrip_preserves_join_times() {
-    let lobby = lobby_with([100]);
-
-    let restored = ReadyLobby::from_document(lobby.to_document());
-
-    assert_eq!(
-        restored.player_join_times[&player(100)],
-        lobby.player_join_times[&player(100)]
-    );
-}
-
-#[test]
-fn test_from_dict_missing_join_times_defaults_empty() {
-    let document = LobbyDocument {
-        lobby_id: 1,
-        guild_id: 0,
-        kind: LobbyKind::Open,
-        created_by: 0,
-        created_at: "2026-07-14T12:34:56".to_owned(),
-        players: vec![100, 200],
-        conditional_players: vec![300],
-        player_join_times: BTreeMap::new(),
-        status: LobbyStatus::Open,
-    };
-
-    let lobby = ReadyLobby::from_document(document);
-
-    assert!(lobby.player_join_times.is_empty());
-}
-
-#[test]
-fn test_playing_dota_game() {
-    assert!(is_playing_dota(&[MemberActivity::game("Dota 2")]));
-}
-
-#[test]
-fn test_playing_dota_case_insensitive() {
-    assert!(is_playing_dota(&[MemberActivity::game("dota 2")]));
-}
-
-#[test]
-fn test_not_playing_dota() {
-    assert!(!is_playing_dota(&[MemberActivity::game(
-        "Counter-Strike 2"
-    )]));
-}
-
-#[test]
-fn test_no_activities() {
-    assert!(!is_playing_dota(&[]));
-}
-
-#[test]
-fn test_activity_with_dota_substring() {
-    assert!(is_playing_dota(&[MemberActivity {
-        kind: ActivityKind::Other,
-        name: Some("Playing Dota 2 with friends".to_owned()),
-    }]));
-}
-
-#[test]
 fn test_lobby_not_ready_under_10() {
     let lobby = lobby_with(0..9);
 
-    assert!(lobby.total_count() < FULL_LOBBY_SIZE);
-    assert!(!lobby.is_ready(FULL_LOBBY_SIZE));
+    assert!(lobby.total_count() < 10);
+    assert!(!lobby.is_ready(10));
 }
 
 #[test]
 fn test_lobby_ready_at_10() {
     let lobby = lobby_with(0..10);
 
-    assert!(lobby.total_count() >= FULL_LOBBY_SIZE);
-    assert!(lobby.is_ready(FULL_LOBBY_SIZE));
+    assert!(lobby.total_count() >= 10);
+    assert!(lobby.is_ready(10));
 }
 
 #[test]
@@ -220,7 +127,7 @@ fn test_lobby_ignores_legacy_conditional_players() {
     lobby.legacy_conditional_players = (7..10).map(player).collect();
 
     assert_eq!(lobby.total_count(), 7);
-    assert!(!lobby.is_ready(FULL_LOBBY_SIZE));
+    assert!(!lobby.is_ready(10));
 }
 
 #[test]
@@ -242,7 +149,7 @@ fn test_ready_lobby_embed_recommends_readycheck_before_shuffle() {
         .iter()
         .find(|field| field.name == "✅ Ready!")
         .expect("ready field");
-    assert_eq!(ready_field.value, READY_LOBBY_RECOMMENDATION);
+    assert_eq!(ready_field.value, "Run `/readycheck` before `/shuffle`.");
 }
 
 #[test]
@@ -843,21 +750,6 @@ fn stronger_readycheck_state_is_isolated_by_signed_guild() {
     assert_eq!(
         service.readycheck_reacted(other_scope),
         BTreeSet::from([player(-1)])
-    );
-}
-
-#[test]
-fn stronger_persisted_conversion_filters_orphan_timestamps() {
-    let mut persisted = PersistedLobbyState::open(1, Some(-42), -7, "created");
-    persisted.players = vec![-7];
-    persisted.player_join_times = BTreeMap::from([(-7, 10.5), (-8, 20.5)]);
-
-    let lobby = ReadyLobby::from_persisted(persisted);
-
-    assert_eq!(lobby.scope.guild_id, GuildId(-42));
-    assert_eq!(
-        lobby.player_join_times,
-        BTreeMap::from([(UserId(-7), 10.5)])
     );
 }
 

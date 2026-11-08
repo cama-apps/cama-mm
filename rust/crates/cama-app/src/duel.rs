@@ -27,19 +27,6 @@ pub const TRIAL_BY_COMBAT_RULES: &str = "Mirror matchups: both duelists play the
 • Prohibited: farming in the jungle, destroying observer wards, visiting other lanes, blocking the first wave of creeps, collecting and using runes, Bottle, and Infused Raindrops\n\
 Players can agree to additional game rules that do not conflict with existing regulations.";
 
-pub const COMMAND_GROUP: CommandGroup = CommandGroup {
-    name: "duel",
-    description: "Challenges of honor",
-    subcommands: &["issue", "respond", "list", "resolve"],
-};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CommandGroup {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub subcommands: &'static [&'static str],
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlavorEvent {
     Issued,
@@ -830,20 +817,6 @@ fn withholding_note(deductions: ProfitDeductions) -> String {
     }
 }
 
-/// Match the Python setup guard before constructing the command adapter.
-pub fn validate_setup_dependencies(
-    has_duel_service: bool,
-    has_flavor_service: bool,
-) -> Result<(), &'static str> {
-    if !has_duel_service {
-        return Err("duel_service must be initialized before commands.duel");
-    }
-    if !has_flavor_service {
-        return Err("duel_flavor_service must be initialized before commands.duel");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet, VecDeque};
@@ -929,20 +902,6 @@ mod tests {
              • If neither player has won by 15:00, the higher score wins: creep score + (kills × 35)\n\
              • Prohibited: farming in the jungle, destroying observer wards, visiting other lanes, blocking the first wave of creeps, collecting and using runes, Bottle, and Infused Raindrops\n\
              Players can agree to additional game rules that do not conflict with existing regulations."
-        );
-    }
-
-    #[test]
-    fn test_duel_is_one_top_level_group_with_approved_subcommands() {
-        assert_eq!(COMMAND_GROUP.name, "duel");
-        assert_eq!(COMMAND_GROUP.description, "Challenges of honor");
-        assert_eq!(
-            COMMAND_GROUP
-                .subcommands
-                .iter()
-                .copied()
-                .collect::<HashSet<_>>(),
-            HashSet::from(["issue", "respond", "list", "resolve"])
         );
     }
 

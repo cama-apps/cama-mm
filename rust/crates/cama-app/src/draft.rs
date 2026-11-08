@@ -56,14 +56,6 @@ pub fn draft_finalization_process_owner(guild_id: i64, session_id: u64) -> Strin
     format!("draft-live:{nonce}:{guild_id}:{session_id}")
 }
 
-pub const DRAFT_COMMANDS: [&str; 4] = ["start", "restart", "sampleinprogress", "samplecomplete"];
-pub const ADMIN_FAKE_PLAYER_ARGUMENTS: [&str; 4] = [
-    "discord_id",
-    "discord_username",
-    "initial_mmr",
-    "preferred_roles",
-];
-
 pub const AMBIGUOUS_LOBBY_MESSAGE: &str = concat!(
     "❓ You're queued in both 🍽️ All You Can Feed and 🧀 Whine & Cheese — ",
     "add the `lobby` option to pick one."
@@ -272,16 +264,6 @@ impl DraftState {
         } else {
             "dire"
         })
-    }
-
-    #[must_use]
-    pub const fn picks_remaining_this_turn(&self) -> usize {
-        if matches!(self.phase, DraftPhase::Drafting) && self.current_pick_index < DRAFT_TOTAL_PICKS
-        {
-            1
-        } else {
-            0
-        }
     }
 
     fn player_rating(&self, player_id: i64) -> f64 {
@@ -1405,9 +1387,6 @@ pub struct SqliteDraftStatePersistence {
     finalization: cama_db::draft_finalization::DraftFinalizationRepository,
 }
 
-/// Short compatibility alias for the SQLite draft persistence adapter.
-pub type SqliteDraftPersistence = SqliteDraftStatePersistence;
-
 impl SqliteDraftStatePersistence {
     /// Build an adapter for an already migrated database.
     #[must_use]
@@ -2115,14 +2094,6 @@ impl DraftStateManager {
     pub fn has_active_draft(&self, guild_id: Option<i64>) -> bool {
         self.get_state(guild_id).is_some()
     }
-
-    pub fn advance_phase(&self, guild_id: Option<i64>, phase: DraftPhase) -> bool {
-        let Some(state) = self.get_state(guild_id) else {
-            return false;
-        };
-        lock_recover(&state).phase = phase;
-        true
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2161,24 +2132,6 @@ impl DraftCoinPort for RandomDraftCoin {
     }
 }
 
-/// Deterministic strict alternation, for tests that need a fixed flip.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct AlternatingDraftCoin {
-    choose_second: bool,
-}
-
-impl DraftCoinPort for AlternatingDraftCoin {
-    fn choose(&mut self, captain1_id: i64, captain2_id: i64) -> i64 {
-        let choice = if self.choose_second {
-            captain2_id
-        } else {
-            captain1_id
-        };
-        self.choose_second = !self.choose_second;
-        choice
-    }
-}
-
 pub struct DraftService {
     coin: Box<dyn DraftCoinPort>,
 }
@@ -2194,13 +2147,6 @@ impl DraftService {
     pub fn new() -> Self {
         Self {
             coin: Box::new(RandomDraftCoin),
-        }
-    }
-
-    #[must_use]
-    pub fn with_coin(coin: impl DraftCoinPort + 'static) -> Self {
-        Self {
-            coin: Box::new(coin),
         }
     }
 
@@ -2393,30 +2339,6 @@ fn deduplicated(values: impl IntoIterator<Item = i64>) -> Vec<i64> {
         .collect()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DraftResponse {
-    pub content: String,
-    pub ephemeral: bool,
-}
-
-impl DraftResponse {
-    #[must_use]
-    pub fn public(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            ephemeral: false,
-        }
-    }
-
-    #[must_use]
-    pub fn ephemeral(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            ephemeral: true,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DraftEmbed {
     pub title: String,
@@ -2430,73 +2352,6 @@ pub struct DraftEmbedField {
     pub name: String,
     pub value: String,
     pub inline: bool,
-}
-
-pub fn format_roles(roles: Option<&[String]>) -> String {
-    let Some(roles) = roles.filter(|roles| !roles.is_empty()) else {
-        return String::new();
-    };
-    let mut indexed = roles.iter().cloned().enumerate().collect::<Vec<_>>();
-    indexed.sort_by_key(|(index, role)| (role.parse::<i64>().unwrap_or(99), *index));
-    format!(
-        "[{}]",
-        indexed
-            .into_iter()
-            .map(|(_, role)| role)
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-pub fn format_player_row(is_captain: bool, name: &str, rating: f64, roles: &str) -> String {
-    let icon = if is_captain { "👑" } else { "⠀⠀" };
-    let name = name.chars().take(10).collect::<String>();
-    let roles = if roles.is_empty() {
-        String::new()
-    } else {
-        format!(" {roles}")
-    };
-    format!("{icon} {name} ({rating:.0}){roles}")
-}
-
-pub fn resolve_start_lobby_kind(
-    memberships: &[LobbyKind],
-    explicit: Option<LobbyKind>,
-) -> Result<LobbyKind, DraftResponse> {
-    if let Some(explicit) = explicit {
-        return Ok(explicit);
-    }
-    match memberships {
-        [] => Err(DraftResponse::ephemeral(
-            "❌ Join a lobby before using `/draft start`.",
-        )),
-        [only] => Ok(*only),
-        _ => Err(DraftResponse::ephemeral(AMBIGUOUS_LOBBY_MESSAGE)),
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShuffleRoutingResult {
-    pub draft_called: bool,
-    pub response: Option<DraftResponse>,
-}
-
-#[must_use]
-pub fn route_large_lobby_shuffle(
-    player_ids: &[i64],
-    pending_player_ids: &BTreeSet<i64>,
-) -> ShuffleRoutingResult {
-    let blocked = player_ids
-        .iter()
-        .any(|player_id| pending_player_ids.contains(player_id));
-    ShuffleRoutingResult {
-        draft_called: false,
-        response: blocked.then(|| {
-            DraftResponse::ephemeral(
-                "❌ Cannot shuffle: one or more selected players are already in a pending match.",
-            )
-        }),
-    }
 }
 
 #[cfg(test)]
@@ -2559,16 +2414,6 @@ mod tests {
     }
 
     #[test]
-    fn test_captain_opt_in_command_is_removed() {
-        assert!(!DRAFT_COMMANDS.contains(&"setcaptain"));
-    }
-
-    #[test]
-    fn test_fake_player_commands_do_not_expose_captain_opt_in() {
-        assert!(!ADMIN_FAKE_PLAYER_ARGUMENTS.contains(&"captain_eligible"));
-    }
-
-    #[test]
     fn test_initial_state() {
         let state = DraftState::new(123);
         assert_eq!(state.guild_id, 123);
@@ -2615,16 +2460,6 @@ mod tests {
     #[test]
     fn test_current_captain_id_not_drafting() {
         assert_eq!(DraftState::new(123).current_captain_id(), None);
-    }
-
-    #[test]
-    fn test_picks_remaining_this_turn() {
-        let mut state = DraftState::new(123);
-        state.phase = DraftPhase::Drafting;
-        for pick_index in [0, 1, 3] {
-            state.current_pick_index = pick_index;
-            assert_eq!(state.picks_remaining_this_turn(), 1);
-        }
     }
 
     #[test]
@@ -3544,17 +3379,6 @@ mod tests {
     }
 
     #[test]
-    fn test_advance_phase() {
-        let manager = DraftStateManager::default();
-        manager.create_draft(Some(123), LobbyKind::Open).unwrap();
-        assert!(manager.advance_phase(Some(123), DraftPhase::WinnerChoice));
-        assert_eq!(
-            lock_recover(&manager.get_state(Some(123)).unwrap()).phase,
-            DraftPhase::WinnerChoice
-        );
-    }
-
-    #[test]
     fn test_guild_id_normalization() {
         let manager = DraftStateManager::default();
         let state = manager.create_draft(None, LobbyKind::Open).unwrap();
@@ -3768,18 +3592,6 @@ mod tests {
     }
 
     #[test]
-    fn alternating_coin_remains_available_for_deterministic_tests() {
-        let mut service = DraftService::with_coin(AlternatingDraftCoin::default());
-
-        assert_eq!(
-            (0..4)
-                .map(|_| service.coinflip(100, 200))
-                .collect::<Vec<_>>(),
-            vec![100, 200, 100, 200]
-        );
-    }
-
-    #[test]
     fn test_lower_total_team_picks_first_and_other_team_picks_second() {
         let mut state = dynamic_state(123, 1400.0, 1600.0);
         state.start_player_draft();
@@ -3890,43 +3702,5 @@ mod tests {
             .filter(|id| ![1, 2].contains(id))
             .collect::<BTreeSet<_>>();
         assert!(a_non_captains.is_disjoint(&b_non_captains));
-    }
-
-    #[test]
-    fn test_startdraft_command_infers_lowskill_membership() {
-        assert_eq!(
-            resolve_start_lobby_kind(&[LobbyKind::LowSkill], None),
-            Ok(LobbyKind::LowSkill)
-        );
-    }
-
-    #[test]
-    fn test_startdraft_command_requires_a_lobby_choice_when_queued_in_both() {
-        let response =
-            resolve_start_lobby_kind(&[LobbyKind::Open, LobbyKind::LowSkill], None).unwrap_err();
-        assert_eq!(response.content, AMBIGUOUS_LOBBY_MESSAGE);
-        assert!(response.ephemeral);
-    }
-
-    #[test]
-    fn test_startdraft_command_drafts_from_the_explicit_lobby_choice() {
-        assert_eq!(
-            resolve_start_lobby_kind(
-                &[LobbyKind::Open, LobbyKind::LowSkill],
-                Some(LobbyKind::LowSkill)
-            ),
-            Ok(LobbyKind::LowSkill)
-        );
-    }
-
-    #[test]
-    fn test_sixteen_players_continue_to_normal_shuffle() {
-        let player_ids = (1..=16).collect::<Vec<_>>();
-        let result = route_large_lobby_shuffle(&player_ids, &BTreeSet::new());
-        assert!(!result.draft_called);
-        assert!(result.response.is_none());
-        let blocked = route_large_lobby_shuffle(&player_ids, &BTreeSet::from([16]));
-        assert!(!blocked.draft_called);
-        assert!(blocked.response.unwrap().ephemeral);
     }
 }

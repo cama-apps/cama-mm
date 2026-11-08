@@ -219,7 +219,6 @@ pub enum ResetLobbyOutcome {
 /// its sibling.
 pub struct LobbyCommandRuntime<P, M, C> {
     service: Arc<LobbyService<P, M, C>>,
-    ready_notifications: Mutex<BTreeMap<LobbyScope, MessageId>>,
     operation_locks: Mutex<BTreeMap<LobbyScope, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -233,7 +232,6 @@ where
     pub fn new(service: Arc<LobbyService<P, M, C>>) -> Self {
         Self {
             service,
-            ready_notifications: Mutex::new(BTreeMap::new()),
             operation_locks: Mutex::new(BTreeMap::new()),
         }
     }
@@ -241,12 +239,6 @@ where
     #[must_use]
     pub const fn service(&self) -> &Arc<LobbyService<P, M, C>> {
         &self.service
-    }
-
-    fn ready_notifications(&self) -> MutexGuard<'_, BTreeMap<LobbyScope, MessageId>> {
-        self.ready_notifications
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn operation_locks(&self) -> MutexGuard<'_, BTreeMap<LobbyScope, Arc<tokio::sync::Mutex<()>>>> {
@@ -268,15 +260,6 @@ where
     #[must_use]
     pub fn scope_operation_lock(&self, scope: LobbyScope) -> Arc<tokio::sync::Mutex<()>> {
         self.operation_lock(scope)
-    }
-
-    pub fn mark_ready_notification(&self, scope: LobbyScope, message_id: MessageId) {
-        self.ready_notifications().insert(scope, message_id);
-    }
-
-    #[must_use]
-    pub fn ready_notification(&self, scope: LobbyScope) -> Option<MessageId> {
-        self.ready_notifications().get(&scope).copied()
     }
 
     pub fn select_readycheck_lobby(
@@ -481,7 +464,6 @@ where
                 )
                 .await;
         }
-        self.ready_notifications().remove(&scope);
 
         let mut publication_failures = Vec::new();
         collect_publication_failure(

@@ -20,7 +20,7 @@ use cama_app::draft::{
     DraftFinalizationPlanSeed, DraftFinancialSetupPolicy, DraftFinancialSetupStage, DraftPhase,
     DraftState, DraftStateEnvelope, DraftStateManager, DraftStatePersistencePort,
     LobbyKind as DraftLobbyKind, PRE_DRAFT_TIMEOUT_SECONDS, PlayerPoolEntry,
-    SqliteDraftStatePersistence, draft_finalization_process_owner,
+    draft_finalization_process_owner,
 };
 use cama_app::embeds::LobbyKind as AppLobbyKind;
 use cama_db::core_repositories::{CoreRepositoryError, NewPlayer, PlayerRepository};
@@ -67,14 +67,6 @@ const FINAL_PICK_REOPENED: &str =
 const FINAL_PICK_REOPEN_FAILED: &str =
     "⚠️ The draft could not be finalized. An admin can run `/draft resume` to recover it.";
 const DRAFT_FINALIZATION_LEASE_SECONDS: i64 = 120;
-
-fn same_database_path(left: &Path, right: &Path) -> bool {
-    left == right
-        || matches!(
-            (left.canonicalize(), right.canonicalize()),
-            (Ok(left), Ok(right)) if left == right
-        )
-}
 
 /// Runtime-facing build failures are configuration or construction errors;
 /// ordinary command failures remain user-visible interaction responses.
@@ -304,7 +296,6 @@ impl DraftRegistrationProvider {
         }
         let handler = Arc::new(DraftHandler {
             config: DraftConfig::from_application(config),
-            database_path: path.clone(),
             players: PlayerRepository::new(&path),
             pending: PendingMatchRepository::new(&path),
             lobbies,
@@ -321,25 +312,6 @@ impl DraftRegistrationProvider {
             draft_operation_locks: Arc::new(Mutex::new(BTreeMap::new())),
         });
         Ok(Self { handler })
-    }
-
-    /// Attach the canonical SQLite persistence adapter to a provider that was
-    /// composed with the source-compatible constructor.  Keeping this as a
-    /// consuming step lets older tests and embedders retain `persistence=None`
-    /// while production can make the durable boundary explicit at composition.
-    pub fn with_sqlite_persistence(
-        self,
-        persistence_database_path: impl AsRef<Path>,
-    ) -> Result<Self, DraftProviderBuildError> {
-        let persistence_database_path = persistence_database_path.as_ref();
-        if !same_database_path(&self.handler.database_path, persistence_database_path) {
-            return Err(DraftProviderBuildError::Database(
-                "draft persistence and pending matches must share one SQLite database".to_owned(),
-            ));
-        }
-        self.with_persistence(Arc::new(SqliteDraftStatePersistence::new(
-            persistence_database_path,
-        )))
     }
 
     /// Attach an already-constructed durable persistence port.  Production
@@ -371,37 +343,6 @@ impl DraftRegistrationProvider {
         })
     }
 
-    /// Build a provider with SQLite-backed draft persistence and the default
-    /// reminder/Neon adapters.  The caller still owns startup hydration.
-    pub fn new_with_persistence(
-        database_path: impl AsRef<Path>,
-        config: &ApplicationConfig,
-        lobbies: MatchLobbyPort,
-        drafts: Arc<DraftStateManager>,
-        discord: Arc<dyn DiscordTransport>,
-        persistence_database_path: impl AsRef<Path>,
-    ) -> Result<Self, DraftProviderBuildError> {
-        let database_path = database_path.as_ref();
-        let persistence_database_path = persistence_database_path.as_ref();
-        if !same_database_path(database_path, persistence_database_path) {
-            return Err(DraftProviderBuildError::Database(
-                "draft persistence and pending matches must share one SQLite database".to_owned(),
-            ));
-        }
-        Self::new_with_reminder_scheduler_and_neon_and_persistence(
-            database_path,
-            config,
-            lobbies,
-            drafts,
-            discord,
-            Arc::new(NoopDraftReminderScheduler),
-            Arc::new(NoopDraftNeonObserver),
-            Some(Arc::new(SqliteDraftStatePersistence::new(
-                persistence_database_path,
-            ))),
-        )
-    }
-
     /// Explicitly resume only the durable financial-setup stage for a
     /// finalizing Draft after process recreation.
     ///
@@ -415,14 +356,6 @@ impl DraftRegistrationProvider {
         self.handler
             .resume_finalizing_financial_setup(guild_id)
             .await
-    }
-
-    /// Reconcile every durable finalization row after a process restart.
-    /// Financial effects are resumed from their immutable job stage, Discord
-    /// deliveries use the plan's deterministic nonce, and the final envelope
-    /// deletion is a leased revision/stage CAS.
-    pub async fn recover_finalizing(&self) -> Result<usize, String> {
-        self.recover_finalizing_scoped(None).await
     }
 
     async fn recover_finalizing_for_guilds(
@@ -777,7 +710,6 @@ impl DraftConfig {
 
 struct DraftHandler {
     config: DraftConfig,
-    database_path: std::path::PathBuf,
     players: PlayerRepository,
     pending: PendingMatchRepository,
     lobbies: MatchLobbyPort,

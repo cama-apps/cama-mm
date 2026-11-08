@@ -183,7 +183,6 @@ pub enum JoinFailure {
     Persistence,
     PendingMatchGuard,
     ModerationGuard,
-    ConditionalJoinDeprecated,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -245,35 +244,12 @@ pub struct LobbySnapshot {
     pub message_ids: LobbyMessageIds,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReadycheckConfirmationSnapshot {
-    pub message_id: MessageId,
-    pub reacted: BTreeSet<UserId>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct LoadedLobbyReadycheckSnapshot {
-    pub player_ids: Vec<UserId>,
-    pub players: Vec<LobbyPlayer>,
-    pub player_join_times: BTreeMap<UserId, f64>,
-    pub readycheck: Option<ReadycheckConfirmationSnapshot>,
-}
-
 #[derive(Clone, Debug, Default)]
 struct ReadycheckRecord {
     message_id: Option<MessageId>,
     channel_id: Option<ChannelId>,
     lobby_ids: BTreeSet<UserId>,
     reacted: BTreeMap<UserId, String>,
-}
-
-impl ReadycheckRecord {
-    fn confirmation_snapshot(&self) -> Option<ReadycheckConfirmationSnapshot> {
-        Some(ReadycheckConfirmationSnapshot {
-            message_id: self.message_id?,
-            reacted: self.reacted.keys().copied().collect(),
-        })
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -769,15 +745,6 @@ where
     }
 
     #[must_use]
-    pub const fn join_lobby_conditional(&self) -> JoinOutcome {
-        JoinOutcome {
-            success: false,
-            failure: Some(JoinFailure::ConditionalJoinDeprecated),
-            context: None,
-        }
-    }
-
-    #[must_use]
     pub fn get_in_flight_lobby_kind_for_player(
         &self,
         player_id: UserId,
@@ -1010,20 +977,8 @@ where
     }
 
     #[must_use]
-    pub fn readycheck_confirmed_count(&self, scope: LobbyScope) -> usize {
-        self.lock_state()
-            .lobbies
-            .get(&scope)
-            .map_or(0, |lobby| lobby.readycheck.reacted.len())
-    }
-
-    #[must_use]
     pub const fn ready_threshold(&self) -> usize {
         self.ready_threshold
-    }
-
-    pub fn set_lobby_message_ids(&self, scope: LobbyScope, ids: LobbyMessageIds) -> bool {
-        self.try_set_lobby_message_ids(scope, ids).unwrap_or(false)
     }
 
     pub fn try_set_lobby_message_ids(
@@ -1043,14 +998,6 @@ where
         let mut state = self.lock_state();
         self.publish_record(&mut state, candidate);
         Ok(true)
-    }
-
-    #[must_use]
-    pub fn get_lobby_message_id(&self, scope: LobbyScope) -> Option<MessageId> {
-        self.lock_state()
-            .lobbies
-            .get(&scope)
-            .and_then(|lobby| lobby.message_ids.message_id)
     }
 
     pub fn set_readycheck_state(
@@ -1111,40 +1058,6 @@ where
             .is_none()
     }
 
-    #[must_use]
-    pub fn get_readycheck_confirmation_snapshot(
-        &self,
-        scope: LobbyScope,
-    ) -> Option<ReadycheckConfirmationSnapshot> {
-        self.lock_state()
-            .lobbies
-            .get(&scope)
-            .and_then(|lobby| lobby.readycheck.confirmation_snapshot())
-    }
-
-    #[must_use]
-    pub fn get_lobby_players_and_readycheck_snapshot(
-        &self,
-        scope: LobbyScope,
-    ) -> Option<LoadedLobbyReadycheckSnapshot> {
-        let (player_ids, player_join_times, readycheck) = {
-            let state = self.lock_state();
-            let lobby = state.lobbies.get(&scope)?;
-            (
-                lobby.players.iter().copied().collect::<Vec<_>>(),
-                lobby.player_join_times.clone(),
-                lobby.readycheck.confirmation_snapshot(),
-            )
-        };
-        let players = self.player_port.get_by_ids(&player_ids, scope.guild_id);
-        Some(LoadedLobbyReadycheckSnapshot {
-            player_ids,
-            players,
-            player_join_times,
-            readycheck,
-        })
-    }
-
     pub fn reset_lobby(&self, scope: LobbyScope) -> bool {
         self.try_reset_lobby(scope).unwrap_or(false)
     }
@@ -1165,15 +1078,6 @@ where
             .in_flight
             .retain(|(guild_id, _), kind| *guild_id != scope.guild_id || *kind != scope.kind);
         Ok(removed)
-    }
-
-    #[must_use]
-    pub fn build_lobby_embed(
-        &self,
-        lobby: &LobbySnapshot,
-        preview_port: Option<&dyn FirstGamePoolPreviewPort>,
-    ) -> EmbedModel {
-        self.build_lobby_embed_with_name_overrides(lobby, preview_port, None)
     }
 
     #[must_use]
