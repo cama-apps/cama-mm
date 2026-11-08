@@ -388,7 +388,7 @@ impl InteractionHandler for TaxHandler {
                     TaxCommandContext {
                         interaction_id,
                         actor_id: user_id,
-                        actor_display_name: user_id.to_string(),
+                        actor_display_name: UNKNOWN_PLAYER.to_owned(),
                         guild_id,
                         member_permissions,
                         subcommand,
