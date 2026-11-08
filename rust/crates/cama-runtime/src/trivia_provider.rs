@@ -13,11 +13,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cama_app::dotabase_sqlite::{DotabaseSqliteSource, PRODUCTION_DOTABASE_PATH};
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
+use cama_app::hero_lookup::hero_render_url;
 use cama_app::mana_effects_service::{ManaRecord, effects_from_record};
 use cama_app::service_container::PersistentVanityTaxService;
 use cama_app::trivia_data::TriviaDataRegistry;
 use cama_app::trivia_image_cache::{
-    CachedTriviaImage, TriviaImageCache, production_trivia_cache_path,
+    CachedTriviaImage, TriviaCacheWarmReport, TriviaImageCache, TriviaImageCacheError,
+    production_trivia_cache_path,
 };
 use cama_app::trivia_questions::{TriviaCatalog, TriviaQuestion, TriviaRandom, generate_question};
 use cama_db::mana_service_repository::ManaRepository;
@@ -1493,7 +1495,9 @@ impl GatewayEventObserver for TriviaImageCacheWarmObserver {
         let catalog = Arc::clone(&self.catalog);
         let image_cache = Arc::clone(&self.image_cache);
         *task = Some(tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || image_cache.warm_catalog(&catalog)).await {
+            match tokio::task::spawn_blocking(move || warm_image_cache(&image_cache, &catalog))
+                .await
+            {
                 Ok(Ok(report)) => info!(
                     newly_cached = report.newly_cached,
                     total_urls = report.total_urls,
@@ -1505,6 +1509,31 @@ impl GatewayEventObserver for TriviaImageCacheWarmObserver {
         }));
         ReadyRecoveryReport::empty(CACHE_OBSERVER_NAME, context.guild_ids().len())
     }
+}
+
+/// Catalog art first, then the full hero renders Wrapped reads.
+fn warm_image_cache(
+    image_cache: &TriviaImageCache,
+    catalog: &TriviaCatalog,
+) -> Result<TriviaCacheWarmReport, TriviaImageCacheError> {
+    let catalog_report = image_cache.warm_catalog(catalog)?;
+    let renders = image_cache.warm_urls(hero_render_urls(catalog))?;
+    Ok(TriviaCacheWarmReport {
+        newly_cached: catalog_report.newly_cached + renders.newly_cached,
+        total_urls: catalog_report.total_urls + renders.total_urls,
+    })
+}
+
+/// Render URL for every catalog hero, from the slug in its portrait URL.
+fn hero_render_urls(catalog: &TriviaCatalog) -> BTreeSet<String> {
+    catalog
+        .heroes
+        .iter()
+        .filter_map(|hero| hero.image_url.as_deref())
+        .filter_map(|url| url.rsplit('/').next()?.strip_suffix(".png"))
+        .filter(|slug| !slug.is_empty())
+        .map(hero_render_url)
+        .collect()
 }
 
 #[cfg(all(test, feature = "runtime-test-core"))]

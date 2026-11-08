@@ -236,3 +236,22 @@ fn test_returns_none_when_not_cached() {
     assert!(cache.get_or_download(&url).is_err());
     assert!(!cache.path_for_url(&url).exists());
 }
+
+#[test]
+fn warm_urls_caches_each_url_once() {
+    let root = tempdir().expect("cache directory");
+    let cache = TriviaImageCache::new(root.path()).expect("cache");
+    let (server, handle) = one_shot_image_server(PNG_FIXTURE);
+    let url = format!("{server}/apps/dota_react/heroes/renders/new_hero.png");
+    let urls = BTreeSet::from([url.clone()]);
+    let first = cache.warm_urls(urls.clone()).expect("first warm");
+    handle.join().expect("image server");
+    assert_eq!((first.newly_cached, first.total_urls), (1, 1));
+    assert_eq!(
+        fs::read(cache.path_for_url(&url)).expect("cached render"),
+        PNG_FIXTURE
+    );
+    // The one-shot server is gone; a second warm must not need it.
+    let second = cache.warm_urls(urls).expect("second warm");
+    assert_eq!((second.newly_cached, second.total_urls), (0, 1));
+}

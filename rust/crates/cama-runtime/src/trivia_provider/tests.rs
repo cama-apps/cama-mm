@@ -1288,3 +1288,27 @@ async fn account_recovery_waits_for_classic_trivia_timeout_to_record_the_streak(
     assert_eq!(row, (replacement, 1));
     assert!(recovery.player(replacement).try_read_owned().is_err());
 }
+
+#[test]
+fn render_urls_follow_catalog_hero_slugs() {
+    let hero = |image_url: Option<&str>| HeroData {
+        image_url: image_url.map(str::to_owned),
+        ..HeroData::default()
+    };
+    let catalog = TriviaCatalog {
+        heroes: vec![
+            hero(Some(
+                "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/queenofpain.png",
+            )),
+            hero(None),
+        ],
+        ..TriviaCatalog::default()
+    };
+    assert_eq!(
+        hero_render_urls(&catalog),
+        BTreeSet::from([
+            "https://cdn.cloudflare.steamstatic.com/apps/dota2/videos/dota_react/heroes/renders/queenofpain.png"
+                .to_owned()
+        ])
+    );
+}

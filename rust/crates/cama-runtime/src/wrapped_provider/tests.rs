@@ -1961,3 +1961,37 @@ fn personal_superlatives_are_absent_without_observed_match_evidence() {
     assert!(slides.iter().all(|slide| slide.kind != "story_superlative"));
     assert!(slides.last().unwrap().badge.is_empty());
 }
+
+#[test]
+fn hero_render_reads_cache_and_never_downloads() {
+    let heroes = tempfile::tempdir().unwrap();
+    let dotabase = heroes.path().join("dotabase.db");
+    Connection::open(&dotabase)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE heroes (
+                 id INTEGER PRIMARY KEY,name TEXT,color TEXT,localized_name TEXT,roles TEXT
+             );
+             INSERT INTO heroes VALUES
+                 (1,'npc_dota_hero_antimage','#784094','Anti-Mage','Carry'),
+                 (2,'npc_dota_hero_axe','#b32b2b','Axe','Initiator');",
+        )
+        .unwrap();
+    let cache = heroes.path().join("trivia");
+    std::fs::create_dir_all(cache.join("heroes/renders")).unwrap();
+    std::fs::write(cache.join("heroes/renders/antimage.png"), b"render").unwrap();
+    std::fs::write(
+        cache.join("heroes/renders/axe.png"),
+        vec![0_u8; 4 * 1024 * 1024 + 1],
+    )
+    .unwrap();
+    let art = ArtSources::for_assets(&repository_assets()).with_hero_portraits(
+        cama_app::hero_lookup::HeroLookup::new(&dotabase),
+        cache.clone(),
+    );
+    assert_eq!(art.hero_render(1), Some(b"render".to_vec()));
+    // Oversized files, unknown heroes and uncached renders yield nothing.
+    assert_eq!(art.hero_render(2), None);
+    assert_eq!(art.hero_render(999), None);
+    assert!(!cache.join("heroes/renders/999.png").exists());
+}

@@ -173,6 +173,14 @@ impl TriviaImageCache {
             )
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
+        self.warm_urls(urls)
+    }
+
+    /// Download every URL that is not cached yet. Failures are skipped.
+    pub fn warm_urls(
+        &self,
+        urls: BTreeSet<String>,
+    ) -> Result<TriviaCacheWarmReport, TriviaImageCacheError> {
         let mut newly_cached = 0;
         let client = http_client()?;
         for url in &urls {

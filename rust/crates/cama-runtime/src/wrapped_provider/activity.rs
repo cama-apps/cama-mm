@@ -95,6 +95,20 @@ impl ArtSources {
         (bytes.len() <= 1024 * 1024).then_some(bytes)
     }
 
+    /// The hero's full render when startup has already cached it. Never
+    /// downloads; callers fall back to the portrait.
+    // Read by the beat-art selection in the next change.
+    #[allow(dead_code)]
+    pub(super) fn hero_render(&self, hero_id: i64) -> Option<Vec<u8>> {
+        let url = self.heroes.image_url(hero_id, HeroImageSize::Render)?;
+        let path = TriviaImageCache::new(&self.hero_cache)
+            .ok()?
+            .path_for_url(&url);
+        let bytes = std::fs::read(path).ok()?;
+        // Renders are about 1 MB; anything over 4 MiB is not one.
+        (bytes.len() <= 4 * 1024 * 1024).then_some(bytes)
+    }
+
     fn boss_scene(&self, boss_id: &str, scene: &str) -> Option<Vec<u8>> {
         let slug = cama_app::dig_assets::boss_slug(boss_id)?;
         let bytes = std::fs::read(
