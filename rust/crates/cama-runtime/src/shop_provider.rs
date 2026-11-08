@@ -1468,7 +1468,10 @@ impl ShopInteractionHandler {
                     .map_err(|error| error.to_string())?
                     .is_none()
                 {
-                    return Err(format!("{} is not registered.", target.display_name));
+                    return Err(format!(
+                        "{} is not registered. <@{}>",
+                        target.display_name, target.id
+                    ));
                 }
                 let repository = self.repository.clone();
                 let target_id = target.id;
@@ -1481,8 +1484,8 @@ impl ShopInteractionHandler {
                     .await?;
                 let Some(info) = info else {
                     return Ok(format!(
-                        "🏝️🔍 **INSIGHT** — {} hasn't started digging.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
-                        target.display_name, spec.cost
+                        "🏝️🔍 **INSIGHT** — {} hasn't started digging. <@{}>\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
+                        target.display_name, target.id, spec.cost
                     ));
                 };
                 let catalog = artifact_catalog()
@@ -1746,8 +1749,8 @@ impl ShopInteractionHandler {
                     .is_none()
                 {
                     return Err(format!(
-                        "{} is not registered; refunded.",
-                        target.display_name
+                        "{} is not registered; refunded. <@{}>",
+                        target.display_name, target.id
                     ));
                 }
                 let ally_id = target.id;

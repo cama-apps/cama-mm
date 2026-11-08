@@ -661,7 +661,7 @@ async fn failed_mana_effect_refunds_debit_releases_daily_slot_and_keeps_public_c
         .expect("compensated Insight failure");
     assert_eq!(responder.defers.lock().expect("defers").as_slice(), [false]);
     let followup = responder.followups.lock().expect("followups")[0].clone();
-    assert_eq!(followup.content, "Player 404 is not registered.");
+    assert_eq!(followup.content, "Player 404 is not registered. <@404>");
     assert!(!followup.ephemeral);
     assert_eq!(
         followup.allowed_mentions,
@@ -1953,5 +1953,58 @@ async fn recalibration_debit_and_uncertainty_reset_are_atomic_and_restart_durabl
             )
             .unwrap(),
         balance
+    );
+}
+
+#[tokio::test]
+async fn insight_on_a_player_without_a_tunnel_names_and_pings_the_target() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 10_000);
+    fixture.player(TARGET, 1_000);
+    let today =
+        pacific_mana_day(unix_timestamp().expect("current timestamp")).expect("Pacific mana day");
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO player_mana(
+               discord_id,guild_id,current_land,assigned_date,consumed_today,
+               white_shield_remaining)
+             VALUES(?1,?2,'Island',?3,0,0)",
+            params![
+                i64::try_from(BUYER).unwrap(),
+                i64::try_from(GUILD).unwrap(),
+                today
+            ],
+        )
+        .expect("seed Island mana");
+
+    let responder = Arc::new(Responder::default());
+    fixture
+        .registry()
+        .command_handler("shop")
+        .expect("Shop handler")
+        .handle(
+            command(
+                "mana",
+                vec![string("item", "insight"), user("target", TARGET)],
+                7_101,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("Insight purchase");
+
+    let followup = responder.followups.lock().expect("followups")[0].clone();
+    assert!(
+        followup
+            .content
+            .starts_with("🏝️🔍 **INSIGHT** — Player 202 hasn't started digging. <@202>\n"),
+        "{}",
+        followup.content
+    );
+    assert!(followup.embeds.is_empty());
+    assert_eq!(
+        followup.allowed_mentions,
+        InteractionAllowedMentions::Users(vec![TARGET])
     );
 }

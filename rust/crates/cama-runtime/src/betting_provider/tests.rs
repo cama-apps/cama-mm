@@ -4681,10 +4681,37 @@ async fn economy_tip_debt_and_bankruptcy_messages_name_players_without_mentions(
         "{}",
         bankruptcy.content
     );
-    for public in [tip, debt, bankruptcy] {
-        assert_names_players_without_ids(&public.content);
-        assert_eq!(public.allowed_mentions, InteractionAllowedMentions::None);
+    // Tip and debt recipients keep their notification: one deliberate
+    // mention after the readable sentence, allowed for that player only.
+    let recipient_mention = format!("<@{NAMED_TARGET}>");
+    for notified in [tip, debt] {
+        assert_eq!(
+            notified.content.matches(&recipient_mention).count(),
+            1,
+            "{}",
+            notified.content
+        );
+        assert!(!notified.content.contains(&format!("<@{NAMED_PAYER}>")));
+        assert_names_players_without_ids(&notified.content.replace(&recipient_mention, ""));
+        assert!(notified.embeds.iter().all(|embed| {
+            !embed
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("<@")
+                && embed.fields.iter().all(|field| !field.value.contains("<@"))
+        }));
+        assert_eq!(
+            notified.allowed_mentions,
+            InteractionAllowedMentions::Users(vec![NAMED_TARGET as u64])
+        );
     }
+    // Declaring bankruptcy would only ping the filer, so it stays silent.
+    assert_names_players_without_ids(&bankruptcy.content);
+    assert_eq!(
+        bankruptcy.allowed_mentions,
+        InteractionAllowedMentions::None
+    );
     let unregistered = &responses[3];
     assert!(unregistered.ephemeral);
     assert_eq!(unregistered.content, "Unknown player is not registered.");
