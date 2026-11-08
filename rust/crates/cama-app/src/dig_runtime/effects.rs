@@ -437,6 +437,13 @@ pub fn apply_cave_in_gear_ticks(gear: &mut [DigRuntimeGear], ticks: u32) -> Vec<
     broken
 }
 
+/// The tightest of the active cave-in loss caps, like Python's
+/// `_effective_cave_in_loss_cap`: no source overrides a stricter one.
+#[must_use]
+pub(super) fn effective_cave_in_loss_cap(caps: &[Option<i64>]) -> Option<i64> {
+    caps.iter().copied().flatten().min()
+}
+
 /// Apply the catastrophic depth rule after the ordinary block-loss roll.
 /// Insurance covers only the milestone rollback; the ordinary loss remains in
 /// place, exactly as in the Python service.

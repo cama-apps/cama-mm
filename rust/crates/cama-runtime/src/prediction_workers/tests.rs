@@ -775,8 +775,18 @@ async fn refresh_trade_summary_is_live_and_not_acknowledged_when_thread_send_fai
         "{}",
         summary.response.content
     );
-    assert!(!summary.response.content.contains("<@"));
-    assert_eq!(summary.allowed_mentions, DiscordAllowedMentions::None);
+    // The biggest trader keeps a ping on a trailing mention line.
+    let (text, pings) = summary
+        .response
+        .content
+        .rsplit_once('\n')
+        .expect("trailing mention line");
+    assert_eq!(pings, "<@77>");
+    assert!(!text.contains("<@"), "{text}");
+    assert_eq!(
+        summary.allowed_mentions,
+        DiscordAllowedMentions::Users(BTreeSet::from([77]))
+    );
     assert_eq!(fixture.pending_refreshes(), 2);
 }
 

@@ -2025,73 +2025,6 @@ impl BossProgressValue {
 
 pub type BossProgress = BTreeMap<String, BossProgressValue>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BossEcho {
-    pub boss_id: String,
-    pub depth: i32,
-    pub killer_discord_id: i64,
-    pub weakened_until: i64,
-}
-
-pub trait BossEchoStore {
-    fn record_boss_echo(
-        &mut self,
-        guild_id: Option<i64>,
-        boss_id: &str,
-        depth: i32,
-        killer_discord_id: i64,
-        window_seconds: i64,
-        now: i64,
-    );
-
-    fn active_boss_echo(&self, guild_id: Option<i64>, boss_id: &str, now: i64)
-    -> Option<&BossEcho>;
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct InMemoryBossStore {
-    echoes: BTreeMap<(i64, String), BossEcho>,
-}
-
-const fn normalized_guild_id(guild_id: Option<i64>) -> i64 {
-    match guild_id {
-        Some(guild_id) => guild_id,
-        None => 0,
-    }
-}
-
-impl BossEchoStore for InMemoryBossStore {
-    fn record_boss_echo(
-        &mut self,
-        guild_id: Option<i64>,
-        boss_id: &str,
-        depth: i32,
-        killer_discord_id: i64,
-        window_seconds: i64,
-        now: i64,
-    ) {
-        let echo = BossEcho {
-            boss_id: boss_id.to_owned(),
-            depth,
-            killer_discord_id,
-            weakened_until: now.saturating_add(window_seconds),
-        };
-        self.echoes
-            .insert((normalized_guild_id(guild_id), boss_id.to_owned()), echo);
-    }
-
-    fn active_boss_echo(
-        &self,
-        guild_id: Option<i64>,
-        boss_id: &str,
-        now: i64,
-    ) -> Option<&BossEcho> {
-        self.echoes
-            .get(&(normalized_guild_id(guild_id), boss_id.to_owned()))
-            .filter(|echo| echo.weakened_until > now)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RelicStat {
     pub id: &'static str,
@@ -2175,21 +2108,6 @@ pub const PINNACLE_RELIC_STATS: [RelicStat; 15] = [
         label: "Cheers ring louder",
         title: "Acclaim",
     },
-];
-
-pub const PINNACLE_RELIC_SUFFIX_POOL: [&str; 12] = [
-    "Echoes",
-    "Hunger",
-    "Patience",
-    "Ruin",
-    "Bloom",
-    "Silence",
-    "Endings",
-    "First Light",
-    "Last Breath",
-    "Hollow",
-    "Persistence",
-    "Forgotten Things",
 ];
 
 #[must_use]

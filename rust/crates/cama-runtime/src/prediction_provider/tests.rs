@@ -816,16 +816,24 @@ async fn create_persists_only_real_surface_ids_and_installs_exact_persistent_but
     assert_eq!(created.len(), 1);
     let (channel_id, announcement, thread_name, market_message) = &created[0];
     assert_eq!(*channel_id, COMMAND_CHANNEL);
-    assert_eq!(announcement.allowed_mentions, DiscordAllowedMentions::None);
-    assert!(
-        announcement
-            .response
-            .content
-            .contains("opened by Unknown player\n\"Will @Trader win this market?\""),
-        "{}",
-        announcement.response.content
+    // The creator and the player the question names keep their pings on a
+    // trailing mention line; the readable text above it shows names.
+    assert_eq!(
+        announcement.allowed_mentions,
+        DiscordAllowedMentions::Users(BTreeSet::from([ADMIN as u64, TRADER as u64]))
     );
-    assert!(!announcement.response.content.contains("<@"));
+    let (text, pings) = announcement
+        .response
+        .content
+        .rsplit_once('\n')
+        .expect("trailing mention line");
+    assert_eq!(pings, "<@99> <@100>");
+    assert!(
+        text.contains("opened by Unknown player\n\"Will @Trader win this market?\""),
+        "{text}"
+    );
+    assert!(!text.contains("<@"), "{text}");
+    assert!(announcement.response.embeds.is_empty());
     assert_eq!(thread_name, "Market #1: Will @Trader win this market?");
     assert_eq!(
         market_message.allowed_mentions,
@@ -1820,9 +1828,10 @@ async fn remaining_live_subcommands_and_position_button_preserve_python_visibili
             .content
             .contains("fair manually set by Unknown player:")
     );
+    assert!(set_fair.followups[0].content.ends_with(" <@99>"));
     assert_eq!(
         set_fair.followups[0].allowed_mentions,
-        crate::registration::InteractionAllowedMentions::None
+        crate::registration::InteractionAllowedMentions::Users(vec![ADMIN as u64])
     );
 
     let force = Arc::new(CapturingResponder::default());
@@ -2152,11 +2161,23 @@ async fn market_announcements_name_admins_and_ping_participants_beside_their_nam
             "{}",
             announcement.content
         );
-        assert!(!announcement.content.contains("<@"));
-        assert!(!announcement.content.contains(&ADMIN.to_string()));
+        // The admin keeps a deliberate ping after the readable sentence.
+        let text = announcement
+            .content
+            .strip_suffix(" <@99>")
+            .unwrap_or_else(|| panic!("admin ping: {}", announcement.content));
+        assert!(!text.contains("<@"), "{text}");
+        assert!(!text.contains(&ADMIN.to_string()), "{text}");
+        assert!(announcement.embeds.iter().all(|embed| {
+            !embed
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("<@")
+        }));
         assert_eq!(
             announcement.allowed_mentions,
-            crate::registration::InteractionAllowedMentions::None
+            crate::registration::InteractionAllowedMentions::Users(vec![ADMIN as u64])
         );
     }
 }

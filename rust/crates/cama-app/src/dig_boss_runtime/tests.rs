@@ -1004,6 +1004,163 @@ fn final_victory_atomically_awards_stat_point_and_keeps_run_scoped_ledger() {
     );
 }
 
+const SELECTED_DIRT_ROUTE: &str = r#"{"end_depth": 25, "layer": "Dirt", "offered": ["shored_passage", "old_supports", "fossil_seam"], "selected": "shored_passage", "start_depth": 0}"#;
+
+fn set_route_state(database: &FastTestDatabase, route_state: &str) {
+    Connection::open(database.path())
+        .expect("route state DB")
+        .execute(
+            "UPDATE tunnels SET route_state=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![route_state, PLAYER, GUILD],
+        )
+        .expect("route state");
+}
+
+fn persisted_route_state(database: &FastTestDatabase) -> Option<String> {
+    Connection::open(database.path())
+        .expect("route verify DB")
+        .query_row(
+            "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("persisted route state")
+}
+
+fn commit_grothak_outcome(database: &FastTestDatabase, won: bool, status: BossStatus) {
+    let mut repository = SqliteBossRepository::new(database.path(), 1_700_000_000);
+    let tunnel = repository.load_tunnel(key()).expect("tunnel");
+    let mut next = tunnel.clone();
+    let BossProgressValue::Entry(entry) = next.boss_progress.get_mut("25").expect("boss progress")
+    else {
+        panic!("expected structured boss entry");
+    };
+    entry.status = status;
+    repository
+        .commit(
+            key(),
+            tunnel.revision,
+            RepositoryCommit {
+                next_tunnel: next,
+                audit: Some(BossAuditRecord {
+                    boss_id: "grothak".to_owned(),
+                    boundary: 25,
+                    won,
+                    jc_delta: 0,
+                    depth_after: 25,
+                }),
+                ..RepositoryCommit::default()
+            },
+        )
+        .expect("boss outcome");
+}
+
+/// Python's `_build_route_offer_state`: a tier-boss kill persists the next
+/// layer's offer (one universal route, never the previous universal route,
+/// plus two of that layer's routes) in the victory write.
+#[test]
+fn final_victory_offers_the_next_layer_routes_in_the_victory_commit() {
+    let database = fixture();
+    set_route_state(&database, SELECTED_DIRT_ROUTE);
+    commit_grothak_outcome(&database, true, BossStatus::Defeated);
+
+    let raw = persisted_route_state(&database).expect("route offer");
+    let offer = crate::dig_routes::parse_route_state(Some(&raw)).expect("valid route offer");
+    assert_eq!(offer.layer, "Stone");
+    assert_eq!((offer.start_depth, offer.end_depth), (25, 50));
+    assert_eq!(offer.selected, None);
+    let routes = offer
+        .offered
+        .iter()
+        .map(|route_id| crate::dig_routes::route_by_id(route_id).expect("catalog route"))
+        .collect::<Vec<_>>();
+    let universal = routes
+        .iter()
+        .filter(|route| route.layer.is_none())
+        .collect::<Vec<_>>();
+    assert_eq!(universal.len(), 1);
+    assert_ne!(universal[0].id, "shored_passage");
+    assert_eq!(
+        routes
+            .iter()
+            .filter(|route| route.layer == Some("Stone"))
+            .count(),
+        2
+    );
+    assert!(crate::dig_routes::route_status(Some(&raw)).choice_required);
+}
+
+#[test]
+fn phase_transitions_and_losses_keep_the_saved_route() {
+    let database = fixture();
+    set_route_state(&database, SELECTED_DIRT_ROUTE);
+    commit_grothak_outcome(&database, true, BossStatus::PhaseOneDefeated);
+    assert_eq!(
+        persisted_route_state(&database).as_deref(),
+        Some(SELECTED_DIRT_ROUTE)
+    );
+    commit_grothak_outcome(&database, false, BossStatus::Active);
+    assert_eq!(
+        persisted_route_state(&database).as_deref(),
+        Some(SELECTED_DIRT_ROUTE)
+    );
+}
+
+/// A live boss kill gates the next Dig on the new junction, and choosing one
+/// of the offered routes through the production runtime clears that gate.
+#[test]
+fn live_boss_victory_gates_the_next_dig_until_a_route_is_chosen() {
+    let database = fixture();
+    set_minimal_accuracy_encounter(&database, 20);
+    let now = 1_700_000_000;
+    let victory = DigBossRuntimeService::sqlite({
+        let mut config = DigBossRuntimeConfig::new(database.path(), 20);
+        config.economy_event.enabled = false;
+        config
+    })
+    .fight_live_regular(
+        DigBossRuntimeRequest {
+            discord_id: PLAYER,
+            guild_id: GUILD,
+            now,
+        },
+        RiskTier::Cautious,
+        0,
+        SequenceEntropy::new(vec![0.45, 0.99], vec![0], vec![]),
+    )
+    .expect("boss victory");
+    assert!(victory.outcome.won);
+    assert!(victory.outcome.phase_transition.is_none());
+
+    let runtime = crate::dig_runtime::DigRuntimeService::sqlite(database.path());
+    let dig = crate::dig_runtime::DigRuntimeRequest {
+        discord_id: PLAYER,
+        guild_id: GUILD,
+        now: now + 10,
+        paid: false,
+        forced_event: false,
+    };
+    let blocked = runtime.dig(dig).expect("gated dig");
+    assert!(!blocked.success);
+    assert!(blocked.route_choice_required);
+
+    let offer = crate::dig_routes::parse_route_state(persisted_route_state(&database).as_deref())
+        .expect("route offer");
+    assert_eq!(offer.layer, "Stone");
+    let chosen = offer.offered[1].clone();
+    let selected = runtime
+        .choose_route(PLAYER, GUILD, &chosen, now + 20)
+        .expect("route choice");
+    assert!(selected.success, "{:?}", selected.error);
+    let status = crate::dig_routes::route_status(persisted_route_state(&database).as_deref());
+    assert!(!status.choice_required);
+    assert_eq!(
+        status.active_route.map(|route| route.id),
+        Some(chosen.as_str())
+    );
+    assert!(!runtime.dig(dig).expect("ungated dig").route_choice_required);
+}
+
 fn paused_duel() -> PausedBossDuel {
     PausedBossDuel {
         boss_id: "grothak".to_owned(),
