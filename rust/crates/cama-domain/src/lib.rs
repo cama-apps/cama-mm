@@ -48,3 +48,4 @@ pub mod live_announcements;
 
 pub mod deadlock;
 pub mod wrapped_activity;
+pub mod wrapped_distinct;
