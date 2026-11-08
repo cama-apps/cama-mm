@@ -16,6 +16,7 @@ use crate::dig_service::{LuminosityLevel, luminosity_level};
 pub const RELIC_SLOTS_BASE: i64 = 1;
 pub const RELIC_SLOTS_MAX: i64 = 6;
 
+#[cfg(test)]
 pub const NEW_RELIC_IDS: [&str; 8] = [
     "prism_heart",
     "mana_conduit",
@@ -27,6 +28,7 @@ pub const NEW_RELIC_IDS: [&str; 8] = [
     "slow_drip",
 ];
 
+#[cfg(test)]
 pub const DORMANT_RELIC_IDS: [&str; 7] = [
     "root_network",
     "frozen_clock",
@@ -37,6 +39,7 @@ pub const DORMANT_RELIC_IDS: [&str; 7] = [
     "patient_stone",
 ];
 
+#[cfg(test)]
 pub const BUFF_FUN_RELIC_IDS: [&str; 7] = [
     "midas_splinter",
     "lucky_seam",

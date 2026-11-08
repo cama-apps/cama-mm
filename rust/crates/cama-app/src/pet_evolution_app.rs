@@ -179,6 +179,7 @@ where
         &self.evolution_store
     }
 
+    #[cfg(test)]
     pub const fn evolution_store_mut(&mut self) -> &mut R {
         &mut self.evolution_store
     }

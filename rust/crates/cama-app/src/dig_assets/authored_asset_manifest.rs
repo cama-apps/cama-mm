@@ -127,6 +127,7 @@ pub fn entries() -> Result<Vec<ManifestEntry>, ManifestError> {
     Ok(document.files)
 }
 
+#[cfg(test)]
 /// Verify every manifest entry against an extracted ``/app/assets`` root.
 ///
 /// The check is deliberately bidirectional: it catches both changed/missing
@@ -213,6 +214,7 @@ fn validate_relative_path(path: &str) -> Result<(), ManifestError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn discover_files(root: &Path) -> Result<Vec<PathBuf>, ManifestError> {
     let mut files = Vec::new();
     for top_level in ["dig", "pets"] {
@@ -223,6 +225,7 @@ fn discover_files(root: &Path) -> Result<Vec<PathBuf>, ManifestError> {
     Ok(files)
 }
 
+#[cfg(test)]
 fn collect_files(
     root: &Path,
     directory: &Path,

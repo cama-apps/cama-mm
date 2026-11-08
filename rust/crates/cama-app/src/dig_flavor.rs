@@ -148,6 +148,7 @@ pub const NPCS: &[DigNpc] = &[
     },
 ];
 
+#[cfg(test)]
 pub const VALID_VOICES: [&str; 3] = ["cosmic_dread", "industrial_grim", "cryptic_folkloric"];
 
 #[must_use]

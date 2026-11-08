@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(test)]
 use cama_domain::dig_economy::BOSS_BOUNDARIES;
 use rusqlite::{Connection, OpenFlags, params};
 use thiserror::Error;
@@ -342,6 +343,7 @@ impl AutoBuySettings {
     }
 }
 
+#[cfg(test)]
 /// Clear authored boss IDs only for active object entries.
 ///
 /// Invalid JSON, non-object roots, legacy string entries, and `NULL` are
@@ -393,6 +395,7 @@ pub enum AwardLedger {
 }
 
 impl AwardLedger {
+    #[cfg(test)]
     fn awards_for(&self, prestige_level: i64) -> BTreeSet<i64> {
         match self {
             Self::Scoped {
@@ -412,6 +415,7 @@ pub struct StatRepairState {
     pub defeated: BTreeSet<i64>,
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn reconcile_post_prestige(mut state: StatRepairState) -> StatRepairState {
     if state.prestige_level <= 0 || state.defeated.is_empty() {
@@ -439,6 +443,7 @@ pub fn reconcile_post_prestige(mut state: StatRepairState) -> StatRepairState {
     state
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn reconcile_cumulative(mut state: StatRepairState) -> StatRepairState {
     if state.prestige_level <= 0 {
@@ -480,6 +485,7 @@ pub struct GearBackfillRow {
     pub source: &'static str,
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn initial_weapon_backfill(
     tunnels: &[TunnelGearSeed],

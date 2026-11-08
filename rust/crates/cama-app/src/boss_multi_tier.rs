@@ -735,6 +735,7 @@ impl Default for InMemoryGearRepair {
 }
 
 impl InMemoryGearRepair {
+    #[cfg(test)]
     pub fn add_piece(&mut self, key: PlayerKey, slot: GearSlot, durability: i32) -> i64 {
         self.next_id += 1;
         let id = self.next_id;
@@ -1350,6 +1351,7 @@ impl InMemoryBossRepository {
         self.tunnels.insert(key, tunnel);
     }
 
+    #[cfg(test)]
     pub fn inject_commit_failure(&mut self) {
         self.fail_next_commit = true;
     }
@@ -1521,6 +1523,7 @@ pub struct ScoutOdds {
 }
 
 impl ScoutOdds {
+    #[cfg(test)]
     #[must_use]
     pub const fn for_risk(&self, risk: RiskTier) -> &ScoutRiskDetails {
         match risk {

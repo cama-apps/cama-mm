@@ -485,6 +485,7 @@ pub enum CanonicalQuestFinaleOutcome {
     },
 }
 
+#[cfg(test)]
 /// Stable FNV-1a checksum used by the parity harness to ensure the checked-in
 /// generated snapshot is regenerated whenever the Python catalog changes.
 #[must_use]
@@ -1171,6 +1172,7 @@ pub fn canonical_event(event_id: &str) -> Option<&'static CanonicalEventDef> {
 
 const CANONICAL_QUEST_JSON: &str = include_str!("dig_quest_catalog.json");
 
+#[cfg(test)]
 /// Stable checksum for the generated quest/finale snapshot.
 #[must_use]
 pub fn canonical_quest_snapshot_hash() -> u64 {
@@ -2182,10 +2184,12 @@ impl ScriptedLootEntropy {
         }
     }
 
+    #[cfg(test)]
     pub fn push_unit(&mut self, value: f64) {
         self.units.push_back(value);
     }
 
+    #[cfg(test)]
     pub fn push_advance(&mut self, value: i64) {
         self.advances.push_back(value);
     }
@@ -2388,6 +2392,7 @@ impl InMemoryLootRepository {
         self.tunnels.entry((discord_id, guild_id)).or_default();
     }
 
+    #[cfg(test)]
     pub fn fail_next_write(&mut self, fault: WriteFault) {
         self.fail_next = Some(fault);
     }

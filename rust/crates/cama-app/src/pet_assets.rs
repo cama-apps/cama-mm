@@ -78,6 +78,7 @@ impl RasterImage {
         ))
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn alpha_bounds(&self) -> Option<(usize, usize, usize, usize)> {
         let mut left = self.width;
@@ -1363,6 +1364,7 @@ impl HybridPetRenderer {
         layer
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn manifest_token(&mut self) -> u64 {
         let mut paths = Vec::new();

@@ -143,6 +143,7 @@ impl DigGuildModifierRepository {
             .map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub fn clear_expired(&self, now: i64) -> Result<usize, DigGuildModifierError> {
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;

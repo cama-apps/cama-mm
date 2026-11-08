@@ -403,6 +403,7 @@ pub const LAYER_ROUTE_POOLS: [LayerRoutePool; 7] = [
     },
 ];
 
+#[cfg(test)]
 pub const ROUTE_EFFECT_KEYS: [&str; 9] = [
     "advance_bonus",
     "advance_max_penalty",
