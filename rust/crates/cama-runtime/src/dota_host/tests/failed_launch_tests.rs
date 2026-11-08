@@ -538,7 +538,7 @@ async fn gameplay_between_polls_prevents_failed_launch_recreation() {
         ..Default::default()
     };
     f.worker.tick(&f.port, 115).await.unwrap();
-    assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert_eq!(f.session().phase, Phase::Finishing);
     assert!(f.state().failed_launches.is_empty());
     assert!(f.state().betting_closed, "gameplay evidence is durable");
     assert!(

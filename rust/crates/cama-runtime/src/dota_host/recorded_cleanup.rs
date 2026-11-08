@@ -78,7 +78,7 @@ impl DotaHostWorker {
         port: &dyn DotaHostPort,
         record: &mut DotaSessionRecord,
         state: &mut SessionState,
-        lobby_id: u64,
+        lobby: &HostLobby,
         now: i64,
     ) -> Result<(), String> {
         if state.lobby_cleanup.destroy_attempts >= 3
@@ -97,6 +97,7 @@ impl DotaHostWorker {
         {
             return Ok(());
         }
+        let previous_attempts = state.lobby_cleanup.clone();
         state.lobby_cleanup.destroy_attempts += 1;
         state.lobby_cleanup.first_destroy_at.get_or_insert(now);
         state.lobby_cleanup.last_destroy_at = Some(now);
@@ -106,6 +107,12 @@ impl DotaHostWorker {
             state.lobby_cleanup.destroy_attempts
         ));
         self.save(record, state, now).await?;
-        port.destroy(lobby_id).await
+        if !port.destroy_observed(lobby).await? {
+            // A newer cache revision invalidated the decision before any send.
+            // Do not consume the removal budget for an action we did not take.
+            state.lobby_cleanup = previous_attempts;
+            self.save(record, state, now).await?;
+        }
+        Ok(())
     }
 }

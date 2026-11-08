@@ -184,8 +184,8 @@ owned lobby before gameplay, the host can replace that failed lobby. It
 requires a fresh GC observation of the returned lobby, no active server or
 winner, and no observed gameplay. It saves the old identities, removes only
 that lobby, confirms the account is out of it, then creates a fresh lobby and
-invites the same teams. The pending match and wagers are preserved; betting
-is suspended until fresh hosting observation resumes.
+invites the same teams. The pending match and wagers are preserved, and the
+normal timed betting window is unchanged.
 
 Automatic recovery is limited to **three replacement lobbies per pending
 match**, persisted across restarts. Cleanup sends at most three destroy
@@ -194,6 +194,22 @@ removal. An ambiguous create is never blindly repeated. A stale, foreign,
 still-running, or played lobby cannot authorize recreation. An unavailable
 match-details response (including GC result 2) is polled again without
 restarting a healthy Steam connection.
+
+After gameplay, a return to the lobby continues polling the saved Dota match
+ID for a verified result. Postgame snapshots that omit that ID also use the
+saved identity. Neither case permits a replacement launch or guesses a winner.
+Historical sessions paused only because a played game returned to the lobby
+resume this result reconciliation automatically.
+
+Launch and removal require a fresh snapshot that still matches the authorized
+lobby when the command is sent. Allocation or gameplay evidence blocks another
+launch even when the lifecycle stage still says gathering. Coordinator events
+are applied in receive order; an unreadable lobby payload makes the cache
+unavailable rather than reporting that the account has left the lobby.
+
+For a recorded session whose cleanup retries are exhausted, `/admin dota resume`
+renews the bounded cleanup budget while preserving the recorded result and old
+lobby/match identities. The host stays reserved until removal is confirmed.
 
 New shuffles save an incomplete setup marker before reserving money. Public betting, hosting adoption, and recording reject that marker. A failed financial setup refunds its pending wagers and seed reservations in the same transaction that removes the pending match. A crash during setup is compensated after its five-minute setup lease expires; the recovery worker checks every 30 seconds. A successfully prepared shuffle instead retries missing Discord destinations from saved receipts and stable delivery nonces. An expired interaction confirmation does not undo a published shuffle. Database participant claims prevent overlapping new shuffles across processes. Captain drafts retain their existing durable finalization job; an additional draft setup marker blocks betting, hosting, and recording until the durable financial and publication job completes. An unfinished linked draft job also blocks abort, preserving its recoverable financial plan; `/draft resume` lets an admin retry it before recording or aborting.
 

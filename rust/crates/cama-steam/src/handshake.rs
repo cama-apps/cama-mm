@@ -86,7 +86,7 @@ fn admission_status(message: &CMsgGCClient) -> Result<Option<i32>, DotaSteamErro
 }
 
 #[derive(Debug)]
-struct FromGc(CMsgGCClient);
+pub(crate) struct FromGc(pub(crate) CMsgGCClient);
 
 impl RpcMessageWithKind for FromGc {
     type KindEnum = EMsg;
