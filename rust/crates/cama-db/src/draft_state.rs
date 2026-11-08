@@ -116,7 +116,7 @@ impl DraftStateRepository {
         }
     }
 
-    fn connection(&self) -> Result<rusqlite::Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

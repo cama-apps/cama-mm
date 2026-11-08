@@ -3229,12 +3229,10 @@ fn assign_roles(guild_id: i64, ids: &[i64], rng: &mut fastrand::Rng) -> Vec<Mafi
 fn hero_names(count: usize, rng: &mut fastrand::Rng) -> Vec<String> {
     static HERO_CATALOG: OnceLock<Vec<String>> = OnceLock::new();
     let catalog = HERO_CATALOG.get_or_init(|| {
-        serde_json::from_str::<BTreeMap<String, String>>(include_str!(
-            "../../cama-app/data/heroes.json"
-        ))
-        .unwrap_or_default()
-        .into_values()
-        .collect()
+        cama_domain::hero_catalog::hero_names()
+            .values()
+            .cloned()
+            .collect()
     });
     if catalog.is_empty() {
         return (0..count)
@@ -3528,7 +3526,7 @@ fn phase_ready(
         .filter(|player| {
             player.is_alive
                 && !opted_out.contains(&player.discord_id)
-                && (!night || !matches!(player.role, MafiaRole::Townie | MafiaRole::Jester))
+                && (!night || owes_night_action(player, &actions))
         })
         .all(|player| {
             actions.iter().any(|action| {
@@ -3541,6 +3539,20 @@ fn phase_ready(
                     }
             })
         }))
+}
+
+/// Whether `player`'s role has a night action to submit, given the game's
+/// night actions so far. Townies and Jesters never act at night, and a
+/// Vigilante who has spent their one shot has nothing left to submit.
+fn owes_night_action(player: &MafiaPlayer, night_actions: &[MafiaAction]) -> bool {
+    match player.role {
+        MafiaRole::Townie | MafiaRole::Jester => false,
+        MafiaRole::Vigilante => !night_actions.iter().any(|action| {
+            action.actor_id == player.discord_id
+                && action.action_type == MafiaActionType::VigilanteKill
+        }),
+        _ => true,
+    }
 }
 
 fn missing_players(
@@ -3556,7 +3568,7 @@ fn missing_players(
             player.is_alive
                 && !opted_out.contains(&player.discord_id)
                 && if game.phase == MafiaPhase::Night {
-                    !matches!(player.role, MafiaRole::Townie | MafiaRole::Jester)
+                    owes_night_action(player, &actions)
                         && !actions.iter().any(|action| {
                             action.actor_id == player.discord_id
                                 && action.day_number == game.day_number

@@ -9,7 +9,6 @@ pub const PAID_DIG_COSTS_PER_DAY: [u32; 8] = [3, 5, 10, 20, 40, 60, 80, 100];
 pub const WHEEL_TARGET_EV: f64 = -27.5;
 pub const BANKRUPTCY_PENALTY_GAMES: u32 = 3;
 pub const BANKRUPTCY_PENALTY_RATE_PER_GAME: f64 = 0.05;
-pub const MIN_RESOLUTION_VOTES: u32 = 3;
 
 /// A voice used to guide generated match or betting commentary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,176 +119,13 @@ pub static PERSONAS: [FlavorPersona; 8] = [
     },
 ];
 
-/// Ordered exactly like `services.betting_personas.BETTING_PERSONAS` in Python.
-pub static BETTING_PERSONAS: [FlavorPersona; 8] = [
-    FlavorPersona {
-        key: "sleazy_bookie",
-        name: "Sleazy bookie working the window",
-        system_prompt: "You are a sleazy bookie working a Dota 2 gambling Discord. Slick, transactional, always selling the next bet. Talk odds and 'value', call everyone 'friend' or 'pal', imply you're doing them a favor. Charming, but you always get your cut. Short.",
-        examples: &[
-            "I got Dire at 3-to-1, friend. That's not a tip, that's a gift. Window's closing.",
-            "Smart money's already down. You wanna be smart money, or you wanna watch? Tick tock.",
-            "Listen, between us — that line's about to move. Get in before it does, pal.",
-            "Nobody walks away from my window empty-handed. Except the ones who don't bet.",
-            "One minute. One bet. One regret if you skip it. Your call, friend.",
-        ],
-    },
-    FlavorPersona {
-        key: "casino_pit_boss",
-        name: "Cold casino pit boss",
-        system_prompt: "You are a cold casino pit boss watching the betting floor of a Dota 2 gambling Discord. Detached, all-seeing, faintly menacing. The house always wins and you know it. Note who's in and who's scared. Short, controlled.",
-        examples: &[
-            "The house sees everything. 800 on Dire, pocket change on Radiant. Somebody's about to get educated.",
-            "I've watched a hundred of these. The ones who hesitate at the rail always pay for it.",
-            "Pool's wide open and half this floor is just... watching. The house loves watchers.",
-            "You can feel the odds tightening. So can I. Place it or don't — the house collects either way.",
-            "Sixty seconds on the clock. The floor's quiet. The house is patient.",
-        ],
-    },
-    FlavorPersona {
-        key: "racetrack_caller",
-        name: "Rapid-fire horse-race track announcer",
-        system_prompt: "You are a rapid-fire horse-race track announcer calling the betting pool like a live race. Breathless, present-tense, building to a crescendo. Treat Radiant and Dire like horses 'down the stretch'. ALL CAPS at the finish.",
-        examples: &[
-            "AND DOWN THE STRETCH THEY COME — Dire pulling ahead, Radiant fading, WHO'S GOT LATE MONEY?!",
-            "It's neck and neck at the rail folks, the pool's swinging, GET YOUR WAGERS IN!",
-            "Radiant surging on the outside! Dire holding the line! ONE MINUTE TO POST!",
-            "They're loading the gate — last bets, LAST BETS, the window slams shut at the bell!",
-            "A photo finish in the making and HALF OF YOU HAVEN'T EVEN BET YET — MOVE!",
-        ],
-    },
-    FlavorPersona {
-        key: "loan_shark",
-        name: "Darkly funny loan shark",
-        system_prompt: "You are a loan shark in a Dota 2 gambling Discord. Menacing but darkly funny. Lean on debt, 'arrangements', and what happens to folks who don't pay (or don't bet). Implied threats only, never explicit violence. PG-13. Short.",
-        examples: &[
-            "You're light on this one. Bet now, or we have a little chat about your outstanding balance.",
-            "Funny thing about empty pockets — they fill right up when you back the right team. Or else.",
-            "I'm not saying you HAVE to bet. I'm saying it'd be a real shame if you didn't. Capisce?",
-            "Tick tock. The vig don't sleep, and neither do I. Get your money down.",
-            "Last call. After that, the only action you're getting is a payment plan.",
-        ],
-    },
-    FlavorPersona {
-        key: "degenerate_gambler",
-        name: "Reckless degenerate gambler buddy",
-        system_prompt: "You are a reckless degenerate gambler hyping up your friends in a Dota 2 gambling Discord. Lowercase, manic enthusiasm, terrible financial advice delivered as gospel. 'trust me bro', 'easy money', 'i already went all in'. Internet slang.",
-        examples: &[
-            "bro it's basically free money, i already put my rent on dire, get in get in get in",
-            "you're telling me you're NOT betting? couldn't be me. lock it in king",
-            "one minute left and you're just sitting there? that's crazy work fr",
-            "i've lost everything four times and i'd do it again. that's called conviction. bet with me",
-            "odds are a suggestion. vibes are forever. send it before the window closes",
-        ],
-    },
-    FlavorPersona {
-        key: "carnival_barker",
-        name: "Theatrical carnival barker",
-        system_prompt: "You are a carnival barker hawking the betting pool in a Dota 2 gambling Discord. Theatrical, exclamatory, 'step right up!', promise glory while quietly admitting the odds. Showman energy. Exclamation points.",
-        examples: &[
-            "STEP RIGHT UP! One minute to glory! Everyone's a winner — statistically, almost no one!",
-            "Place your wagers, place your wagers! Fortune favors the bold and bankrupts the rest!",
-            "Behold the Pool of Destiny! Toss in your jopacoin, win untold riches, conditions apply!",
-            "Don't be shy, don't be wise — the window's open, the clock is NOT! Get in, get in!",
-            "Last chance, ladies and gents! When that timer hits zero, the magic is GONE!",
-        ],
-    },
-    FlavorPersona {
-        key: "market_ticker",
-        name: "Wall Street market-ticker voice",
-        system_prompt: "You are a Wall Street trader / market-ticker voice covering the betting pool in a Dota 2 gambling Discord. Treat Radiant and Dire like equities — LONG, SHORT, volume, margin, 'position now'. Financial jargon, urgent close-of-trading energy.",
-        examples: &[
-            "DIRE LONG up 3x on heavy volume, RADIANT shorting hard. Window closes in 60 — position now.",
-            "Liquidity's thin and the spread's juicy. This is a buy signal, people. Don't fade it.",
-            "Market closes at the bell. No after-hours trading on this pool. Get your position on the book.",
-            "Somebody just took a massive position on Dire. Smart money, or a margin call waiting to happen?",
-            "You're sitting in cash with one minute left? Deploy capital or get left behind.",
-        ],
-    },
-    FlavorPersona {
-        key: "televangelist",
-        name: "Gospel-of-fortune televangelist",
-        system_prompt: "You are a televangelist preaching the gospel of the betting pool in a Dota 2 gambling Discord. Grandiose, salvation-through-wagering, 'brothers and sisters', 'tithe thy jopacoin', gently mock the non-bettors as sinners. Mock-reverent. PG-13.",
-        examples: &[
-            "Brothers and sisters, the Pool of Fortune is OPEN. Tithe thy jopacoin and be DELIVERED!",
-            "I see doubters in the congregation. Ye of little balance — place thy faith on Dire and be SAVED!",
-            "The hour is nigh! The window closeth in sixty seconds! Repent thy hesitation and WAGER!",
-            "He who bets not shall inherit nothing! But the bold shall feast at the table of odds!",
-            "Lay thy coin upon the altar, my children. The spirits of variance are LISTENING.",
-        ],
-    },
-];
-
-/// Supplies a valid index for an ordered persona roster.
-pub trait PersonaIndexChooser {
-    fn choose_index(&mut self, upper_bound: usize) -> usize;
-}
-
-impl<F> PersonaIndexChooser for F
-where
-    F: FnMut(usize) -> usize,
-{
-    fn choose_index(&mut self, upper_bound: usize) -> usize {
-        self(upper_bound)
-    }
-}
-
-/// Small dependency-free deterministic chooser for tests and replayable jobs.
-///
-/// This uses SplitMix64. It promises repeatability for a seed, not the same
-/// sequence as Python's Mersenne Twister.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SeededPersonaChooser {
-    state: u64,
-}
-
-impl SeededPersonaChooser {
-    pub const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut value = self.state;
-        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        value ^ (value >> 31)
-    }
-}
-
-impl PersonaIndexChooser for SeededPersonaChooser {
-    fn choose_index(&mut self, upper_bound: usize) -> usize {
-        assert!(upper_bound > 0, "cannot choose from an empty roster");
-        (self.next_u64() % upper_bound as u64) as usize
-    }
-}
-
-pub fn pick_persona(chooser: &mut impl PersonaIndexChooser) -> &'static FlavorPersona {
-    choose_from(&PERSONAS, chooser)
-}
-
-pub fn pick_betting_persona(chooser: &mut impl PersonaIndexChooser) -> &'static FlavorPersona {
-    choose_from(&BETTING_PERSONAS, chooser)
-}
-
-fn choose_from(
-    roster: &'static [FlavorPersona],
-    chooser: &mut impl PersonaIndexChooser,
-) -> &'static FlavorPersona {
-    let index = chooser.choose_index(roster.len());
-    roster
-        .get(index)
-        .unwrap_or_else(|| panic!("persona chooser returned out-of-range index {index}"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use super::{
-        BANKRUPTCY_PENALTY_GAMES, BANKRUPTCY_PENALTY_RATE_PER_GAME, BETTING_PERSONAS,
-        MIN_RESOLUTION_VOTES, PAID_DIG_COSTS_PER_DAY, PERSONAS, SeededPersonaChooser,
-        WHEEL_TARGET_EV, pick_betting_persona, pick_persona,
+        BANKRUPTCY_PENALTY_GAMES, BANKRUPTCY_PENALTY_RATE_PER_GAME, PAID_DIG_COSTS_PER_DAY,
+        PERSONAS, WHEEL_TARGET_EV,
     };
 
     #[test]
@@ -309,50 +145,6 @@ mod tests {
     }
 
     #[test]
-    fn test_prediction_resolution_threshold_pinned() {
-        assert_eq!(MIN_RESOLUTION_VOTES, 3);
-    }
-
-    #[test]
-    fn test_betting_personas_roster_has_eight_distinct_personas() {
-        assert_eq!(BETTING_PERSONAS.len(), 8);
-        assert_eq!(unique_keys(&BETTING_PERSONAS).len(), 8);
-    }
-
-    #[test]
-    fn test_betting_personas_each_persona_is_well_formed() {
-        assert_roster_is_well_formed(&BETTING_PERSONAS);
-    }
-
-    #[test]
-    fn test_betting_personas_pick_returns_a_roster_member() {
-        let persona = pick_betting_persona(&mut SeededPersonaChooser::new(91));
-        assert!(BETTING_PERSONAS.iter().any(|entry| entry == persona));
-    }
-
-    #[test]
-    fn test_betting_personas_pick_is_deterministic_with_seeded_rng() {
-        let mut chooser_a = SeededPersonaChooser::new(7);
-        let mut chooser_b = SeededPersonaChooser::new(7);
-        let sequence_a = (0..20)
-            .map(|_| pick_betting_persona(&mut chooser_a).key)
-            .collect::<Vec<_>>();
-        let sequence_b = (0..20)
-            .map(|_| pick_betting_persona(&mut chooser_b).key)
-            .collect::<Vec<_>>();
-        assert_eq!(sequence_a, sequence_b);
-    }
-
-    #[test]
-    fn test_betting_personas_pick_can_reach_every_roster_entry() {
-        let mut chooser = SeededPersonaChooser::new(0);
-        let seen = (0..500)
-            .map(|_| pick_betting_persona(&mut chooser).key)
-            .collect::<HashSet<_>>();
-        assert_eq!(seen, unique_keys(&BETTING_PERSONAS));
-    }
-
-    #[test]
     fn test_flavor_personas_roster_has_eight_distinct_personas() {
         assert_eq!(PERSONAS.len(), 8);
         assert_eq!(unique_keys(&PERSONAS).len(), 8);
@@ -361,34 +153,6 @@ mod tests {
     #[test]
     fn test_flavor_personas_each_persona_is_well_formed() {
         assert_roster_is_well_formed(&PERSONAS);
-    }
-
-    #[test]
-    fn test_flavor_personas_pick_persona_returns_a_persona_from_the_roster() {
-        let persona = pick_persona(&mut SeededPersonaChooser::new(91));
-        assert!(PERSONAS.iter().any(|entry| entry == persona));
-    }
-
-    #[test]
-    fn test_flavor_personas_pick_persona_is_deterministic_with_seeded_rng() {
-        let mut chooser_a = SeededPersonaChooser::new(42);
-        let mut chooser_b = SeededPersonaChooser::new(42);
-        let sequence_a = (0..20)
-            .map(|_| pick_persona(&mut chooser_a).key)
-            .collect::<Vec<_>>();
-        let sequence_b = (0..20)
-            .map(|_| pick_persona(&mut chooser_b).key)
-            .collect::<Vec<_>>();
-        assert_eq!(sequence_a, sequence_b);
-    }
-
-    #[test]
-    fn test_flavor_personas_pick_persona_can_reach_every_roster_entry() {
-        let mut chooser = SeededPersonaChooser::new(0);
-        let seen = (0..500)
-            .map(|_| pick_persona(&mut chooser).key)
-            .collect::<HashSet<_>>();
-        assert_eq!(seen, unique_keys(&PERSONAS));
     }
 
     fn unique_keys(roster: &[super::FlavorPersona]) -> HashSet<&'static str> {

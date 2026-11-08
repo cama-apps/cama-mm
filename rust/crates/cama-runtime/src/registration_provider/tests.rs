@@ -1914,13 +1914,15 @@ async fn roles_deduplicate_in_order_commit_atomically_and_reply_publicly() {
         "✅ Set your preferred roles to: ⚕️ Hard Support, 🔥 Soft Support, 🛡️ Offlane, 🏹 Mid, ⚔️ Carry"
     );
     drop(captured);
-    assert_eq!(
-        RegistrationRepository::new(database.path())
-            .get_roles(300, Some(42))
-            .expect("read roles")
-            .expect("registered player roles"),
-        ["5", "4", "3", "2", "1"]
-    );
+    let stored: String = Connection::open(database.path())
+        .expect("reopen roles database")
+        .query_row(
+            "SELECT preferred_roles FROM players WHERE discord_id=300 AND guild_id=42",
+            [],
+            |row| row.get(0),
+        )
+        .expect("registered player roles");
+    assert_eq!(stored, r#"["5","4","3","2","1"]"#);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

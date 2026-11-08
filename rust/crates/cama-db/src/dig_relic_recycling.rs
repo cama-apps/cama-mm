@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value;
-use rusqlite::{Connection, TransactionBehavior, params, params_from_iter};
+use rusqlite::{TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -64,7 +64,7 @@ impl DigRelicRecyclingRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

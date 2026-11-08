@@ -42,7 +42,7 @@ impl MatchHandler {
             let Some(player_id) = player.discord_id else {
                 continue;
             };
-            let Some(last_match) = last_match_dates.get(&player_id).and_then(sql_datetime) else {
+            let Some(last_match) = last_match_dates.get(&player_id).copied().flatten() else {
                 continue;
             };
             let days_since = (now - last_match).num_days().max(0);

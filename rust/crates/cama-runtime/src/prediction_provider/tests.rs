@@ -186,8 +186,22 @@ impl PredictionCommandDiscordPort for FakeCommandDiscord {
         Ok(self.is_gamba.load(Ordering::SeqCst))
     }
 
+    /// Only the trader has a readable name; every other mention resolves to
+    /// the placeholder, as the production lookup does for unknown players.
     async fn prediction_display_text(&self, _guild_id: i64, text: &str) -> Result<String, String> {
-        Ok(text.replace("<@100>", "Trader"))
+        Ok(
+            cama_app::predictions::resolve_and_neutralize_discord_mentions(
+                text,
+                |id| {
+                    Some(if id == TRADER {
+                        "Trader".to_owned()
+                    } else {
+                        cama_domain::discord_content::UNKNOWN_PLAYER.to_owned()
+                    })
+                },
+                |_| Some("Role".to_owned()),
+            ),
+        )
     }
 
     async fn create_prediction_market_surface(
@@ -316,6 +330,25 @@ impl PredictionDiscordPort for FakeMarketDiscord {
             .expect("thread messages")
             .push((thread_id, message));
         Ok(())
+    }
+
+    async fn prediction_market_text(&self, _guild_id: i64, text: &str) -> String {
+        text.replace("<@100>", "Trader")
+    }
+
+    async fn prediction_player_names(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> crate::discord_transport::GuildPlayerNameDirectory {
+        crate::discord_transport::GuildPlayerNameDirectory::default()
+    }
+
+    async fn prediction_thread_status(
+        &self,
+        _thread_id: i64,
+    ) -> crate::discord_transport::DiscordDestinationStatus {
+        crate::discord_transport::DiscordDestinationStatus::Unknown
     }
 }
 
@@ -788,10 +821,15 @@ async fn create_persists_only_real_surface_ids_and_installs_exact_persistent_but
         DiscordAllowedMentions::Default
     );
     assert!(announcement.response.content.contains("opened by <@99>"));
-    assert_eq!(thread_name, "Market #1: Will <@100> win this market?");
+    assert_eq!(thread_name, "Market #1: Will @Trader win this market?");
     assert_eq!(
         market_message.allowed_mentions,
         DiscordAllowedMentions::None
+    );
+    assert_eq!(
+        market_message.response.embeds[0].description.as_deref(),
+        Some("\"Will @Trader win this market?\""),
+        "the market text shows display names, not mention markup"
     );
     assert_eq!(market_message.response.components.len(), 1);
     assert_eq!(
@@ -1919,4 +1957,120 @@ fn test_event_ladder_spread_is_clamped_without_changing_depth() {
         ]
     );
     assert_eq!(adjusted_spread(2, -999, 1), 1);
+}
+
+/// Every player-visible string a response carries.
+fn rendered_text(response: &InteractionResponse) -> Vec<String> {
+    let mut text = vec![response.content.clone()];
+    for embed in &response.embeds {
+        text.extend(embed.title.clone());
+        text.extend(embed.description.clone());
+        text.extend(embed.footer.clone());
+        for field in &embed.fields {
+            text.push(field.name.clone());
+            text.push(field.value.clone());
+        }
+    }
+    text
+}
+
+const UNNAMED_PLAYER: i64 = 987_654_321;
+
+#[tokio::test]
+async fn market_surfaces_render_question_mentions_as_names_not_markup_or_ids() {
+    let fixture = Fixture::migrated();
+    fixture.player(TRADER, 1_000);
+    let question = format!("Will <@{TRADER}> beat <@!{UNNAMED_PLAYER}> for <@&5>?");
+    let open_id = fixture.market(&question);
+    let resolved_id = fixture.market(&question);
+    let cancelled_id = fixture.market(&question);
+    let connection = Connection::open(&fixture.path).expect("open prediction fixture");
+    connection
+        .execute(
+            "UPDATE predictions SET status='resolved', outcome='yes' WHERE prediction_id=?1",
+            [resolved_id],
+        )
+        .expect("resolve fixture market");
+    connection
+        .execute(
+            "UPDATE predictions SET status='cancelled' WHERE prediction_id=?1",
+            [cancelled_id],
+        )
+        .expect("cancel fixture market");
+    PredictionRepository::new(&fixture.path)
+        .buy_contracts_atomic_with_max(open_id, TRADER, ContractSide::Yes, 2, 100)
+        .expect("buy visible position");
+    let registry = fixture.registry();
+    let handler = registry
+        .command_handler("predict")
+        .expect("predict command handler");
+
+    let mut surfaces = Vec::new();
+    for (subcommand, options, user_id) in [
+        (
+            "list",
+            vec![InteractionOption {
+                name: "show_all".to_owned(),
+                value: InteractionValue::Boolean(true),
+            }],
+            TRADER,
+        ),
+        ("view", vec![integer("prediction_id", resolved_id)], TRADER),
+        ("view", vec![integer("prediction_id", cancelled_id)], TRADER),
+        ("mine", vec![], TRADER),
+        ("refresh_status", vec![], ADMIN),
+    ] {
+        let responder = Arc::new(CapturingResponder::default());
+        handler
+            .handle(
+                command_request(subcommand, options, user_id, None),
+                responder.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("prediction {subcommand}: {error:?}"));
+        let followup = responder.snapshot().followups[0].clone();
+        let text = rendered_text(&followup).join("\n");
+        assert!(text.contains("@Trader"), "{subcommand}: {text}");
+        surfaces.push((subcommand, text));
+    }
+
+    let list = &surfaces[0].1;
+    assert!(list.contains("RESOLVED YES"), "{list}");
+    assert!(list.contains("CANCELLED"), "{list}");
+    assert!(
+        surfaces[1].1.contains("@Unknown player"),
+        "{}",
+        surfaces[1].1
+    );
+    for (subcommand, text) in &surfaces {
+        assert!(
+            !text.contains("<@"),
+            "{subcommand} shows mention markup: {text}"
+        );
+        assert!(
+            !text.contains(&UNNAMED_PLAYER.to_string()),
+            "{subcommand} shows a Discord ID: {text}"
+        );
+    }
+}
+
+#[test]
+fn market_thread_names_stay_within_discords_limit() {
+    assert_eq!(
+        market_thread_name(1, "Will @Trader win this market?"),
+        "Market #1: Will @Trader win this market?"
+    );
+    for question in [
+        "🎲".repeat(80),
+        "x".repeat(200),
+        "@Unknown player ".repeat(10),
+    ] {
+        let name = market_thread_name(i64::MAX, &question);
+        assert!(name.starts_with(&format!("Market #{}: ", i64::MAX)));
+        assert!(
+            name.encode_utf16().count() <= 100,
+            "{} UTF-16 units: {name}",
+            name.encode_utf16().count()
+        );
+    }
 }

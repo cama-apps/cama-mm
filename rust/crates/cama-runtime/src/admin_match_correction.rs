@@ -36,6 +36,7 @@ use crate::application_config::ApplicationConfig;
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::ids::blocking;
 
 const CLAIM_STALE_AFTER_SECONDS: i64 = 300;
 const RECOVERY_OBSERVER_NAME: &str = "admin-match-correction-recovery";
@@ -505,11 +506,15 @@ impl GatewayEventObserver for AdminMatchCorrectionRecoveryObserver {
                 .copied()
                 .collect::<BTreeSet<_>>();
             if !unreleased.is_empty() {
-                if let Err(error) = self
-                    .control
-                    .repository
-                    .release_match_correction_leases_for_startup_guilds(&unreleased)
-                {
+                let repository = self.control.repository.clone();
+                let guilds = unreleased.clone();
+                let released_leases = blocking("match correction lease release", move || {
+                    repository
+                        .release_match_correction_leases_for_startup_guilds(&guilds)
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+                if let Err(error) = released_leases {
                     return ReadyRecoveryReport {
                         observer: RECOVERY_OBSERVER_NAME,
                         guilds_attempted: 0,
@@ -525,8 +530,19 @@ impl GatewayEventObserver for AdminMatchCorrectionRecoveryObserver {
                 released.extend(unreleased);
             }
         }
-        let claims = match self.control.repository.list_recoverable_match_corrections() {
-            Ok(claims) => claims,
+        let repository = self.control.repository.clone();
+        let recoverable = blocking("match correction recovery scan", move || {
+            let claims = repository
+                .list_recoverable_match_corrections()
+                .map_err(|error| error.to_string())?;
+            let jobs = repository
+                .list_pending_openskill_replays()
+                .map_err(|error| error.to_string())?;
+            Ok((claims, jobs))
+        })
+        .await;
+        let (claims, jobs) = match recoverable {
+            Ok(recoverable) => recoverable,
             Err(error) => {
                 return ReadyRecoveryReport {
                     observer: RECOVERY_OBSERVER_NAME,
@@ -536,23 +552,7 @@ impl GatewayEventObserver for AdminMatchCorrectionRecoveryObserver {
                     members_refreshed: 0,
                     failures: vec![ReadyRecoveryFailure {
                         guild_id: 0,
-                        message: error.to_string(),
-                    }],
-                };
-            }
-        };
-        let jobs = match self.control.repository.list_pending_openskill_replays() {
-            Ok(jobs) => jobs,
-            Err(error) => {
-                return ReadyRecoveryReport {
-                    observer: RECOVERY_OBSERVER_NAME,
-                    guilds_attempted: 0,
-                    guilds_refreshed: 0,
-                    guilds_superseded: 0,
-                    members_refreshed: 0,
-                    failures: vec![ReadyRecoveryFailure {
-                        guild_id: 0,
-                        message: error.to_string(),
+                        message: error,
                     }],
                 };
             }
@@ -585,16 +585,19 @@ impl GatewayEventObserver for AdminMatchCorrectionRecoveryObserver {
             let correct_result = if let Some(side) = requested_side {
                 side
             } else {
-                match self
-                    .control
-                    .repository
-                    .current_winner(match_id, Some(guild_id))
-                {
+                let repository = self.control.repository.clone();
+                let winner = blocking("match correction winner read", move || {
+                    repository
+                        .current_winner(match_id, Some(guild_id))
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+                match winner {
                     Ok(winner) => runtime_side(winner),
                     Err(error) => {
                         report.failures.push(ReadyRecoveryFailure {
                             guild_id: u64::try_from(guild_id).unwrap_or_default(),
-                            message: error.to_string(),
+                            message: error,
                         });
                         continue;
                     }

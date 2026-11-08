@@ -166,21 +166,12 @@ fn decode(bytes: &[u8]) -> Decoded {
         }
         cursor += length + 12;
     }
-    let mut compressed = 2;
     let mut filtered = Vec::new();
-    loop {
-        let final_block = idat[compressed] & 1 == 1;
-        assert_eq!(idat[compressed] & 0b110, 0);
-        compressed += 1;
-        let length =
-            u16::from_le_bytes(idat[compressed..compressed + 2].try_into().unwrap()) as usize;
-        compressed += 4;
-        filtered.extend_from_slice(&idat[compressed..compressed + length]);
-        compressed += length;
-        if final_block {
-            break;
-        }
-    }
+    std::io::Read::read_to_end(
+        &mut flate2::read::ZlibDecoder::new(idat.as_slice()),
+        &mut filtered,
+    )
+    .unwrap();
     let stride = width * 4 + 1;
     assert_eq!(filtered.len(), stride * height);
     let mut rgba = Vec::with_capacity(width * height * 4);

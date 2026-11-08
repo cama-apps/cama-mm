@@ -244,6 +244,17 @@ impl DigWeatherWorker {
         .map_err(|error| format!("Dig weather outbox stamp task failed: {error}"))?
     }
 
+    async fn skip_stale_broadcasts(&self, today: String) -> Result<usize, String> {
+        let repository = self.repository.clone();
+        tokio::task::spawn_blocking(move || {
+            repository
+                .skip_stale_broadcasts(&today)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("Dig weather outbox retirement task failed: {error}"))?
+    }
+
     async fn channel_for_guild(
         &self,
         guild_id: i64,
@@ -289,7 +300,19 @@ impl DigWeatherWorker {
         Ok(complete)
     }
 
-    async fn drain_pending(&self, context: &mut WorkerContext) -> Result<(), String> {
+    /// Deliver today's queued forecasts. A forecast for another day is stale
+    /// news: it is retired rather than announced late, so a guild that gains
+    /// a channel after days without one gets only today's weather.
+    async fn drain_pending(&self, context: &mut WorkerContext, today: &str) -> Result<(), String> {
+        match self.skip_stale_broadcasts(today.to_owned()).await {
+            Ok(0) => {}
+            Ok(skipped) => info!(
+                skipped,
+                game_date = %today,
+                "retired Dig weather broadcasts that missed their day"
+            ),
+            Err(error) => warn!(%error, "failed to retire stale Dig weather broadcasts"),
+        }
         let pending = self.pending_broadcasts().await?;
         if pending.is_empty() {
             return Ok(());
@@ -310,9 +333,22 @@ impl DigWeatherWorker {
             if context.shutdown_requested() {
                 return Ok(());
             }
-            if !live_guilds.contains(&delivery.guild_id) {
+            if delivery.game_date != today || !live_guilds.contains(&delivery.guild_id) {
                 continue;
             }
+            // Resolve the cached channel first: a guild without one must not
+            // pay for a forecast write transaction on every wake.
+            let Some(channel_id) = self
+                .channel_for_guild(delivery.guild_id, &fallback_channels)
+                .await
+            else {
+                debug!(
+                    guild_id = delivery.guild_id,
+                    game_date = %delivery.game_date,
+                    "no Dig weather broadcast channel found"
+                );
+                continue;
+            };
             let weather = match self
                 .ensure_weather(
                     delivery.guild_id,
@@ -331,17 +367,6 @@ impl DigWeatherWorker {
                     );
                     continue;
                 }
-            };
-            let Some(channel_id) = self
-                .channel_for_guild(delivery.guild_id, &fallback_channels)
-                .await
-            else {
-                debug!(
-                    guild_id = delivery.guild_id,
-                    game_date = %delivery.game_date,
-                    "no Dig weather broadcast channel found"
-                );
-                continue;
             };
 
             let result = tokio::select! {
@@ -394,7 +419,7 @@ impl DigWeatherWorker {
         context: &mut WorkerContext,
     ) -> Result<(), String> {
         self.queue_rollover(game_date).await?;
-        self.drain_pending(context).await
+        self.drain_pending(context, game_date).await
     }
 
     async fn poll_once(
@@ -415,10 +440,10 @@ impl DigWeatherWorker {
                 }
             };
             if queue_complete && !context.shutdown_requested() {
-                *last_weather_date = today;
+                last_weather_date.clone_from(&today);
             }
         }
-        if let Err(error) = self.drain_pending(context).await {
+        if let Err(error) = self.drain_pending(context, &today).await {
             warn!(%error, "failed to drain queued Dig weather broadcasts");
         }
         Ok(())

@@ -391,7 +391,7 @@ impl PetRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -618,7 +618,7 @@ impl PetRepository {
             return Ok(Vec::new());
         }
         query_pets(
-            &self.connection()?,
+            &*self.connection()?,
             &format!(
                 "SELECT {PET_COLUMNS} FROM pets
                  WHERE discord_id=?1 AND guild_id=?2 AND died_at IS NOT NULL
@@ -631,7 +631,7 @@ impl PetRepository {
     /// All current and historical pets in one guild, including stabled pets.
     pub fn get_welfare_pets(&self, guild_id: Option<i64>) -> Result<Vec<Pet>, PetRepositoryError> {
         query_pets(
-            &self.connection()?,
+            &*self.connection()?,
             &format!("SELECT {PET_COLUMNS} FROM pets WHERE guild_id=?1 ORDER BY pet_id"),
             params![Self::normalize_guild_id(guild_id)],
         )
@@ -646,7 +646,7 @@ impl PetRepository {
             return Ok(Vec::new());
         }
         query_pets(
-            &self.connection()?,
+            &*self.connection()?,
             &format!(
                 "SELECT {PET_COLUMNS} FROM pets
                  WHERE guild_id=?1 AND died_at IS NULL AND is_active = 1
@@ -677,7 +677,7 @@ impl PetRepository {
         );
         let mut bindings = vec![Value::Integer(Self::normalize_guild_id(guild_id))];
         bindings.extend(unique.into_iter().map(Value::Integer));
-        query_pets(&self.connection()?, &sql, params_from_iter(bindings))
+        query_pets(&*self.connection()?, &sql, params_from_iter(bindings))
     }
 
     pub fn get_supplies(
@@ -854,7 +854,7 @@ impl PetRepository {
         guild_id: Option<i64>,
     ) -> Result<Vec<Pet>, PetRepositoryError> {
         query_pets(
-            &self.connection()?,
+            &*self.connection()?,
             &format!(
                 "SELECT {PET_COLUMNS} FROM pets
                  WHERE discord_id=?1 AND guild_id=?2 AND died_at IS NULL

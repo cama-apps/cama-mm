@@ -158,7 +158,7 @@ impl DotaSpectatorRepository {
     ) -> Result<Option<DotaSpectatorRecord>, DotaSpectatorRepositoryError> {
         validate_identity(guild_id, pending_match_id)?;
         query_record(
-            &open_runtime_connection(&self.path)?,
+            &*open_runtime_connection(&self.path)?,
             guild_id,
             pending_match_id,
         )

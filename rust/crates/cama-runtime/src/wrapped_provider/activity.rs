@@ -12,10 +12,11 @@ use cama_app::wrapped_media::{WrappedLayout, WrappedRow, WrappedTheme};
 use cama_app::wrapped_story::chapters::{
     CardArt, CardMood, CardStyle, ChapterCard, DigContext, PersonaActivity, PersonaSignal,
     QueueStyle, dig_cards, dig_headline_number, gamba_cards, mafia_cards, persona_card, pet_cards,
-    signed, story_seed, thousands,
+    story_seed,
 };
 use cama_db::gambling_stats_repository::GamblingStatsPort;
 use cama_db::wrapped_activity::YearWindow;
+use cama_domain::formatting::{format_grouped, format_grouped_signed};
 use cama_domain::wrapped_activity::{
     DigYear, GambaYear, GambleEvent, GambleKind, MafiaYear, PetYear,
 };
@@ -387,7 +388,10 @@ pub(super) fn persona_signals(
             } else {
                 50.0
             },
-            evidence: (thousands(personal.games_played), "games played".to_owned()),
+            evidence: (
+                format_grouped(personal.games_played),
+                "games played".to_owned(),
+            ),
         });
     }
     let dig = &activity.dig;
@@ -406,7 +410,7 @@ pub(super) fn persona_signals(
         signals.push(PersonaSignal {
             activity: PersonaActivity::Pets,
             strength: strength(activity.pets.rank),
-            evidence: (thousands(meals), "pet meals served".to_owned()),
+            evidence: (format_grouped(meals), "pet meals served".to_owned()),
         });
     }
     let events = &activity.gamba.events;
@@ -419,7 +423,10 @@ pub(super) fn persona_signals(
                 PersonaActivity::GambaDown
             },
             strength: strength(activity.gamba.rank),
-            evidence: (format!("{} JC", signed(net)), "from gamba".to_owned()),
+            evidence: (
+                format!("{} JC", format_grouped_signed(net)),
+                "from gamba".to_owned(),
+            ),
         });
     }
     let mafia = &activity.mafia;
@@ -431,7 +438,7 @@ pub(super) fn persona_signals(
                 PersonaActivity::MafiaTown
             },
             strength: strength(mafia.rank),
-            evidence: (thousands(mafia.games), "Mafia games".to_owned()),
+            evidence: (format_grouped(mafia.games), "Mafia games".to_owned()),
         });
     }
     signals
@@ -454,7 +461,10 @@ pub(super) fn recap_numbers(
 ) -> Vec<String> {
     let mut numbers = Vec::new();
     if let Some(personal) = personal {
-        numbers.push(format!("{}|games played", thousands(personal.games_played)));
+        numbers.push(format!(
+            "{}|games played",
+            format_grouped(personal.games_played)
+        ));
     }
     if let Some(time) = playtime {
         numbers.push(format!("{time}|in recorded matches"));
@@ -470,14 +480,17 @@ pub(super) fn recap_numbers(
             .iter()
             .map(|event| event.profit)
             .sum::<i64>();
-        numbers.push(format!("{} JC|from gamba", signed(net)));
+        numbers.push(format!("{} JC|from gamba", format_grouped_signed(net)));
     }
     if activity.mafia.games >= 2 {
-        numbers.push(format!("{}|Mafia games", thousands(activity.mafia.games)));
+        numbers.push(format!(
+            "{}|Mafia games",
+            format_grouped(activity.mafia.games)
+        ));
     }
     let meals = activity.pets.meals();
     if meals >= 5 {
-        numbers.push(format!("{}|pet meals", thousands(meals)));
+        numbers.push(format!("{}|pet meals", format_grouped(meals)));
     }
     numbers.truncate(5);
     numbers

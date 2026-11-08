@@ -16,12 +16,13 @@ use cama_domain::pet_evolution::{PetCalling, PetInstinct};
 use flate2::read::ZlibDecoder;
 use gif::{ColorOutput, DecodeOptions};
 
+use crate::png_encoder::PNG_SIGNATURE;
+
 pub const CARD_WIDTH: usize = 512;
 pub const CARD_HEIGHT: usize = 288;
 pub const VERSUS_WIDTH: usize = CARD_WIDTH * 2;
 
 const FLOOR_Y: i32 = 244;
-const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const MAX_AUTHORED_ASSET_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_AUTHORED_PIXELS: usize = 4_096 * 4_096;
 
@@ -1787,8 +1788,7 @@ impl PreparedPetFile {
 
 /// Byte budget for rendered pet images.
 ///
-/// Cards are stored as uncompressed PNG, so each entry is roughly 0.6-1.2 MB.
-/// Several keys include a pet's name or a duel pairing, so the key space is
+/// Each entry is one encoded card PNG. Several keys include a pet's name or a duel pairing, so the key space is
 /// unbounded in a long-lived worker and the cache has to be capped.
 const PET_BYTE_CACHE_BUDGET: usize = 32 * 1024 * 1024;
 
@@ -2294,7 +2294,7 @@ pub fn inspect_png(bytes: &[u8]) -> Result<PngInfo, &'static str> {
         let mut checksum = Vec::with_capacity(4 + length);
         checksum.extend_from_slice(kind);
         checksum.extend_from_slice(data);
-        if crc32(&checksum) != expected {
+        if crate::png_encoder::crc32(&checksum) != expected {
             return Err("invalid PNG chunk CRC");
         }
         match kind {
@@ -2325,73 +2325,13 @@ pub fn inspect_png(bytes: &[u8]) -> Result<PngInfo, &'static str> {
 }
 
 fn encode_png(image: &RasterImage) -> Vec<u8> {
-    let mut png = Vec::new();
-    png.extend_from_slice(PNG_SIGNATURE);
-    let mut header = Vec::with_capacity(13);
-    header.extend_from_slice(&(image.width as u32).to_be_bytes());
-    header.extend_from_slice(&(image.height as u32).to_be_bytes());
-    header.extend_from_slice(&[8, 6, 0, 0, 0]);
-    append_png_chunk(&mut png, b"IHDR", &header);
-
-    let row_bytes = image.width * 4;
-    let mut filtered = Vec::with_capacity((row_bytes + 1) * image.height);
-    for row in image.pixels.chunks_exact(row_bytes) {
-        filtered.push(0);
-        filtered.extend_from_slice(row);
-    }
-    let mut zlib = Vec::with_capacity(filtered.len() + filtered.len() / 65_535 * 5 + 16);
-    zlib.extend_from_slice(&[0x78, 0x01]);
-    let blocks = filtered.chunks(65_535).collect::<Vec<_>>();
-    for (index, block) in blocks.iter().enumerate() {
-        zlib.push(u8::from(index + 1 == blocks.len()));
-        let length = u16::try_from(block.len()).expect("stored DEFLATE block length");
-        zlib.extend_from_slice(&length.to_le_bytes());
-        zlib.extend_from_slice(&(!length).to_le_bytes());
-        zlib.extend_from_slice(block);
-    }
-    zlib.extend_from_slice(&adler32(&filtered).to_be_bytes());
-    append_png_chunk(&mut png, b"IDAT", &zlib);
-    append_png_chunk(&mut png, b"IEND", &[]);
-    png
-}
-
-fn append_png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    output.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    output.extend_from_slice(kind);
-    output.extend_from_slice(data);
-    let mut checksum = Vec::with_capacity(4 + data.len());
-    checksum.extend_from_slice(kind);
-    checksum.extend_from_slice(data);
-    output.extend_from_slice(&crc32(&checksum).to_be_bytes());
+    crate::png_encoder::encode_rgba_png(image.width, image.height, &image.pixels)
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_be_bytes(
         bytes.get(offset..offset + 4)?.try_into().ok()?,
     ))
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffff_u32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
-}
-
-fn adler32(bytes: &[u8]) -> u32 {
-    const MODULUS: u32 = 65_521;
-    let mut a = 1_u32;
-    let mut b = 0_u32;
-    for byte in bytes {
-        a = (a + u32::from(*byte)) % MODULUS;
-        b = (b + a) % MODULUS;
-    }
-    (b << 16) | a
 }
 
 fn stable_signature(value: &str) -> u64 {

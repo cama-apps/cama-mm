@@ -49,7 +49,7 @@ use crate::discord_transport::{
 use crate::gamba_guild_source::GambaGuildSource;
 use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, string_option};
-use crate::prediction_workers::PredictionDiscordPort;
+use crate::prediction_workers::{PredictionDiscordPort, unresolved_prediction_text};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionAcknowledgementPolicy, InteractionActionRow, InteractionAttachment,
@@ -1103,10 +1103,9 @@ impl PredictionInteractionHandler {
             "📈 **New market #{prediction_id}** opened by <@{creator_id}>\n\
                  \"{question}\" — starting at YES {initial_fair}%"
         )));
-        let thread_name = format!(
-            "Market #{prediction_id}: {}",
-            question.chars().take(60).collect::<String>()
-        );
+        // Thread names are plain text: Discord never renders mentions there.
+        let thread_name =
+            market_thread_name(prediction_id, &self.display_text(guild_id, question).await);
         let surface = self
             .command_discord
             .create_prediction_market_surface(
@@ -1191,29 +1190,29 @@ impl PredictionInteractionHandler {
             .await?
             .ok_or_else(|| "Prediction not found.".to_owned())?;
         let mut response = InteractionResponse::message("");
+        let question = self.display_question(&snapshot.market).await;
         match snapshot.market.status.as_str() {
-            "resolved" => response = response.embed(resolved_embed(&snapshot.market)),
-            "cancelled" => response = response.embed(cancelled_embed(&snapshot.market)),
+            "resolved" => response = response.embed(resolved_embed(&snapshot.market, &question)),
+            "cancelled" => response = response.embed(cancelled_embed(&snapshot.market, &question)),
             _ => {
                 let recent_trade_names = self
                     .render_trade_names(snapshot.market.guild_id, &snapshot.recent_trades)
                     .await;
-                let chart_title = self
-                    .command_discord
-                    .prediction_display_text(snapshot.market.guild_id, &snapshot.market.question)
-                    .await
-                    .unwrap_or_else(|_| snapshot.market.question.clone());
-                let chart = draw_prediction_market_chart(
+                let chart = render_market_chart(
                     prediction_id,
-                    Some(&chart_title),
-                    &history,
+                    question.clone(),
+                    history,
                     snapshot.market.created_at,
-                    now_seconds(),
                 )
-                .into_inner();
+                .await?;
                 let filename = format!("predict_{prediction_id}.png");
                 response = response
-                    .embed(self.open_market_embed(&snapshot, Some(&filename), &recent_trade_names))
+                    .embed(self.open_market_embed(
+                        &snapshot,
+                        &question,
+                        Some(&filename),
+                        &recent_trade_names,
+                    ))
                     .attachment(InteractionAttachment::bytes(filename, chart));
                 if persistent_buttons {
                     response = response.action_row(persistent_market_buttons());
@@ -1228,9 +1227,24 @@ impl PredictionInteractionHandler {
         })
     }
 
+    /// The market question with mentions rendered as readable names.
+    async fn display_question(&self, market: &Market) -> String {
+        self.display_text(market.guild_id, &market.question).await
+    }
+
+    /// Prediction text with mentions rendered as readable names, never as
+    /// IDs or mention markup; `Unknown player` when Discord cannot be asked.
+    async fn display_text(&self, guild_id: i64, text: &str) -> String {
+        self.command_discord
+            .prediction_display_text(guild_id, text)
+            .await
+            .unwrap_or_else(|_| unresolved_prediction_text(text))
+    }
+
     fn open_market_embed(
         &self,
         snapshot: &MarketSnapshot,
+        question: &str,
         chart_filename: Option<&str>,
         recent_trade_names: &BTreeMap<i64, String>,
     ) -> InteractionEmbed {
@@ -1239,7 +1253,7 @@ impl PredictionInteractionHandler {
             .current_price
             .map_or_else(|| "?".to_owned(), |value| format!("{value}%"));
         let mut embed = InteractionEmbed::titled(format!("📈 Market #{}", market.prediction_id))
-            .description(format!("\"{}\"", market.question))
+            .description(format!("\"{question}\""))
             .color(0x3498DB)
             .field(
                 "Current",
@@ -1566,7 +1580,8 @@ impl PredictionInteractionHandler {
         let open_quota = FIELD_CAP - resolved_quota - cancelled_quota;
         let mut open_rendered = 0;
         for summary in open.iter().take(open_quota) {
-            let (name, value) = market_list_field(&summary.market, false);
+            let question = self.display_question(&summary.market).await;
+            let (name, value) = market_list_field(&summary.market, &question, false);
             let (next, added) = embed.field_within_budget(name, value, false);
             embed = next;
             if !added {
@@ -1583,9 +1598,10 @@ impl PredictionInteractionHandler {
                 .as_deref()
                 .unwrap_or("?")
                 .to_ascii_uppercase();
+            let question = self.display_question(market).await;
             let (next, added) = embed.field_within_budget(
                 format!("📈 #{}  ·  RESOLVED {outcome}", market.prediction_id),
-                format!("\"{}\"", truncate_field(&market.question, 200)),
+                format!("\"{}\"", truncate_field(&question, 200)),
                 false,
             );
             embed = next;
@@ -1595,9 +1611,10 @@ impl PredictionInteractionHandler {
             resolved_rendered += 1;
         }
         for market in cancelled.iter().take(cancelled_quota) {
+            let question = self.display_question(market).await;
             let (next, added) = embed.field_within_budget(
                 format!("📈 #{}  ·  CANCELLED", market.prediction_id),
-                format!("\"{}\"", truncate_field(&market.question, 200)),
+                format!("\"{}\"", truncate_field(&question, 200)),
                 false,
             );
             embed = next;
@@ -1682,9 +1699,14 @@ impl PredictionInteractionHandler {
         let mut total_cost = 0_i64;
         let mut total_mark = 0_i64;
         for summary in positions {
+            // Code blocks show mention markup literally, so render names.
+            let question = self
+                .display_text(guild_id.unwrap_or_default(), &summary.question)
+                .await;
             append_position_rows(
                 &mut rows,
                 &summary,
+                &question,
                 self.config.contract_value,
                 &mut total_cost,
                 &mut total_mark,
@@ -1752,10 +1774,11 @@ impl PredictionInteractionHandler {
                     },
                 )
             };
+            let question = self.display_question(&market).await;
             rows.push(format!(
                 "{:>4}  {:<32}  {:>14}  {:>16}",
                 market.prediction_id,
-                truncate_field(&market.question, 30),
+                truncate_field(&question, 30),
                 last_text,
                 next_text
             ));
@@ -2164,11 +2187,7 @@ impl PredictionInteractionHandler {
         else {
             return Ok(());
         };
-        let display_question = self
-            .command_discord
-            .prediction_display_text(market.guild_id, &market.question)
-            .await
-            .unwrap_or_else(|_| market.question.clone());
+        let display_question = self.display_question(&market).await;
         let taxable = self.vanity_tax.taxable_ids(market.guild_id);
         let repository = self.predictions.clone();
         let resolutions = self.resolutions.clone();
@@ -2305,21 +2324,10 @@ impl PredictionInteractionHandler {
             .load_market_display(prediction_id, None)
             .await?
             .ok_or_else(|| "Prediction not found.".to_owned())?;
-        let title = self
-            .command_discord
-            .prediction_display_text(snapshot.market.guild_id, &snapshot.market.question)
-            .await
-            .unwrap_or(snapshot.market.question);
+        let title = self.display_question(&snapshot.market).await;
         Ok(InteractionAttachment::bytes(
             format!("predict_{prediction_id}.png"),
-            draw_prediction_market_chart(
-                prediction_id,
-                Some(&title),
-                &history,
-                snapshot.market.created_at,
-                now_seconds(),
-            )
-            .into_inner(),
+            render_market_chart(prediction_id, title, history, snapshot.market.created_at).await?,
         ))
     }
 
@@ -2532,6 +2540,27 @@ where
     .await
 }
 
+/// Rasterize a market chart PNG on the blocking pool; it is CPU work that
+/// must not run on the async worker handling a trade or command.
+async fn render_market_chart(
+    prediction_id: i64,
+    title: String,
+    history: Vec<(i64, i64)>,
+    created_at: i64,
+) -> Result<Vec<u8>, String> {
+    crate::ids::blocking("render prediction market chart", move || {
+        Ok(draw_prediction_market_chart(
+            prediction_id,
+            Some(&title),
+            &history,
+            created_at,
+            now_seconds(),
+        )
+        .into_inner())
+    })
+    .await
+}
+
 async fn respond_ephemeral(
     responder: &Arc<dyn InteractionResponder>,
     content: impl Into<String>,
@@ -2629,21 +2658,37 @@ fn persistent_market_buttons() -> InteractionActionRow {
     ])
 }
 
-fn resolved_embed(market: &Market) -> InteractionEmbed {
+/// Discord's thread-name limit, counted in UTF-16 code units.
+const THREAD_NAME_MAX_UNITS: usize = 100;
+
+/// `Market #N: <question>` from the display question, cut to the first 60
+/// characters and never past Discord's thread-name limit.
+fn market_thread_name(prediction_id: i64, display_question: &str) -> String {
+    let mut name = format!(
+        "Market #{prediction_id}: {}",
+        display_question.chars().take(60).collect::<String>()
+    );
+    while name.encode_utf16().count() > THREAD_NAME_MAX_UNITS {
+        name.pop();
+    }
+    name
+}
+
+fn resolved_embed(market: &Market, question: &str) -> InteractionEmbed {
     let outcome = market
         .outcome
         .as_deref()
         .unwrap_or("?")
         .to_ascii_uppercase();
     InteractionEmbed::titled(format!("📈 Market #{}", market.prediction_id))
-        .description(format!("\"{}\"", market.question))
+        .description(format!("\"{question}\""))
         .color(if outcome == "YES" { 0x2ECC71 } else { 0xE74C3C })
         .field("Outcome", format!("**{outcome}**"), false)
 }
 
-fn cancelled_embed(market: &Market) -> InteractionEmbed {
+fn cancelled_embed(market: &Market, question: &str) -> InteractionEmbed {
     InteractionEmbed::titled(format!("📈 Market #{}", market.prediction_id))
-        .description(format!("\"{}\"", market.question))
+        .description(format!("\"{question}\""))
         .color(0x95A5A6)
         .field("Status", "**CANCELLED** — cost basis refunded.", false)
 }
@@ -2718,7 +2763,7 @@ pub(super) fn ladder_body(book: &Book) -> String {
     format!("```ansi\n{}\n```", lines.join("\n"))
 }
 
-fn recent_trade_text(trades: &[Trade], display_names: &BTreeMap<i64, String>) -> String {
+pub(crate) fn recent_trade_text(trades: &[Trade], display_names: &BTreeMap<i64, String>) -> String {
     if trades.is_empty() {
         return "_no trades yet_".to_owned();
     }
@@ -2728,7 +2773,7 @@ fn recent_trade_text(trades: &[Trade], display_names: &BTreeMap<i64, String>) ->
             let name = display_names
                 .get(&trade.discord_id)
                 .cloned()
-                .unwrap_or_else(|| trade.discord_id.to_string());
+                .unwrap_or_else(|| cama_domain::discord_content::UNKNOWN_PLAYER.to_owned());
             let verb = if trade.action.starts_with("buy") {
                 "bought"
             } else {
@@ -2849,7 +2894,8 @@ fn position_embed(
     embed
 }
 
-fn market_list_field(market: &Market, with_delta: bool) -> (String, String) {
+/// `question` is the display text of `market.question`.
+fn market_list_field(market: &Market, question: &str, with_delta: bool) -> (String, String) {
     let price = market
         .current_price
         .map_or_else(|| "?".to_owned(), |value| format!("{value}%"));
@@ -2866,7 +2912,7 @@ fn market_list_field(market: &Market, with_delta: bool) -> (String, String) {
         String::new()
     };
     let name = format!("📈 #{}  ·  YES {price}{delta}", market.prediction_id);
-    let question = truncate_field(market.question.trim(), 200);
+    let question = truncate_field(question.trim(), 200);
     let mut value = if question.is_empty() {
         "—".to_owned()
     } else {
@@ -2892,14 +2938,16 @@ fn market_list_field(market: &Market, with_delta: bool) -> (String, String) {
     (name, value)
 }
 
+/// `question` is the display text of `summary.question`.
 fn append_position_rows(
     rows: &mut Vec<String>,
     summary: &OpenPositionSummary,
+    question: &str,
     contract_value: i64,
     total_cost: &mut i64,
     total_mark: &mut i64,
 ) {
-    let question = truncate_field(&summary.question, 26);
+    let question = truncate_field(question, 26);
     for (side, contracts, basis, mark) in [
         (
             "YES",

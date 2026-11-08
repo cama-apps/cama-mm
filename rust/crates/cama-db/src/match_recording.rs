@@ -10,7 +10,7 @@ use cama_db_core::profit_deductions::{
     ProfitDeductions, penalty_games_remaining, split_profit_deductions,
 };
 use cama_domain::role_derivation::{LaneStats, derive_positions};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
@@ -223,7 +223,7 @@ impl MatchRecordingRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

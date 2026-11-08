@@ -700,15 +700,15 @@ async fn test_later_longer_cooldown_extends_the_shared_circuit() {
 }
 
 #[tokio::test]
-async fn test_get_player_roles_returns_none_on_malformed_json() {
+async fn test_get_player_data_returns_none_on_malformed_json() {
     let server = ScriptedServer::start(vec![ScriptedResponse::json(200, "<html>not json</html>")]);
     let client = client_for(&server);
 
-    assert_eq!(client.get_player_roles(12_345).await, None);
+    assert_eq!(client.get_player_data(12_345).await, None);
 }
 
 #[tokio::test]
-async fn test_get_player_roles_returns_none_on_oversized_body() {
+async fn test_get_player_data_returns_none_on_oversized_body() {
     let server = ScriptedServer::start(vec![
         ScriptedResponse::json(200, "f\r\n[{\"hero_id\":1}]\r\n0\r\n\r\n")
             .with_header("Transfer-Encoding", "chunked"),
@@ -718,7 +718,7 @@ async fn test_get_player_roles_returns_none_on_oversized_body() {
     config.retry_delays = vec![Duration::ZERO; 3];
     let client = OpenDotaHttpClient::with_config(config).expect("test client");
 
-    assert_eq!(client.get_player_roles(12_345).await, None);
+    assert_eq!(client.get_player_data(12_345).await, None);
 }
 fn limiter_for(base_url: &str, requests_per_minute: u32) -> Arc<TokenBucket> {
     let mut config = OpenDotaHttpConfig::new(base_url, Some("test".to_owned()));

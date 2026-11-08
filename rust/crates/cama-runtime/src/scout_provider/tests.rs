@@ -137,13 +137,20 @@ impl ScoutChannelPort for ScoutChannels {
     }
 }
 
+/// The gateway cache is cold, so only a live member lookup (`resolve_names`)
+/// knows these names; a provider that reads the cache alone shows none.
+#[async_trait]
 impl GuildPlayerNameResolver for StaticPlayerNames {
     fn names_for_guild(
         &self,
         _guild_id: i64,
         _player_ids: &[i64],
     ) -> Result<GuildPlayerNameDirectory, String> {
-        Ok(self.directory.clone())
+        Ok(GuildPlayerNameDirectory::default())
+    }
+
+    async fn resolve_names(&self, _guild_id: i64, _player_ids: &[i64]) -> GuildPlayerNameDirectory {
+        self.directory.clone()
     }
 }
 
@@ -677,6 +684,32 @@ fn test_corrupt_disk_entry_is_replaced_by_valid_http_image() {
 }
 
 #[test]
+fn test_fully_cached_batch_is_served_from_disk_with_one_shared_client() {
+    let directory = tempfile::tempdir().expect("portrait cache directory");
+    let payload = portrait_png();
+    for hero_id in [5, 6] {
+        let path = directory.path().join(format!("heroes/{hero_id}.png"));
+        std::fs::create_dir_all(path.parent().expect("portrait parent"))
+            .expect("create portrait cache");
+        std::fs::write(&path, &payload).expect("seed cached portrait");
+    }
+    // Nothing listens on port 1, so any HTTP attempt would drop the hero.
+    let hero_urls = [5, 6]
+        .into_iter()
+        .map(|hero_id| (hero_id, format!("http://127.0.0.1:1/{hero_id}.png")))
+        .collect();
+    let heroes = [5, 6, 5].into_iter().map(scout_hero).collect::<Vec<_>>();
+
+    let portraits = load_portraits(&heroes, &hero_urls, directory.path());
+
+    assert_eq!(portraits.keys().copied().collect::<Vec<_>>(), [5, 6]);
+    assert!(portraits.values().all(|bytes| bytes == &payload));
+    let first = portrait_client().expect("portrait client");
+    let second = portrait_client().expect("portrait client");
+    assert!(std::ptr::eq(first, second), "renders reuse one HTTP client");
+}
+
+#[test]
 fn test_batch_deduplicates_and_bounds_parallel_missing_fetches() {
     let directory = tempfile::tempdir().expect("portrait cache directory");
     let payload = portrait_png();
@@ -722,7 +755,10 @@ async fn links_disclose_only_guild_registered_players_and_preserve_mentions() {
     let balance = fixture.balance(GUILD);
     let registry = registry(&fixture.provider_with_nicknames(
         VIEW_TIMEOUT,
-        Some(BTreeMap::from([(USER as u64, "Server Alice".to_owned())])),
+        Some(BTreeMap::from([
+            (USER as u64, "Server Alice".to_owned()),
+            (999, "Visiting Player".to_owned()),
+        ])),
     ));
     let responder = Arc::new(CapturingResponder::default());
     registry
@@ -750,8 +786,9 @@ async fn links_disclose_only_guild_registered_players_and_preserve_mentions() {
     assert!(
         embed.fields[0]
             .value
-            .contains("<@999> — not registered in this server")
+            .contains("**Visiting Player** — not registered in this server")
     );
+    assert!(!embed.fields[0].value.contains("<@"));
 }
 
 // Paused time: the 5ms view-timeout task fires via auto-advance before the

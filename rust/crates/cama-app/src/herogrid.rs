@@ -1,9 +1,8 @@
 //! Discord-neutral Hero Grid source selection, command policy, and PNG renderer.
 //!
 //! The renderer intentionally has no image dependency.  It rasterizes an RGBA
-//! image and emits a standards-compliant PNG with stored DEFLATE blocks, CRC-32
-//! chunk checksums, and an Adler-32 zlib checksum.  Tests pin the layout and
-//! policy without starting a Discord client.
+//! image and emits it through the shared [`crate::png_encoder`].  Tests pin the
+//! layout and policy without starting a Discord client.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -810,69 +809,7 @@ pub fn draw_hero_grid(
 }
 
 fn encode_png(raster: &Raster) -> Vec<u8> {
-    let mut png = Vec::new();
-    png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-
-    let mut header = Vec::with_capacity(13);
-    header.extend_from_slice(&(raster.width as u32).to_be_bytes());
-    header.extend_from_slice(&(raster.height as u32).to_be_bytes());
-    header.extend_from_slice(&[8, 6, 0, 0, 0]);
-    append_png_chunk(&mut png, b"IHDR", &header);
-
-    let row_bytes = raster.width * 4;
-    let mut filtered = Vec::with_capacity((row_bytes + 1) * raster.height);
-    for row in raster.pixels.chunks_exact(row_bytes) {
-        filtered.push(0); // PNG filter type: None
-        filtered.extend_from_slice(row);
-    }
-
-    let mut zlib = Vec::with_capacity(filtered.len() + filtered.len() / 65_535 * 5 + 16);
-    zlib.extend_from_slice(&[0x78, 0x01]);
-    let chunks = filtered.chunks(65_535).collect::<Vec<_>>();
-    for (index, chunk) in chunks.iter().enumerate() {
-        zlib.push(u8::from(index + 1 == chunks.len()));
-        let length = u16::try_from(chunk.len()).expect("stored DEFLATE block length");
-        zlib.extend_from_slice(&length.to_le_bytes());
-        zlib.extend_from_slice(&(!length).to_le_bytes());
-        zlib.extend_from_slice(chunk);
-    }
-    zlib.extend_from_slice(&adler32(&filtered).to_be_bytes());
-    append_png_chunk(&mut png, b"IDAT", &zlib);
-    append_png_chunk(&mut png, b"IEND", &[]);
-    png
-}
-
-fn append_png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    output.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    output.extend_from_slice(kind);
-    output.extend_from_slice(data);
-    let mut checksum_input = Vec::with_capacity(4 + data.len());
-    checksum_input.extend_from_slice(kind);
-    checksum_input.extend_from_slice(data);
-    output.extend_from_slice(&crc32(&checksum_input).to_be_bytes());
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffff_u32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
-}
-
-fn adler32(bytes: &[u8]) -> u32 {
-    const MODULUS: u32 = 65_521;
-    let mut a = 1_u32;
-    let mut b = 0_u32;
-    for byte in bytes {
-        a = (a + u32::from(*byte)) % MODULUS;
-        b = (b + a) % MODULUS;
-    }
-    (b << 16) | a
+    crate::png_encoder::encode_rgba_png(raster.width, raster.height, &raster.pixels)
 }
 
 #[derive(Clone, Debug)]
@@ -1103,7 +1040,7 @@ mod tests {
     }
 
     /// Decode the exact PNG subset emitted above while checking every chunk
-    /// CRC, every stored-DEFLATE length complement, and the zlib Adler sum.
+    /// CRC and the zlib stream (including its Adler-32 trailer).
     fn decode_png(bytes: &[u8]) -> DecodedPng {
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
         let mut offset = 8;
@@ -1124,7 +1061,11 @@ mod tests {
             let mut checksum = Vec::with_capacity(4 + data.len());
             checksum.extend_from_slice(kind);
             checksum.extend_from_slice(data);
-            assert_eq!(crc32(&checksum), expected_crc, "invalid PNG chunk CRC");
+            assert_eq!(
+                crate::png_encoder::crc32(&checksum),
+                expected_crc,
+                "invalid PNG chunk CRC"
+            );
             match kind {
                 b"IHDR" => {
                     assert_eq!(data.len(), 13);
@@ -1144,38 +1085,14 @@ mod tests {
         }
         assert!(saw_end);
         assert_eq!(offset, bytes.len());
-        assert_eq!(&idat[..2], &[0x78, 0x01]);
-
-        let mut compressed_offset = 2;
         let mut filtered = Vec::new();
-        loop {
-            let header = idat[compressed_offset];
-            compressed_offset += 1;
-            assert!(header == 0 || header == 1, "expected stored DEFLATE block");
-            let length = u16::from_le_bytes(
-                idat[compressed_offset..compressed_offset + 2]
-                    .try_into()
-                    .expect("DEFLATE length"),
-            );
-            compressed_offset += 2;
-            let complement = u16::from_le_bytes(
-                idat[compressed_offset..compressed_offset + 2]
-                    .try_into()
-                    .expect("DEFLATE complement"),
-            );
-            compressed_offset += 2;
-            assert_eq!(length, !complement);
-            let end = compressed_offset + usize::from(length);
-            filtered.extend_from_slice(&idat[compressed_offset..end]);
-            compressed_offset = end;
-            if header == 1 {
-                break;
-            }
-        }
-        let expected_adler = read_u32(&idat, compressed_offset);
-        compressed_offset += 4;
-        assert_eq!(compressed_offset, idat.len());
-        assert_eq!(adler32(&filtered), expected_adler, "invalid zlib Adler-32");
+        let mut decoder = flate2::read::ZlibDecoder::new(idat.as_slice());
+        std::io::Read::read_to_end(&mut decoder, &mut filtered).expect("valid zlib stream");
+        assert_eq!(
+            decoder.total_in(),
+            idat.len() as u64,
+            "no trailing IDAT bytes"
+        );
 
         let width = width.expect("IHDR width");
         let height = height.expect("IHDR height");

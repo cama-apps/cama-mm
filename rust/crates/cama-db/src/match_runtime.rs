@@ -310,7 +310,7 @@ impl PendingMatchRepository {
         routing: Option<DotaHostRouting>,
     ) -> Result<(), PendingMatchRepositoryError> {
         cama_db_core::dota_host_routing::configure(
-            &mut open_runtime_connection(&self.path)?,
+            &mut *open_runtime_connection(&self.path)?,
             routing,
         )
         .map_err(Into::into)

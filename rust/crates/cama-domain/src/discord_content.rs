@@ -83,41 +83,6 @@ pub fn chunk_default_discord_content(content: &str) -> Vec<String> {
         .expect("the Discord content limit is positive")
 }
 
-/// One Discord follow-up message emitted for a reliable match announcement.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AnnouncementFollowup {
-    /// Message content, already constrained to Discord's character limit.
-    pub content: String,
-    /// Whether Discord should show the follow-up only to the invoking user.
-    pub ephemeral: bool,
-}
-
-/// Transport boundary for ordered match-announcement follow-ups.
-pub trait AnnouncementSender {
-    type Error;
-
-    /// Send one follow-up, completing before the next call begins.
-    fn send_followup(&mut self, followup: AnnouncementFollowup) -> Result<(), Self::Error>;
-}
-
-/// Send reliable match result details as ordered, public Discord follow-ups.
-///
-/// Transport errors propagate immediately, matching the sequential `await`
-/// behavior of the Python command.  Every emitted follow-up has
-/// `ephemeral=false`.
-pub fn send_record_announcement<S: AnnouncementSender>(
-    sender: &mut S,
-    result_message: &str,
-) -> Result<(), S::Error> {
-    for content in chunk_default_discord_content(result_message) {
-        sender.send_followup(AnnouncementFollowup {
-            content,
-            ephemeral: false,
-        })?;
-    }
-    Ok(())
-}
-
 fn byte_index_at_char(value: &str, char_index: usize) -> usize {
     value
         .char_indices()
@@ -127,12 +92,7 @@ fn byte_index_at_char(value: &str, char_index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::convert::Infallible;
-
-    use super::{
-        AnnouncementFollowup, AnnouncementSender, DISCORD_MESSAGE_MAX_CHARS,
-        chunk_default_discord_content, send_record_announcement,
-    };
+    use super::{DISCORD_MESSAGE_MAX_CHARS, chunk_default_discord_content};
 
     #[test]
     fn player_names_reject_legacy_identifiers_but_allow_unicode_and_digits_in_names() {
@@ -152,20 +112,6 @@ mod tests {
             assert_eq!(super::readable_player_name(name), Some(name));
         }
         assert_eq!(super::readable_player_name(" Name "), Some("Name"));
-    }
-
-    #[derive(Default)]
-    struct RecordingSender {
-        sent: Vec<AnnouncementFollowup>,
-    }
-
-    impl AnnouncementSender for RecordingSender {
-        type Error = Infallible;
-
-        fn send_followup(&mut self, followup: AnnouncementFollowup) -> Result<(), Self::Error> {
-            self.sent.push(followup);
-            Ok(())
-        }
     }
 
     #[test]
@@ -190,32 +136,5 @@ mod tests {
             vec![2_000, 2_000, 1]
         );
         assert_eq!(chunks.concat(), content);
-    }
-
-    #[test]
-    fn test_record_announcement_chunks_the_reliable_result_message() {
-        let payouts = (0..45)
-            .map(|index| format!("payout-{index}: {}", "x".repeat(90)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let result_message = format!("✅ Match recorded.\n{payouts}");
-        let result_chunks = chunk_default_discord_content(&result_message);
-        let mut sender = RecordingSender::default();
-
-        send_record_announcement(&mut sender, &result_message).unwrap();
-
-        let sent = sender
-            .sent
-            .iter()
-            .map(|followup| followup.content.as_str())
-            .collect::<Vec<_>>();
-        let expected = result_chunks.iter().map(String::as_str).collect::<Vec<_>>();
-        assert_eq!(sent, expected);
-        assert!(result_chunks.len() > 1);
-        assert!(
-            sent.iter()
-                .all(|content| content.chars().count() <= DISCORD_MESSAGE_MAX_CHARS)
-        );
-        assert!(sender.sent.iter().all(|followup| !followup.ephemeral));
     }
 }

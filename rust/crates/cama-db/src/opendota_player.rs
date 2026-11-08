@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{
     json_numeric::{coerce_integral_i64, number_f64},
-    open_runtime_connection,
+    open_runtime_connection, steam_identity,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,7 +75,7 @@ impl OpenDotaPlayerRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -136,70 +136,8 @@ impl OpenDotaPlayerRepository {
         if discord_ids.is_empty() {
             return Ok(HashMap::new());
         }
-
-        let unique_ids = deduplicate(discord_ids);
-        let mut result = unique_ids
-            .iter()
-            .copied()
-            .map(|discord_id| (discord_id, Vec::new()))
-            .collect::<HashMap<_, _>>();
-        let mut junction_found = HashSet::new();
         let connection = self.connection()?;
-
-        for chunk in unique_ids.chunks(900) {
-            let placeholders = repeat_placeholders(chunk.len());
-            let mut statement = connection.prepare(&format!(
-                "SELECT discord_id,steam_id FROM player_steam_ids
-                 WHERE discord_id IN ({placeholders})
-                 ORDER BY discord_id,is_primary DESC,added_at ASC,id ASC"
-            ))?;
-            let rows = statement.query_map(params_from_iter(chunk.iter()), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                let (discord_id, steam_id) = row?;
-                result
-                    .get_mut(&discord_id)
-                    .expect("queried Discord ID was initialized")
-                    .push(steam_id);
-                junction_found.insert(discord_id);
-            }
-        }
-
-        let missing = unique_ids
-            .iter()
-            .copied()
-            .filter(|discord_id| !junction_found.contains(discord_id))
-            .collect::<Vec<_>>();
-        for chunk in missing.chunks(900) {
-            let placeholders = repeat_placeholders(chunk.len());
-            let mut parameters = chunk.to_vec();
-            let guild_predicate = if let Some(guild_id) = guild_id {
-                parameters.push(Self::normalize_guild_id(Some(guild_id)));
-                " AND guild_id=?"
-            } else {
-                ""
-            };
-            let mut statement = connection.prepare(&format!(
-                "SELECT discord_id,steam_id FROM players
-                 WHERE discord_id IN ({placeholders}){guild_predicate}
-                   AND steam_id IS NOT NULL
-                 ORDER BY discord_id,guild_id"
-            ))?;
-            let rows = statement.query_map(params_from_iter(parameters.iter()), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                let (discord_id, steam_id) = row?;
-                let steam_ids = result
-                    .get_mut(&discord_id)
-                    .expect("queried Discord ID was initialized");
-                if steam_ids.is_empty() {
-                    steam_ids.push(steam_id);
-                }
-            }
-        }
-        Ok(result)
+        steam_identity::steam_ids_bulk(&connection, discord_ids, guild_id).map_err(Into::into)
     }
 
     /// Atomically update the compatibility column and global primary junction.
@@ -477,7 +415,7 @@ impl OpenDotaPlayerRepository {
         steam_id: i64,
     ) -> Result<Option<i64>, OpenDotaPlayerRepositoryError> {
         let connection = self.connection()?;
-        steam_id_owner(&connection, steam_id).map_err(Into::into)
+        steam_identity::steam_id_owner(&connection, steam_id).map_err(Into::into)
     }
 
     /// Resolve only migrated junction membership in one normalized guild.
@@ -739,27 +677,6 @@ fn get_steam_ids(connection: &Connection, discord_id: i64) -> Result<Vec<i64>, r
         )
         .optional()
         .map(|steam_id| steam_id.into_iter().collect())
-}
-
-fn steam_id_owner(connection: &Connection, steam_id: i64) -> Result<Option<i64>, rusqlite::Error> {
-    let junction = connection
-        .query_row(
-            "SELECT discord_id FROM player_steam_ids WHERE steam_id=?1",
-            [steam_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if junction.is_some() {
-        return Ok(junction);
-    }
-    connection
-        .query_row(
-            "SELECT discord_id FROM players WHERE steam_id=?1
-             UNION SELECT discord_id FROM deadlock_players WHERE steam_id=?1 LIMIT 1",
-            [steam_id],
-            |row| row.get(0),
-        )
-        .optional()
 }
 
 fn other_owner(

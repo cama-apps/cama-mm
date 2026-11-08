@@ -268,6 +268,35 @@ fn discord_with_gamba(gamba: bool) -> Arc<FakeDiscord> {
     })
 }
 
+/// Names only a live member lookup can supply, as on a cold gateway cache:
+/// the cached directory is empty and `resolve_names` fills it in.
+struct LiveOnlyPlayerNames;
+
+#[async_trait]
+impl GuildPlayerNameResolver for LiveOnlyPlayerNames {
+    fn names_for_guild(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> Result<crate::discord_transport::GuildPlayerNameDirectory, String> {
+        Ok(crate::discord_transport::GuildPlayerNameDirectory::default())
+    }
+
+    async fn resolve_names(
+        &self,
+        guild_id: i64,
+        player_ids: &[i64],
+    ) -> crate::discord_transport::GuildPlayerNameDirectory {
+        assert_eq!(guild_id, GUILD);
+        crate::discord_transport::GuildPlayerNameDirectory::new(Some(
+            player_ids
+                .iter()
+                .map(|id| (*id as u64, format!("Nickname {}", id - USER + 1)))
+                .collect(),
+        ))
+    }
+}
+
 fn provider(
     fixture: &Fixture,
     config: &ApplicationConfig,
@@ -279,6 +308,7 @@ fn provider(
         fixture.vanity_tax(),
         discord,
     )
+    .with_player_names(Arc::new(LiveOnlyPlayerNames))
 }
 
 fn registry(provider: &PlayerTriviaRegistrationProvider) -> Registry {
@@ -485,16 +515,16 @@ async fn wrong_channel_charges_one_jc_and_returns_exact_gamba_copy() {
 }
 
 #[test]
-fn test_long_and_mention_options_remain_in_embed_not_button_labels() {
+fn test_long_options_remain_in_embed_not_button_labels() {
     let question = app::PlayerTriviaQuestion::new(
         "predictions:profit:101",
         "predictions",
-        "Which resolved market did <@101> finish with a profit on?",
+        "Which resolved market did Trivia Player finish with a profit on?",
         [
             "Market #8 — Will Team Radiant win the next inhouse match?",
             "Market #14 — Will the game last longer than 45 minutes?",
-            "<@202> — Trivia Player's server profile",
-            "<@303> — Another Player's server profile",
+            "Market #21 — Trivia Player's server profile",
+            "Market #34 — Another Player's server profile",
         ]
         .map(str::to_owned),
         0,
@@ -549,6 +579,35 @@ async fn test_command_starts_frozen_daily_set_with_spicy_disabled() {
     let response = &responder.captured.lock().expect("captured").followups[0];
     assert_eq!(response.embeds[0].fields[0].name, "Choose one");
     assert_eq!(response.embeds[0].fields[1].name, "Your daily set");
+}
+
+#[tokio::test]
+async fn test_frozen_set_names_players_with_live_resolved_display_names() {
+    let fixture = Fixture::migrated();
+    let config = config(fixture.database.path(), &[]);
+    let provider = provider(&fixture, &config, discord());
+    registry(&provider)
+        .command_handler("playertrivia")
+        .expect("handler")
+        .handle(command(USER, None), Arc::new(RecordingResponder::default()))
+        .await
+        .expect("command");
+
+    let session = latest_session(&fixture, USER);
+    let stored = session
+        .questions
+        .iter()
+        .flat_map(|stored| {
+            let question = &stored.question;
+            std::iter::once(question.text.clone())
+                .chain(std::iter::once(question.explanation.clone()))
+                .chain(question.options.iter().cloned())
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(stored.contains("Nickname "), "{stored}");
+    assert!(!stored.contains("<@"), "{stored}");
+    assert!(!stored.contains(&USER.to_string()), "{stored}");
 }
 
 #[tokio::test]

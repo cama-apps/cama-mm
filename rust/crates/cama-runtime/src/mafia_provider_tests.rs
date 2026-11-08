@@ -155,6 +155,77 @@ impl EconomyFixture {
     }
 }
 
+#[test]
+fn spent_vigilante_does_not_hold_up_later_nights() {
+    let fixture = EconomyFixture::new();
+    let game_id = fixture
+        .repository
+        .create_game(Some(77), "2026-08-12", MafiaPhase::Night, 1_000, 5, None)
+        .expect("create night game");
+    let roster = [
+        (1, MafiaRole::Mafia),
+        (2, MafiaRole::Doctor),
+        (3, MafiaRole::Detective),
+        (4, MafiaRole::Vigilante),
+        (5, MafiaRole::Townie),
+    ];
+    fixture
+        .repository
+        .add_players(
+            game_id,
+            &roster
+                .iter()
+                .map(|(id, role)| MafiaPlayer::new(game_id, *id, 77, *role))
+                .collect::<Vec<_>>(),
+        )
+        .expect("seed roster");
+    let act = |actor_id: i64, action_type: MafiaActionType, day_number: i64| {
+        fixture
+            .repository
+            .record_action(&MafiaAction {
+                game_id,
+                guild_id: 77,
+                actor_id,
+                target_id: Some(5),
+                action_type,
+                phase: MafiaPhase::Night,
+                day_number,
+                result: None,
+            })
+            .expect("record night action");
+    };
+    // Night 1: the Vigilante spends their one shot.
+    act(4, MafiaActionType::VigilanteKill, 1);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE mafia_games SET day_number=2 WHERE game_id=?1",
+            [game_id],
+        )
+        .expect("advance to night 2");
+    let game = fixture
+        .repository
+        .get_game_by_id(game_id)
+        .expect("read game")
+        .expect("game");
+    let players = fixture.repository.get_players(game_id).expect("roster");
+
+    assert_eq!(
+        missing_players(&fixture.repository, &game, &players).expect("missing"),
+        vec![1, 2, 3]
+    );
+    act(1, MafiaActionType::Kill, 2);
+    act(2, MafiaActionType::Save, 2);
+    act(3, MafiaActionType::Investigate, 2);
+
+    assert!(phase_ready(&fixture.repository, &game, true).expect("phase ready"));
+    assert!(
+        missing_players(&fixture.repository, &game, &players)
+            .expect("missing")
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn migrated_sqlite_resolution_wires_bookie_mvp_overflow_and_taxes() {
     let fixture = EconomyFixture::new();

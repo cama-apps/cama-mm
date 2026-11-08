@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
+use crate::open_runtime_connection;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DigMinerTunnelSnapshot {
     pub tunnel_name: String,
@@ -442,8 +444,8 @@ impl DigMinerRuntimeRepository {
         })
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
-        Connection::open(&self.path)
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
+        open_runtime_connection(&self.path)
     }
 }
 

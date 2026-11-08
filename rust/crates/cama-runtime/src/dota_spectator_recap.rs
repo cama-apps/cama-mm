@@ -169,7 +169,6 @@ pub(crate) async fn capture(
     now: i64,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        let png = crate::dota_spectator_png::compress(&png)?;
         capture_sync(&database, guild, pending, valve, clock, &png, now)
     })
     .await
