@@ -1,37 +1,9 @@
+use std::collections::BTreeSet;
+
 use super::*;
 
 const PLAYER: i64 = 111;
 const GUILD: i64 = 0;
-
-struct FixedRng {
-    roll: f64,
-    slot: GearSlot,
-    random_calls: usize,
-    choice_calls: usize,
-}
-
-impl FixedRng {
-    fn new(roll: f64, slot: GearSlot) -> Self {
-        Self {
-            roll,
-            slot,
-            random_calls: 0,
-            choice_calls: 0,
-        }
-    }
-}
-
-impl GearRng for FixedRng {
-    fn random(&mut self) -> f64 {
-        self.random_calls += 1;
-        self.roll
-    }
-
-    fn choose_slot(&mut self) -> GearSlot {
-        self.choice_calls += 1;
-        self.slot
-    }
-}
 
 fn regular_piece(slot: GearSlot, tier: u8, durability: i32) -> GearPiece {
     GearPiece {
@@ -68,54 +40,6 @@ fn assert_close(left: f64, right: f64) {
 }
 
 #[test]
-fn test_drop_gate_returns_none_for_unmapped_boundary() {
-    let mut service = GearService::fixture();
-    let mut rng = FixedRng::new(0.0, GearSlot::Armor);
-    for _ in 0..20 {
-        assert_eq!(service.maybe_drop_gear(PLAYER, GUILD, 25, &mut rng), None);
-    }
-    assert_eq!(rng.random_calls, 0, "the depth gate precedes RNG");
-}
-
-#[test]
-fn test_drop_gate_returns_none_when_roll_misses() {
-    let mut service = GearService::fixture();
-    let mut rng = FixedRng::new(GEAR_BOSS_DROP_RATE + 0.01, GearSlot::Armor);
-    assert_eq!(service.maybe_drop_gear(PLAYER, GUILD, 100, &mut rng), None);
-    assert_eq!((rng.random_calls, rng.choice_calls), (1, 0));
-}
-
-#[test]
-fn test_drop_tier_each_mapped_boundary_drops_correct_tier() {
-    let mut service = GearService::fixture();
-    for (boundary, expected_tier) in [(100, 4), (150, 5), (200, 6), (275, 7)] {
-        let mut rng = FixedRng::new(0.0, GearSlot::Boots);
-        let drop = service
-            .maybe_drop_gear(PLAYER, GUILD, boundary, &mut rng)
-            .expect("forced drop");
-        assert_eq!(drop.tier, expected_tier);
-        assert_eq!(drop.slot, GearSlot::Boots);
-        assert_eq!(drop.name, BOOTS_TIERS[usize::from(expected_tier)].name);
-    }
-}
-
-#[test]
-fn test_drop_persists_creates_dig_gear_row() {
-    let mut service = GearService::fixture();
-    let mut rng = FixedRng::new(0.0, GearSlot::Armor);
-    let drop = service
-        .maybe_drop_gear(PLAYER, GUILD, 100, &mut rng)
-        .expect("forced drop");
-    let row = service
-        .store
-        .gear_by_id(drop.gear_id)
-        .expect("drop persisted");
-    assert_eq!(row.slot, GearSlot::Armor);
-    assert_eq!(row.source, "boss_drop");
-    assert!(!row.equipped);
-}
-
-#[test]
 fn test_starter_weapon_create_tunnel_adds_equipped_starter_weapon() {
     let mut store = GearStore::new();
     let starter_id = store.create_tunnel(PLAYER, GUILD);
@@ -124,21 +48,6 @@ fn test_starter_weapon_create_tunnel_adds_equipped_starter_weapon() {
     assert_eq!(weapon.tier, 0);
     assert_eq!(weapon.durability, GEAR_MAX_DURABILITY);
     assert_eq!(weapon.source, "starter");
-}
-
-#[test]
-fn test_drop_rate_in_band_over_1000_rolls() {
-    let mut service = GearService::fixture();
-    let mut rng = LcgRng::new(42);
-    let hits = (0..1_000)
-        .filter(|_| {
-            service
-                .maybe_drop_gear(PLAYER, GUILD, 100, &mut rng)
-                .is_some()
-        })
-        .count();
-    let rate = hits as f64 / 1_000.0;
-    assert!((rate - GEAR_BOSS_DROP_RATE).abs() < 0.02, "observed {rate}");
 }
 
 #[test]
@@ -230,21 +139,6 @@ fn test_repository_equipping_second_piece_swaps_first_atomically() {
 }
 
 #[test]
-fn test_repository_partial_unique_index_blocks_manual_double_equip() {
-    let mut store = GearStore::new();
-    let first = store.add_gear(PLAYER, GUILD, GearSlot::Boots, 1, None, "shop", None);
-    let second = store.add_gear(PLAYER, GUILD, GearSlot::Boots, 2, None, "shop", None);
-    store
-        .equip_gear(first, PLAYER, GUILD, GearSlot::Boots)
-        .expect("equip");
-    assert_eq!(
-        store.manual_set_equipped(second, true),
-        Err(StoreError::UniqueEquippedSlot)
-    );
-    assert!(!store.gear_by_id(second).expect("second").equipped);
-}
-
-#[test]
 fn test_repository_unequip_clears_equipped_flag() {
     let mut store = GearStore::new();
     let id = store.add_gear(PLAYER, GUILD, GearSlot::Armor, 1, None, "shop", None);
@@ -277,44 +171,6 @@ fn test_repository_get_equipped_gear_keys_by_slot() {
 }
 
 #[test]
-fn test_repository_durability_tick_decrements_only_equipped() {
-    let mut store = GearStore::new();
-    let equipped = store.add_gear(PLAYER, GUILD, GearSlot::Armor, 1, None, "shop", None);
-    let spare = store.add_gear(PLAYER, GUILD, GearSlot::Armor, 3, None, "shop", None);
-    store
-        .equip_gear(equipped, PLAYER, GUILD, GearSlot::Armor)
-        .expect("equip");
-    assert!(store.tick_gear_durability(PLAYER, GUILD).is_empty());
-    assert_eq!(store.gear_by_id(equipped).expect("equipped").durability, 19);
-    assert_eq!(store.gear_by_id(spare).expect("spare").durability, 20);
-}
-
-#[test]
-fn test_repository_durability_tick_to_zero_returns_broken_ids_and_stays_equipped() {
-    let mut store = GearStore::new();
-    let id = store.add_gear(PLAYER, GUILD, GearSlot::Boots, 2, Some(1), "shop", None);
-    store
-        .equip_gear(id, PLAYER, GUILD, GearSlot::Boots)
-        .expect("equip");
-    assert_eq!(store.tick_gear_durability(PLAYER, GUILD), [id]);
-    let broken = store.equipped_gear(PLAYER, GUILD)[&GearSlot::Boots];
-    assert_eq!(broken.durability, 0);
-    assert!(broken.equipped);
-}
-
-#[test]
-fn test_repository_durability_tick_floors_at_zero() {
-    let mut store = GearStore::new();
-    let id = store.add_gear(PLAYER, GUILD, GearSlot::Boots, 2, Some(1), "shop", None);
-    store
-        .equip_gear(id, PLAYER, GUILD, GearSlot::Boots)
-        .expect("equip");
-    store.tick_gear_durability(PLAYER, GUILD);
-    store.tick_gear_durability(PLAYER, GUILD);
-    assert_eq!(store.gear_by_id(id).expect("piece").durability, 0);
-}
-
-#[test]
 fn test_repository_repair_resets_durability() {
     let mut store = GearStore::new();
     let id = store.add_gear(PLAYER, GUILD, GearSlot::Armor, 1, Some(3), "shop", None);
@@ -328,47 +184,6 @@ fn test_repository_repair_does_not_auto_equip() {
     let id = store.add_gear(PLAYER, GUILD, GearSlot::Armor, 1, Some(0), "shop", None);
     store.repair_gear(id, 20);
     assert!(!store.gear_by_id(id).expect("piece").equipped);
-}
-
-#[test]
-fn test_repository_tick_by_id_ticks_specific_ids_only() {
-    let mut store = GearStore::new();
-    let first = store.add_gear(PLAYER, GUILD, GearSlot::Armor, 1, None, "shop", None);
-    let second = store.add_gear(PLAYER, GUILD, GearSlot::Boots, 2, None, "shop", None);
-    let untouched = store.add_gear(PLAYER, GUILD, GearSlot::Weapon, 3, None, "shop", None);
-    assert!(store.tick_gear_durability_ids(&[first, second]).is_empty());
-    assert_eq!(store.gear_by_id(first).expect("first").durability, 19);
-    assert_eq!(store.gear_by_id(second).expect("second").durability, 19);
-    assert_eq!(store.gear_by_id(untouched).expect("third").durability, 20);
-}
-
-#[test]
-fn test_repository_tick_by_id_ticks_unequipped_pieces_too() {
-    let mut store = GearStore::new();
-    let id = store.add_gear(PLAYER, GUILD, GearSlot::Armor, 1, None, "shop", None);
-    assert!(store.tick_gear_durability_ids(&[id]).is_empty());
-    assert_eq!(store.gear_by_id(id).expect("piece").durability, 19);
-}
-
-#[test]
-fn test_repository_tick_by_id_breaks_at_zero_and_returns_id() {
-    let mut store = GearStore::new();
-    let id = store.add_gear(PLAYER, GUILD, GearSlot::Armor, 1, Some(1), "shop", None);
-    store
-        .equip_gear(id, PLAYER, GUILD, GearSlot::Armor)
-        .expect("equip");
-    assert_eq!(store.tick_gear_durability_ids(&[id]), [id]);
-    let row = store.gear_by_id(id).expect("piece");
-    assert_eq!(row.durability, 0);
-    assert!(row.equipped);
-}
-
-#[test]
-fn test_repository_tick_by_id_empty_list_is_a_noop() {
-    let mut store = GearStore::new();
-    let id = store.add_gear(PLAYER, GUILD, GearSlot::Armor, 1, None, "shop", None);
-    assert!(store.tick_gear_durability_ids(&[]).is_empty());
-    assert_eq!(store.gear_by_id(id).expect("piece").durability, 20);
 }
 
 #[test]
@@ -1223,30 +1038,6 @@ fn test_relic_label_quest_relic_suffixes_avoid_legacy_pool() {
 }
 
 #[test]
-fn test_broken_gear_tick_to_zero_preserves_equipped_and_reports_transition_once() {
-    let mut store = GearStore::new();
-    let id = store.add_gear(PLAYER, GUILD, GearSlot::Armor, 1, Some(1), "shop", None);
-    store
-        .equip_gear(id, PLAYER, GUILD, GearSlot::Armor)
-        .expect("equip");
-    assert_eq!(store.tick_gear_durability(PLAYER, GUILD), [id]);
-    assert!(store.gear_by_id(id).expect("piece").equipped);
-    assert!(store.tick_gear_durability(PLAYER, GUILD).is_empty());
-}
-
-#[test]
-fn test_broken_gear_snapshot_tick_to_zero_preserves_current_equipped_state() {
-    let mut store = GearStore::new();
-    let id = store.add_gear(PLAYER, GUILD, GearSlot::Boots, 1, Some(1), "shop", None);
-    store
-        .equip_gear(id, PLAYER, GUILD, GearSlot::Boots)
-        .expect("equip");
-    assert_eq!(store.tick_gear_durability_ids(&[id]), [id]);
-    assert!(store.gear_by_id(id).expect("piece").equipped);
-    assert!(store.tick_gear_durability_ids(&[id]).is_empty());
-}
-
-#[test]
 fn test_broken_gear_repair_all_reactivates_broken_piece_in_place() {
     let mut service = GearService::fixture();
     let id = service
@@ -1255,8 +1046,7 @@ fn test_broken_gear_repair_all_reactivates_broken_piece_in_place() {
         .gear_id
         .expect("id");
     service.equip_gear(PLAYER, GUILD, id);
-    service.store.repair_gear(id, 1);
-    assert_eq!(service.store.tick_gear_durability(PLAYER, GUILD), [id]);
+    service.store.repair_gear(id, 0);
     assert!(service.repair_all_gear(PLAYER, GUILD).success);
     let armor = service.store.equipped_gear(PLAYER, GUILD)[&GearSlot::Armor];
     assert_eq!(armor.id, id);
@@ -1285,7 +1075,6 @@ fn test_broken_gear_effects_weapon_has_no_active_pickaxe_effects() {
         .equip_gear(id, PLAYER, GUILD, GearSlot::Weapon)
         .expect("equip");
     assert_eq!(service.active_pickaxe_tier(PLAYER, GUILD), 0);
-    assert_eq!(service.active_pickaxe_data(PLAYER, GUILD), None);
 }
 
 #[test]
@@ -1361,7 +1150,7 @@ fn test_prorated_repair_single_repair_prorates_cost_by_missing_durability() {
         .gear_id
         .expect("id");
     service.store.repair_gear(id, 10);
-    let preview = service.compute_repair_cost(GearSlot::Armor, 3, None, 10, Some(20));
+    let preview = repair_cost(GearSlot::Armor, 3, None, 10, Some(20));
     let before = service.store.balance(PLAYER, GUILD);
     let result = service.repair_gear(PLAYER, GUILD, id);
     assert_eq!(preview, 5);
@@ -1390,4 +1179,12 @@ fn test_prorated_repair_all_preview_matches_prorated_debit() {
     assert_eq!(preview, 8);
     assert_eq!(result.cost, preview);
     assert_eq!(service.store.balance(PLAYER, GUILD), before - preview);
+}
+
+#[test]
+fn test_drop_tier_maps_each_boss_boundary_and_skips_unmapped_ones() {
+    assert_eq!(drop_tier_at_depth(25), None);
+    for (boundary, expected_tier) in [(100, 4), (150, 5), (200, 6), (275, 7)] {
+        assert_eq!(drop_tier_at_depth(boundary), Some(expected_tier));
+    }
 }

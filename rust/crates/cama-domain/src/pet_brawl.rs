@@ -202,15 +202,6 @@ pub fn move_name(species_id: &str, move_: PetBrawlMove) -> &'static str {
     }
 }
 
-/// Whether the species has an explicit flavor entry for a move.
-#[must_use]
-pub fn has_move_flavor(species_id: &str, move_: PetBrawlMove) -> bool {
-    crate::pet::SPECIES
-        .iter()
-        .any(|species| species.species_id == species_id)
-        && move_name(species_id, move_) != move_.default_name()
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BrawlTraits {
     pub dodge_bonus_pp: i32,
@@ -837,7 +828,7 @@ mod tests {
         BASE_CRIT_PCT, BRAWL_TRAIT_SPECIES, BrawlRng, BrawlTraits, BrawlWinner, Duelist,
         DuelistSnapshot, HUNKER_HEAL, MAX_ROUNDS, PetBrawl, PetBrawlMove, PetBrawlSnapshot,
         PetBrawlState, ResolveRoundError, SPITTER_CRIT_PCT, STAMPEDE_MISS_PCT, brawl_traits,
-        build_duelist, has_move_flavor, initial_state, move_name, resolve_round, trait_blurb,
+        build_duelist, initial_state, move_name, resolve_round, trait_blurb,
     };
     use crate::pet::{PetStage, SPECIES, SpeciesTier};
 
@@ -1084,8 +1075,14 @@ mod tests {
     #[test]
     fn test_every_species_flavors_the_two_new_moves() {
         for species in SPECIES {
-            assert!(has_move_flavor(species.species_id, PetBrawlMove::Feint));
-            assert!(has_move_flavor(species.species_id, PetBrawlMove::Sidestep));
+            assert_ne!(
+                move_name(species.species_id, PetBrawlMove::Feint),
+                PetBrawlMove::Feint.default_name()
+            );
+            assert_ne!(
+                move_name(species.species_id, PetBrawlMove::Sidestep),
+                PetBrawlMove::Sidestep.default_name()
+            );
         }
     }
 
