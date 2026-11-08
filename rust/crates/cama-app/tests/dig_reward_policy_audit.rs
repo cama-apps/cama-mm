@@ -55,6 +55,9 @@ pub mod dig_carry_wager {
     pub use cama_db_external::dig_carry_wager::*;
 }
 
+/// The mounted repositories name the runtime connection type at the crate root.
+type RuntimeConnection = Connection;
+
 fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
     let connection = Connection::open_with_flags(
         path,

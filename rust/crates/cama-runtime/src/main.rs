@@ -548,6 +548,9 @@ async fn run_serve() -> ExitCode {
         rebuilt_tables = database_initialization.rebuilt_tables,
         "Rust database schema initialization and integrity check complete"
     );
+    // Repositories open a connection per call; keep idle connections to the
+    // live database for reuse for the life of the process.
+    let _connection_reuse = cama_db::RuntimeConnectionReuse::enable(&config.db_path);
     // Older versions stored new tunnels as `Miner <owner id>`, which public
     // Dig titles then showed. The repair is idempotent, so every start runs it.
     let tunnel_name_path = config.db_path.clone();

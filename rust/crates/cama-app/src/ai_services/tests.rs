@@ -166,8 +166,7 @@ impl AttemptRecorder for RecordingAttempts {
 #[test]
 fn test_ai_service_import_and_construction_do_not_load_litellm() {
     let provider = ScriptedProvider::with_responses(Vec::new());
-    let (service, loader) = service_with_provider("cerebras/zai-glm-4.7", provider);
-    assert_eq!(service.provider_count(), 1);
+    let (_service, loader) = service_with_provider("cerebras/zai-glm-4.7", provider);
     assert_eq!(loader.loads.load(Ordering::SeqCst), 0);
 }
 
@@ -269,11 +268,7 @@ fn test_litellm_error_classification_uses_only_loaded_module() {
 }
 
 #[test]
-fn test_litellm_pydantic_serializer_warning_is_suppressed() {
-    assert!(is_suppressed_provider_warning(
-        "Pydantic serializer warnings:\n  PydanticSerializationUnexpectedValue(Expected 10 fields but got 5: Expected `Message`)"
-    ));
-    assert!(!is_suppressed_provider_warning("unrelated warning"));
+fn test_provider_credential_debug_is_redacted() {
     let credential = ProviderCredential::new("do-not-log-me").expect("credential");
     assert_eq!(format!("{credential:?}"), "ProviderCredential([REDACTED])");
     assert!(!format!("{credential:?}").contains("do-not-log-me"));

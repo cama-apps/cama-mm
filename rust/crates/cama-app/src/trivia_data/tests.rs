@@ -483,30 +483,6 @@ fn test_load_abilities_excludes_internal_names() {
 }
 
 #[test]
-fn test_get_ability_icon_url_by_name_is_case_insensitive() {
-    let registry = registry();
-    assert_eq!(
-        registry
-            .get_ability_icon_url_by_name("  global silence  ")
-            .unwrap(),
-        Some(
-            "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/abilities/silencer_global_silence.png"
-        )
-    );
-}
-
-#[test]
-fn test_get_ability_icon_url_by_name_missing() {
-    let registry = registry();
-    assert_eq!(
-        registry
-            .get_ability_icon_url_by_name("Definitely Not An Ability")
-            .unwrap(),
-        None
-    );
-}
-
-#[test]
 fn test_load_voicelines() {
     let registry = registry();
     let voicelines = registry.load_voicelines().unwrap();

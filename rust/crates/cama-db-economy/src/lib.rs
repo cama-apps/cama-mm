@@ -1,8 +1,8 @@
 //! Match economy, draft, prediction, and settlement repositories.
 
-pub(crate) use cama_db_core::open_runtime_connection;
 #[cfg(test)]
 pub(crate) use cama_db_core::schema_manager;
+pub(crate) use cama_db_core::{RuntimeConnection, open_runtime_connection};
 #[cfg(test)]
 pub(crate) use cama_db_match::core_repositories;
 

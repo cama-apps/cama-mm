@@ -109,7 +109,7 @@ impl DeadlockRepository {
         guild: i64,
     ) -> Result<Option<DeadlockLobbyPublication>, DeadlockError> {
         identity(guild, 1)?;
-        lobby_publication_on(&open_runtime_connection(&self.path)?, guild)
+        lobby_publication_on(&*open_runtime_connection(&self.path)?, guild)
     }
 
     pub fn prepare_lobby_publication(
@@ -347,7 +347,7 @@ impl DeadlockRepository {
         guild: i64,
         format: DeadlockFormat,
     ) -> Result<Vec<DeadlockQueuePlayer>, DeadlockError> {
-        queue_on(&open_runtime_connection(&self.path)?, guild, format)
+        queue_on(&*open_runtime_connection(&self.path)?, guild, format)
     }
     /// Ready checks are format-specific and expire; no partial rosters or automatic mode changes.
     pub fn shuffle(
@@ -544,7 +544,7 @@ impl DeadlockRepository {
             .map(Option::flatten)
     }
     pub fn match_by_id(&self, guild: i64, id: i64) -> Result<Option<DeadlockMatch>, DeadlockError> {
-        read_match(&open_runtime_connection(&self.path)?, guild, id)
+        read_match(&*open_runtime_connection(&self.path)?, guild, id)
     }
     pub fn ratings(&self, guild: i64, user: i64) -> Result<Vec<DeadlockRating>, DeadlockError> {
         identity(guild, user)?;

@@ -13,6 +13,8 @@ use cama_domain::dig_gear::{Artifact, GearPiece, GearSlot, Tunnel};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
+use crate::open_runtime_connection;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DigGearRuntimeSnapshot {
     pub discord_id: i64,
@@ -102,7 +104,7 @@ impl DigGearRuntimeRepository {
         discord_id: i64,
         guild_id: i64,
     ) -> Result<Option<DigGearRuntimeSnapshot>, DigGearRuntimeRepositoryError> {
-        let connection = Connection::open(&self.database_path)?;
+        let connection = open_runtime_connection(&self.database_path)?;
         query_snapshot(&connection, discord_id, guild_id)
     }
 
@@ -111,7 +113,7 @@ impl DigGearRuntimeRepository {
         discord_id: i64,
         guild_id: i64,
     ) -> Result<Option<DigGearShopSnapshot>, DigGearRuntimeRepositoryError> {
-        let connection = Connection::open(&self.database_path)?;
+        let connection = open_runtime_connection(&self.database_path)?;
         query_shop_snapshot(&connection, discord_id, guild_id)
     }
 
@@ -120,7 +122,7 @@ impl DigGearRuntimeRepository {
         request: DigGearRuntimeCommit<'_>,
     ) -> Result<DigGearRuntimeCommitOutcome, DigGearRuntimeRepositoryError> {
         validate_proposed(request.expected, request.proposed)?;
-        let mut connection = Connection::open(&self.database_path)?;
+        let mut connection = open_runtime_connection(&self.database_path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = query_snapshot(
             &transaction,

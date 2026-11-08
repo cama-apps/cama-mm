@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::params_from_iter;
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -41,7 +41,7 @@ impl ReminderRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

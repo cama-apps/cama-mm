@@ -306,6 +306,11 @@ fn players(count: i64) -> Vec<PlayerTriviaPlayer> {
         .collect()
 }
 
+/// Readable display names for every test player ID.
+fn names() -> PlayerLabels {
+    (1..=128).map(|id| (id, format!("Nick{id:02}"))).collect()
+}
+
 fn stable_service(
     repository: Arc<FakeRepository>,
 ) -> PlayerTriviaService<FakeRepository, StableRandom, ManualClock> {
@@ -328,7 +333,7 @@ fn generate(
     repository.set_recent(recent);
     let service = stable_service(Arc::clone(&repository));
     let questions = service
-        .generate_questions(99, 7, current_members, count, include_spicy, 30)
+        .generate_questions(99, 7, current_members, &names(), count, include_spicy, 30)
         .unwrap();
     (questions, repository)
 }
@@ -402,10 +407,10 @@ fn test_snapshot_cache_reuses_same_guild_load() {
     let service = stable_service(Arc::clone(&repository));
 
     service
-        .generate_questions(1, 7, None, 1, false, 30)
+        .generate_questions(1, 7, None, &names(), 1, false, 30)
         .unwrap();
     service
-        .generate_questions(2, 7, None, 1, false, 30)
+        .generate_questions(2, 7, None, &names(), 1, false, 30)
         .unwrap();
 
     assert_eq!(repository.load_calls(), vec![7]);
@@ -715,10 +720,10 @@ fn test_generation_is_balanced_four_option_recent_aware_and_deterministic() {
         45.0,
     );
     let first = first_service
-        .generate_questions(99, 7, None, 10, false, 30)
+        .generate_questions(99, 7, None, &names(), 10, false, 30)
         .unwrap();
     let second = second_service
-        .generate_questions(99, 7, None, 10, false, 30)
+        .generate_questions(99, 7, None, &names(), 10, false, 30)
         .unwrap();
 
     assert_eq!(first, second);
@@ -749,7 +754,7 @@ fn test_generation_is_balanced_four_option_recent_aware_and_deterministic() {
         45.0,
     );
     let without_recent = recent_service
-        .generate_questions(99, 7, None, 20, false, 30)
+        .generate_questions(99, 7, None, &names(), 20, false, 30)
         .unwrap();
     assert!(without_recent.iter().all(|question| question.key != hidden));
     let recent_call = recent_repository.recent_calls()[0];
@@ -773,7 +778,7 @@ fn test_current_member_filter_removes_departed_players_before_aggregation() {
     let (questions, _) = generate(snapshot, [] as [&str; 0], 50, false, Some(&members));
     let question = by_key(&questions)["tips:most_jc_sent"];
 
-    assert_eq!(question.correct_answer(), "<@7>");
+    assert_eq!(question.correct_answer(), "Nick07");
     let rendered = questions
         .iter()
         .flat_map(|question| {
@@ -783,7 +788,44 @@ fn test_current_member_filter_removes_departed_players_before_aggregation() {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(!rendered.contains("<@8>"));
+    assert!(!rendered.contains("Nick08"));
+    assert!(!rendered.contains("<@"));
+}
+
+#[test]
+fn test_questions_name_players_with_readable_text_and_skip_unnamed_players() {
+    let repository = FakeRepository::with_snapshot(7, rich_snapshot());
+    let service = stable_service(Arc::clone(&repository));
+    let members = (1..=8).collect::<BTreeSet<_>>();
+    assert_eq!(
+        service.eligible_player_ids(7, Some(&members)).unwrap(),
+        (1..=8).collect::<Vec<_>>()
+    );
+    // Player 7 has no resolved name and player 8 only a stale mention-style
+    // fallback, so neither may appear in any question.
+    let mut labels = (1..=6)
+        .map(|id| (id, format!("Nick{id:02}")))
+        .collect::<PlayerLabels>();
+    labels.insert(8, "<@8>".to_owned());
+
+    let questions = service
+        .generate_questions(99, 7, Some(&members), &labels, 50, true, 30)
+        .unwrap();
+
+    assert!(!questions.is_empty());
+    let rendered = questions
+        .iter()
+        .flat_map(|question| {
+            std::iter::once(question.text.as_str())
+                .chain(std::iter::once(question.explanation.as_str()))
+                .chain(question.options.iter().map(String::as_str))
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(rendered.contains("Nick01"));
+    assert!(!rendered.contains("<@"));
+    // An unnamed player that slipped through would render as the fallback.
+    assert!(!rendered.contains(UNKNOWN_PLAYER));
 }
 
 #[test]
@@ -838,7 +880,7 @@ fn test_glicko_openskill_display_and_rank_discrepancies_use_same_scale() {
         None,
     );
     let display = by_key(&display_questions)["ratings:largest_display_gap"];
-    assert_eq!(display.correct_answer(), "<@1>");
+    assert_eq!(display.correct_answer(), "Nick01");
     assert!(display.explanation.contains("2500 points"));
 
     let (rank_questions, _) = generate(
@@ -854,7 +896,7 @@ fn test_glicko_openskill_display_and_rank_discrepancies_use_same_scale() {
         None,
     );
     let rank = by_key(&rank_questions)["ratings:largest_rank_gap"];
-    assert_eq!(rank.correct_answer(), "<@1>");
+    assert_eq!(rank.correct_answer(), "Nick01");
     assert!(rank.explanation.contains("3 places"));
 }
 
@@ -887,7 +929,7 @@ fn test_spicy_questions_are_opt_in_but_neutral_loss_history_is_not_spicy() {
     assert!(!by_key(&normal).contains_key("economy:deepest_historical_debt"));
     assert_eq!(
         by_key(&deep_spicy)["economy:deepest_historical_debt"].correct_answer(),
-        "<@4>"
+        "Nick04"
     );
 
     let hero_sets = BTreeMap::from([
@@ -923,7 +965,7 @@ fn test_spicy_questions_are_opt_in_but_neutral_loss_history_is_not_spicy() {
         None,
     );
     let lost = by_key(&hero_questions)["heroes:most_distinct_lost"];
-    assert_eq!(lost.correct_answer(), "<@1>");
+    assert_eq!(lost.correct_answer(), "Nick01");
     assert!(!lost.spicy);
 }
 
@@ -953,10 +995,10 @@ fn test_tip_amount_and_transaction_leaders_are_separate_statistics() {
         None,
     );
     let keyed = by_key(&questions);
-    assert_eq!(keyed["tips:most_jc_sent"].correct_answer(), "<@1>");
+    assert_eq!(keyed["tips:most_jc_sent"].correct_answer(), "Nick01");
     assert_eq!(
         keyed["tips:most_transactions_sent"].correct_answer(),
-        "<@2>"
+        "Nick02"
     );
 }
 
@@ -1002,7 +1044,7 @@ fn test_exact_wheel_outcome_supports_lightning_frequency_and_ignores_null_codes(
     let keyed = by_key(&questions);
     let leader = keyed["wheel:exact_outcome_leader:lightning"];
     let count = keyed["wheel:exact_outcome_count:lightning:1"];
-    assert_eq!(leader.correct_answer(), "<@1>");
+    assert_eq!(leader.correct_answer(), "Nick01");
     assert_eq!(count.correct_answer(), "100 times");
     assert!(count.text.contains("Lightning"));
     assert!(
@@ -1106,7 +1148,7 @@ fn test_prediction_questions_include_market_descriptor_without_creator_metadata(
         loss.correct_answer(),
         "Market #11 — Will market 11 resolve YES?"
     );
-    assert!(loss.text.contains("<@1>"));
+    assert!(loss.text.contains("Nick01"));
     assert!(!loss.spicy);
     let rendered = questions
         .iter()
@@ -1152,7 +1194,7 @@ fn test_prediction_questions_subtract_vanity_tax_from_total_pnl() {
         None,
     );
     let question = by_key(&questions)["predictions:best_total_pnl"];
-    assert_eq!(question.correct_answer(), "<@2>");
+    assert_eq!(question.correct_answer(), "Nick02");
     assert!(question.explanation.contains("+24 JC"));
 }
 
@@ -1236,7 +1278,7 @@ fn test_betting_questions_subtract_withholding_once_per_settlement() {
         None,
     );
     let question = by_key(&questions)["betting:largest_loss"];
-    assert_eq!(question.correct_answer(), "<@1>");
+    assert_eq!(question.correct_answer(), "Nick01");
     // +100 from the two bets on one settlement, minus its 1 JC vanity tax and
     // 2 JC bankruptcy penalty counted once, minus the 100 JC lost elsewhere.
     assert!(question.explanation.contains("down 3 JC"));
@@ -1305,7 +1347,7 @@ fn test_mafia_questions_use_only_resolved_non_cancelled_games() {
         None,
     );
     let question = by_key(&questions)["mafia:most_games"];
-    assert_eq!(question.correct_answer(), "<@1>");
+    assert_eq!(question.correct_answer(), "Nick01");
     assert!(question.text.to_lowercase().contains("resolved"));
 }
 
@@ -1596,19 +1638,97 @@ fn every_live_python_candidate_family_is_representable_from_typed_snapshot() {
         .collect::<BTreeMap<_, _>>();
     let mut candidates = Vec::new();
     let mut random = StableRandom;
-    build_match_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_rating_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_hero_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_pairing_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_economy_and_tip_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_betting_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_wheel_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_double_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_prediction_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_dig_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_mafia_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_trivia_history_questions(&mut candidates, &snapshot, &player_index, &mut random);
-    build_disbursement_questions(&mut candidates, &snapshot, &player_index, &mut random);
+    build_match_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_rating_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_hero_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_pairing_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_economy_and_tip_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_betting_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_wheel_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_double_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_prediction_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_dig_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_mafia_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_trivia_history_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
+    build_disbursement_questions(
+        &mut candidates,
+        &snapshot,
+        &player_index,
+        &names(),
+        &mut random,
+    );
 
     let keys = candidates
         .iter()

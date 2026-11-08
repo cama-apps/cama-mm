@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use cama_domain::game_date::yesterday_of;
 use cama_domain::openskill::{
-    CamaOpenSkillSystem, OpenSkillConfig, Player as OpenSkillPlayer, Rating as OpenSkillRating,
-    WeightedPlayer, WinningTeam,
+    CamaOpenSkillSystem, OPENSKILL_ALGORITHM_VERSION, OpenSkillConfig, Player as OpenSkillPlayer,
+    Rating as OpenSkillRating, WeightedPlayer, WinningTeam,
 };
 use cama_domain::rating::{
     CamaRatingSystem, LEGACY_STREAK_MULTIPLIER_PER_GAME, LEGACY_STREAK_THRESHOLD,
@@ -159,6 +159,7 @@ pub struct MigrationReport {
     pub historical_extra_migrations: Vec<String>,
 }
 
+#[cfg(test)]
 impl MigrationReport {
     /// Whether the database was already at the current logical migration head.
     #[must_use]
@@ -387,9 +388,22 @@ fn reconcile_schema(
             [&object.name],
             |row| row.get(0),
         )?;
-        let same_column_count = expected_columns.len() == actual_columns.len();
+        // Historical extra columns are retained by a rebuild, so they are
+        // removed from the live definition before the comparison; otherwise
+        // a canonical constraint, collation, or CHECK change would never
+        // reach a table that still carries one.
+        let expected_names: BTreeSet<String> = expected_columns
+            .iter()
+            .map(|column| column.name.to_ascii_lowercase())
+            .collect();
+        let extra_names: BTreeSet<String> = actual_columns
+            .iter()
+            .map(|column| column.name.to_ascii_lowercase())
+            .filter(|name| !expected_names.contains(name))
+            .collect();
         if table_needs_rebuild(&expected_columns, &actual_columns)
-            || (same_column_count && normalize_sql(&actual_sql) != normalize_sql(&object.sql))
+            || normalize_sql(&without_column_definitions(&actual_sql, &extra_names))
+                != normalize_sql(&object.sql)
         {
             rebuild_table(
                 transaction,
@@ -558,13 +572,172 @@ fn rebuild_table(
         ))?;
     }
 
-    transaction.execute_batch(&format!(
+    // DROP TABLE deletes the table's sqlite_sequence row, so an AUTOINCREMENT
+    // table would restart at its largest surviving id (or at 1 when empty)
+    // and reissue ids that deleted rows still own in other tables and keys.
+    let high_water_mark = autoincrement_sequence(transaction, table)?;
+    // Triggers on other tables may reference this table by name. The modern
+    // RENAME re-resolves every trigger body and aborts on one whose table is
+    // momentarily missing; the legacy RENAME leaves those bodies untouched,
+    // so they resolve to the rebuilt table under its unchanged name. The
+    // flag is per connection and never persisted.
+    transaction.pragma_update(None, "legacy_alter_table", true)?;
+    let swapped = transaction.execute_batch(&format!(
         "DROP TABLE {}; ALTER TABLE {} RENAME TO {}",
         quote_identifier(table),
         quote_identifier(&temporary),
         quote_identifier(table)
-    ))?;
+    ));
+    transaction.pragma_update(None, "legacy_alter_table", false)?;
+    swapped?;
+    if let Some(sequence) = high_water_mark
+        && canonical_sql.to_ascii_uppercase().contains("AUTOINCREMENT")
+    {
+        raise_autoincrement_sequence(transaction, table, sequence)?;
+    }
     Ok(())
+}
+
+fn autoincrement_sequence(
+    connection: &Connection,
+    table: &str,
+) -> Result<Option<i64>, rusqlite::Error> {
+    if !table_exists(connection, "sqlite_sequence")? {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name=?1",
+            [table],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
+/// Raise (never lower) an AUTOINCREMENT table's next-id floor.
+fn raise_autoincrement_sequence(
+    connection: &Connection,
+    table: &str,
+    sequence: i64,
+) -> Result<(), rusqlite::Error> {
+    let raised = connection.execute(
+        "UPDATE sqlite_sequence SET seq=MAX(seq, ?2) WHERE name=?1",
+        params![table, sequence],
+    )?;
+    if raised == 0 && sequence > 0 {
+        connection.execute(
+            "INSERT INTO sqlite_sequence(name, seq) VALUES (?1, ?2)",
+            params![table, sequence],
+        )?;
+    }
+    Ok(())
+}
+
+/// Remove the named column definitions from a `CREATE TABLE` statement.
+///
+/// The body is split on top-level commas while skipping string literals,
+/// quoted identifiers, nested parentheses, and comments. A segment whose
+/// leading identifier names one of `columns` (lowercase) is dropped; table
+/// constraints and every other column definition are kept verbatim.
+fn without_column_definitions(sql: &str, columns: &BTreeSet<String>) -> String {
+    if columns.is_empty() {
+        return sql.to_owned();
+    }
+    let Some(open) = sql.find('(') else {
+        return sql.to_owned();
+    };
+    let bytes = sql.as_bytes();
+    let mut depth = 0_usize;
+    let mut segments = Vec::new();
+    let mut segment_start = open + 1;
+    let mut close = None;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            quote @ (b'\'' | b'"' | b'`') => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == quote {
+                        if bytes.get(index + 1) == Some(&quote) {
+                            index += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    index += 1;
+                }
+            }
+            b'[' => {
+                while index < bytes.len() && bytes[index] != b']' {
+                    index += 1;
+                }
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    segments.push(&sql[segment_start..index]);
+                    close = Some(index);
+                    break;
+                }
+            }
+            b',' if depth == 1 => {
+                segments.push(&sql[segment_start..index]);
+                segment_start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let Some(close) = close else {
+        return sql.to_owned();
+    };
+    let kept = segments
+        .into_iter()
+        .filter(|segment| leading_identifier(segment).is_none_or(|name| !columns.contains(&name)))
+        .collect::<Vec<_>>();
+    format!("{}{}{}", &sql[..=open], kept.join(","), &sql[close..])
+}
+
+fn leading_identifier(segment: &str) -> Option<String> {
+    let mut trimmed = segment.trim_start();
+    loop {
+        if let Some(comment) = trimmed.strip_prefix("--") {
+            trimmed = comment.split_once('\n').map_or("", |(_, rest)| rest);
+        } else if let Some(comment) = trimmed.strip_prefix("/*") {
+            trimmed = comment.split_once("*/").map_or("", |(_, rest)| rest);
+        } else {
+            break;
+        }
+        trimmed = trimmed.trim_start();
+    }
+    let (open, close) = match trimmed.chars().next()? {
+        '"' => ('"', '"'),
+        '`' => ('`', '`'),
+        '[' => ('[', ']'),
+        _ => {
+            let name = trimmed
+                .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .next()?;
+            return (!name.is_empty()).then(|| name.to_ascii_lowercase());
+        }
+    };
+    let rest = &trimmed[open.len_utf8()..];
+    let end = rest.find(close)?;
+    Some(rest[..end].to_ascii_lowercase())
 }
 
 fn safe_extra_declared_type(declared_type: &str) -> String {
@@ -1295,6 +1468,12 @@ fn run_consolidated_backfills(
              WHERE retry_requested IS NULL;",
         )?;
     }
+    if pending(
+        pending_migrations,
+        "restore_pending_match_id_high_water_mark",
+    ) {
+        restore_pending_match_high_water_mark(transaction)?;
+    }
     let openskill_replay_count = [
         "openskill_v3_durable_native_replay",
         "openskill_v4_streak_replay",
@@ -1305,6 +1484,49 @@ fn run_consolidated_backfills(
     .count();
     for _ in 0..openskill_replay_count {
         replay_openskill(transaction, settings)?;
+    }
+    Ok(())
+}
+
+/// Pending-match ids form one global AUTOINCREMENT space that recorded
+/// matches, bets, sessions, Draft jobs and envelopes, suspension watermarks,
+/// ledger rows, and `app_kv` keys keep referencing after the pending row is
+/// deleted. A table rebuild made before sequence preservation reset the
+/// counter to the largest surviving pending row, so raise it past every
+/// durable reference to stop old ids from being issued again.
+fn restore_pending_match_high_water_mark(
+    transaction: &Transaction<'_>,
+) -> Result<(), rusqlite::Error> {
+    let highest: Option<i64> = transaction.query_row(
+        "SELECT MAX(id) FROM (
+             SELECT MAX(pending_match_id) AS id FROM pending_matches
+             UNION ALL SELECT MAX(pending_match_id) FROM matches
+             UNION ALL SELECT MAX(pending_match_id) FROM bets
+             UNION ALL SELECT MAX(pending_match_id) FROM dota_sessions
+             UNION ALL SELECT MAX(pending_match_id) FROM dota_spectators
+             UNION ALL SELECT MAX(pending_match_id) FROM draft_finalization_jobs
+             UNION ALL SELECT MAX(pending_match_id) FROM draft_financial_effects
+             UNION ALL SELECT MAX(pending_match_id) FROM first_game_pool_claims
+             UNION ALL SELECT MAX(start_pending_match_id) FROM low_priority_state
+             UNION ALL SELECT MAX(pending_match_watermark) FROM moderation_events
+             UNION ALL SELECT MAX(pending_match_watermark) FROM lobby_suspensions
+             UNION ALL SELECT MAX(CAST(related_id AS INTEGER)) FROM economy_ledger_entries
+                 WHERE related_type='pending_match'
+             UNION ALL SELECT MAX(CAST(substr(key, 15) AS INTEGER)) FROM app_kv
+                 WHERE key GLOB 'pending-abort:[0-9]*'
+             UNION ALL SELECT MAX(CAST(substr(key, 21 + instr(substr(key, 21), ':')) AS INTEGER))
+                 FROM app_kv WHERE key GLOB 'dota_host_withdrawn:*:[0-9]*'
+             UNION ALL SELECT MAX(MAX(
+                     COALESCE(CAST(json_extract(value, '$.pending_match_id') AS INTEGER), 0),
+                     COALESCE(CAST(json_extract(value, '$.financial_setup.pending_match_id')
+                                   AS INTEGER), 0)))
+                 FROM app_kv WHERE key='draft:state' AND json_valid(value)
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if let Some(highest) = highest.filter(|highest| *highest > 0) {
+        raise_autoincrement_sequence(transaction, "pending_matches", highest)?;
     }
     Ok(())
 }
@@ -1925,7 +2147,6 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
     Ok(())
 }
 
-const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
 const RECENT_OUTCOME_LIMIT: usize = 20;
 
 #[derive(Clone, Debug)]

@@ -400,7 +400,7 @@ fn test_initial_tab_custom() {
 #[test]
 fn test_all_tabs_have_state() {
     let view = view(FakeRepository::default(), LeaderboardTab::Balance, 100);
-    assert_eq!(view.tab_count(), 7);
+    assert_eq!(LeaderboardTab::ALL.len(), 7);
     assert!(
         LeaderboardTab::ALL
             .into_iter()

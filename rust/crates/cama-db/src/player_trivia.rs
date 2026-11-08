@@ -392,7 +392,7 @@ impl PlayerTriviaRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, PlayerTriviaRepositoryError> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, PlayerTriviaRepositoryError> {
         Ok(open_runtime_connection(&self.path)?)
     }
 
@@ -593,25 +593,6 @@ impl PlayerTriviaRepository {
              )",
             params![now, session_id],
         )? == 1;
-        transaction.commit()?;
-        Ok(changed)
-    }
-
-    pub fn expire_stale_sessions(
-        &self,
-        now: i64,
-        answer_timeout_seconds: i64,
-    ) -> Result<usize, PlayerTriviaRepositoryError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = transaction.execute(
-            "UPDATE player_trivia_sessions AS s SET status = 'timed_out', completed_at = ?1
-             WHERE s.status = 'active' AND COALESCE((
-                 SELECT MAX(q.answered_at) FROM player_trivia_questions q
-                 WHERE q.session_id = s.session_id
-             ), s.started_at) <= ?2",
-            params![now, now.saturating_sub(answer_timeout_seconds.max(0))],
-        )?;
         transaction.commit()?;
         Ok(changed)
     }

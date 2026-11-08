@@ -802,13 +802,14 @@ pub fn update_dig_action_detail_for_actor(
 /// pending rows rather than over the player's oldest actions, which delivered
 /// rows would otherwise fill for good.
 ///
-/// The guild is required so the `(guild_id, action_type, ...)` index prefix
-/// bounds the scan; an optional guild would force a full table scan on every
-/// READY pass. Rows are ordered by `(created_at, id)`, which that index
-/// serves without sorting the guild's whole dig range first, and `after` is
-/// a keyset cursor over the same order: the `(created_at, id)` of the last
-/// row of the previous page, so a caller can walk every pending row even
-/// when earlier rows are retained rather than closed.
+/// The guild is required so the partial `idx_dig_actions_pending_delivery`
+/// index bounds the scan. That index holds only rows matching this exact
+/// pending rule, so delivered history is never visited or JSON-parsed. Rows
+/// are ordered by `(created_at, id)`, which that index serves without
+/// sorting, and `after` is a keyset cursor over the same order: the
+/// `(created_at, id)` of the last row of the previous page, so a caller can
+/// walk every pending row even when earlier rows are retained rather than
+/// closed.
 pub fn dig_action_details_for_delivery(
     connection: &Connection,
     guild_id: i64,
@@ -829,7 +830,9 @@ pub fn dig_action_details_for_delivery(
 }
 
 /// The pending-delivery scan, kept addressable so its query plan can be
-/// asserted to use the guild/type index and its order.
+/// asserted to use the partial pending-delivery index and its order. Its
+/// pending terms must stay textually identical to that index's `WHERE`
+/// clause in the canonical schema, or SQLite cannot use the index.
 pub const PENDING_DIG_DELIVERY_SQL: &str = "SELECT detail FROM dig_actions
          WHERE guild_id=?1
            AND action_type='dig'

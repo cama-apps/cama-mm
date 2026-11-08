@@ -109,6 +109,9 @@ fn migrated_database() -> NamedTempFile {
     database
 }
 
+/// The mounted repositories name the runtime connection type at the crate root.
+type RuntimeConnection = Connection;
+
 fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
     let connection = Connection::open_with_flags(
         path,

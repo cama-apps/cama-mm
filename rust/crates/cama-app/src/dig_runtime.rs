@@ -45,7 +45,7 @@ use cama_domain::game_date::game_date_for_timestamp;
 use cama_domain::mana::{ManaEffects, weather_combo_modifiers};
 use cama_domain::pet::{PetDigWork, PetDigWorkClaim};
 use chrono::NaiveDate;
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;

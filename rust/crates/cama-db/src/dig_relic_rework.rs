@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::TransactionBehavior;
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -38,7 +38,7 @@ impl DigRelicReworkRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

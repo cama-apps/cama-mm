@@ -18,8 +18,6 @@ pub mod player_trivia_service;
 pub mod playtime_service;
 #[path = "../../cama-app/src/python_random.rs"]
 pub mod python_random;
-#[path = "../../cama-app/src/referrals.rs"]
-pub mod referrals;
 #[path = "../../cama-app/src/registration.rs"]
 pub mod registration;
 #[path = "../../cama-app/src/reminders.rs"]

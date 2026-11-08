@@ -868,6 +868,63 @@ async fn direct_eat_delivery_guard_suppresses_sweep_until_retry() {
 }
 
 #[tokio::test]
+async fn death_announced_directly_after_the_sweep_read_is_not_posted_again() {
+    let now = Utc::now().timestamp();
+    let database = migrated_database();
+    let pet = adopt_and_resolve(
+        database.path(),
+        361,
+        "Raced Dinner",
+        now - EGG_HATCH_SECONDS - 100,
+        "common_cama",
+    );
+    Connection::open(database.path())
+        .expect("open pet fixture")
+        .execute(
+            "UPDATE pets SET died_at=?1,death_cause='starvation',hatch_announced_at=?1,is_active=0
+             WHERE pet_id=?2",
+            params![now - 1, pet.pet_id],
+        )
+        .expect("persist unannounced death");
+    let assets = TempDir::new().expect("pet assets directory");
+    let discord = Arc::new(FakeDiscord::new(Some(CHANNEL)));
+    let reminders = Arc::new(FakeReminders::default());
+    reminders.enable(pet.discord_id, GUILD);
+    let worker = worker(
+        database.path(),
+        Arc::clone(&discord),
+        Arc::clone(&reminders),
+        &assets,
+    );
+    let (_shutdown, context) = worker_context();
+
+    let mut outcome = worker.sweep_pets().await.expect("sweep reads the death");
+    assert_eq!(outcome.deaths.len(), 1);
+    // A direct `/pet eat` delivery posts, stamps, and drops its guard after
+    // the sweep's read but before the sweep's own delivery.
+    Connection::open(database.path())
+        .expect("open pet fixture")
+        .execute(
+            "UPDATE pets SET death_announced_at=?1 WHERE pet_id=?2",
+            params![now, pet.pet_id],
+        )
+        .expect("direct delivery stamps the death");
+    let notice = outcome.deaths.remove(0);
+    assert!(
+        worker.deliver_death(&context, notice).await.is_ok(),
+        "an already announced death is a completed notice"
+    );
+
+    assert!(discord.messages().is_empty());
+    assert!(discord.dms().is_empty());
+    assert_eq!(
+        pet_announcement_times(database.path(), pet.pet_id).1,
+        Some(now),
+        "the direct delivery's stamp is left untouched"
+    );
+}
+
+#[tokio::test]
 async fn no_channel_death_marks_and_cancels_after_best_effort_native_tombstone_dm() {
     let now = Utc::now().timestamp();
     let database = migrated_database();

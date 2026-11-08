@@ -97,10 +97,7 @@ use cama_domain::shuffler::{
     BalancedShuffler, PackageDeal, PoolOptions, ShuffleConstraints, SoftAvoid,
 };
 use cama_domain::team::Team;
-use chrono::{
-    DateTime, Datelike, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Timelike, Utc,
-    Weekday,
-};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Timelike, Utc, Weekday};
 use rusqlite::types::Value as SqlValue;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -4495,6 +4492,7 @@ impl MatchHandler {
         };
         core.glicko_updates = glicko_updates.values().copied().collect();
         core.openskill_updates = os_updates.values().copied().collect();
+        core.openskill_algorithm_fingerprint = self.openskill.algorithm_fingerprint();
         core.first_calibration_ids = first_calibration_ids;
         core.first_calibration_unix = unix_seconds();
         if pending.state.exclusion_updates_deferred {
@@ -6295,14 +6293,7 @@ fn sql_datetime(value: &SqlValue) -> Option<DateTime<Utc>> {
     let SqlValue::Text(value) = value else {
         return None;
     };
-    DateTime::parse_from_rfc3339(value)
-        .map(|date| date.with_timezone(&Utc))
-        .ok()
-        .or_else(|| {
-            NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
-                .ok()
-                .map(|date| date.and_utc())
-        })
+    cama_db::core_repositories::parse_sql_datetime(value)
 }
 
 fn decayed_glicko_rd(

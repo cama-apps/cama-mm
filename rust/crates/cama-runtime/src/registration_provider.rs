@@ -1993,19 +1993,29 @@ impl PlayerRegistrationHandler {
         let user_id = signed_id(context.user_id, "user")?;
         let guild = signed_id(guild_id, "guild")?;
         let service = TimezoneService::new(self.registration.clone());
+        let now = chrono::Utc::now();
         let result = tokio::task::spawn_blocking(move || {
-            service.set_timezone(user_id, Some(guild), &timezone)
+            service.set_timezone(user_id, Some(guild), &timezone, now)
         })
         .await
         .map_err(|error| format!("timezone set task failed: {error}"))?;
         match result {
-            Ok(()) => {
-                followup_ephemeral(
-                    &responder,
-                    "✅ Timezone set. Curfew windows will use this unless a window was given \
-                     its own timezone with `/player curfew add`.",
-                )
-                .await
+            Ok(held) => {
+                let mut message = "✅ Timezone set. Curfew windows will use this unless a window \
+                                   was given its own timezone with `/player curfew add`."
+                    .to_owned();
+                if !held.is_empty() {
+                    let names = held
+                        .iter()
+                        .map(|name| format!("\"{name}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    message.push_str(&format!(
+                        "\nStrict window(s) {names} keep your previous timezone until the next \
+                         morning, like any other strict-mode edit."
+                    ));
+                }
+                followup_ephemeral(&responder, message).await
             }
             Err(TimezoneServiceError::PlayerNotRegistered) => {
                 followup_ephemeral(&responder, "❌ Player not registered.").await

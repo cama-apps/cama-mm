@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -56,7 +56,7 @@ impl AutobetInvestmentRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -309,7 +309,7 @@ mod tests {
     fn autobet_attribution_schema_has_profile_columns_and_index() {
         let database = NamedTempFile::new().expect("temporary database");
         copy_migrated_database(database.path()).expect("migrated schema");
-        let connection = Connection::open(database.path()).expect("schema connection");
+        let connection = rusqlite::Connection::open(database.path()).expect("schema connection");
         let columns = connection
             .prepare("PRAGMA table_info(bets)")
             .expect("bets columns")

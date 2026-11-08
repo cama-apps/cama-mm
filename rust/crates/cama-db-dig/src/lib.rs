@@ -1,6 +1,6 @@
 //! Dig persistence repositories compiled independently from other database slices.
 
-pub(crate) use cama_db_core::open_runtime_connection;
+pub(crate) use cama_db_core::{RuntimeConnection, open_runtime_connection};
 #[cfg(test)]
 pub(crate) use cama_db_core::{expected_migrations, schema_manager};
 #[cfg(test)]
