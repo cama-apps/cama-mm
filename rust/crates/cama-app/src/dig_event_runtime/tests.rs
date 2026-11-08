@@ -2179,3 +2179,145 @@ fn event_curse_is_strengthened_replaces_the_old_curse_and_keeps_the_buff() {
         }
     }
 }
+
+/// The live burn for one authored splash victim at the runtime's scale.
+fn live_burn(penalty_jc: i64) -> i64 {
+    scale_deflationary_minigame_jc_delta(
+        strengthen_dig_event_penalty(penalty_jc) as f64,
+        DigRuntimeConfig::default().minigame_jc_delta_scale,
+    )
+}
+
+fn authored_splash(event_id: &str) -> crate::dig_loot::CanonicalSplash {
+    crate::dig_loot::canonical_event_catalog()
+        .iter()
+        .find(|event| event.id == event_id)
+        .and_then(|event| event.splash.clone())
+        .unwrap_or_else(|| panic!("{event_id} splash"))
+}
+
+#[test]
+fn themed_burn_events_hit_only_the_richest_and_destroy_more_than_they_pay() {
+    for (event_id, actor_balance, depth, others, victims) in [
+        (
+            "underworld_reclaims",
+            500,
+            80,
+            vec![(1, 1_300), (2, 1_200), (3, 1_100), (4, 900)],
+            vec![1, 2, 3],
+        ),
+        (
+            "ember_clearinghouse",
+            500,
+            80,
+            vec![(1, 1_300), (2, 1_200), (3, 1_100), (4, 1_000)],
+            vec![1, 2, 3],
+        ),
+        (
+            "hungering_dark",
+            10_000,
+            120,
+            vec![(1, 1_000), (2, 1_000), (3, 1_000)],
+            vec![1, 2],
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, actor_balance, depth, 0);
+        for (offset, balance) in &others {
+            fixture.seed_actor(ACTOR + offset, *balance, 10, 0);
+        }
+        let splash = authored_splash(event_id);
+        assert_eq!(
+            (splash.mode.as_str(), splash.strategy.as_str()),
+            ("burn", "richest_n")
+        );
+        let key = key_for_outcome(&fixture.snapshot(), event_id, "risky", true);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request(event_id, "risky", &key))
+            .expect("themed burn");
+
+        let burn = live_burn(splash.penalty_jc);
+        let burned = outcome.splash.as_ref().expect("burn splash");
+        assert_eq!(
+            burned.victims,
+            victims
+                .iter()
+                .map(|offset| (ACTOR + offset, burn))
+                .collect::<Vec<_>>(),
+            "{event_id}"
+        );
+        for (offset, balance) in &others {
+            let expected = if victims.contains(offset) {
+                balance - burn
+            } else {
+                *balance
+            };
+            assert_eq!(fixture.balance(ACTOR + offset), expected, "{event_id}");
+        }
+        let actor_gain = fixture.balance(ACTOR) - actor_balance;
+        let resolution = outcome.resolution.as_ref().expect("resolution");
+        assert_eq!(actor_gain, resolution.jc, "{event_id}");
+        assert!(actor_gain > 0, "{event_id}");
+        assert!(
+            burned.total_moved > actor_gain,
+            "{event_id} stays deflationary"
+        );
+    }
+}
+
+#[test]
+fn burn_event_pays_nothing_when_no_one_can_be_burned() {
+    // No other miners, or only miners under the hostile-loss floor.
+    for others in [vec![], vec![(1, 3), (2, 3)]] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 500, 80, 0);
+        for (offset, balance) in &others {
+            fixture.seed_actor(ACTOR + offset, *balance, 10, 0);
+        }
+        let key = key_for_outcome(&fixture.snapshot(), "wealth_siphon", "risky", true);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request("wealth_siphon", "risky", &key))
+            .expect("unfunded burn");
+
+        assert!(outcome.resolution.as_ref().expect("resolution").succeeded);
+        assert_eq!(outcome.resolution.as_ref().expect("resolution").jc, 0);
+        assert!(
+            outcome
+                .splash
+                .as_ref()
+                .is_none_or(|splash| splash.victims.is_empty() && splash.total_moved == 0)
+        );
+        assert_eq!(fixture.balance(ACTOR), 500);
+        for (offset, balance) in &others {
+            assert_eq!(fixture.balance(ACTOR + offset), *balance);
+        }
+    }
+}
+
+#[test]
+fn failed_burn_event_burns_no_one() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 500, 80, 0);
+    fixture.seed_actor(ACTOR + 1, 1_000, 10, 0);
+    let key = key_for_outcome(&fixture.snapshot(), "wealth_siphon", "risky", false);
+
+    let outcome = fixture
+        .service()
+        .resolve_event(request("wealth_siphon", "risky", &key))
+        .expect("failed burn");
+
+    let resolution = outcome.resolution.as_ref().expect("resolution");
+    assert!(!resolution.succeeded);
+    assert!(
+        outcome
+            .splash
+            .as_ref()
+            .is_none_or(|splash| splash.victims.is_empty())
+    );
+    assert_eq!(fixture.balance(ACTOR + 1), 1_000);
+    assert_eq!(fixture.balance(ACTOR), 500 + resolution.jc);
+}
