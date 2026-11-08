@@ -765,13 +765,18 @@ async fn refresh_trade_summary_is_live_and_not_acknowledged_when_thread_send_fai
         .await
         .expect("a delivery failure stays pending without failing the wake");
     assert_eq!(discord.summaries().len(), 1);
+    let summary = &discord.summaries()[0].1;
+    assert!(summary.response.content.contains("Daily refresh"));
     assert!(
-        discord.summaries()[0]
-            .1
+        summary
             .response
             .content
-            .contains("Daily refresh")
+            .contains("biggest: @Server Nick bought 4 YES @ 53"),
+        "{}",
+        summary.response.content
     );
+    assert!(!summary.response.content.contains("<@"));
+    assert_eq!(summary.allowed_mentions, DiscordAllowedMentions::None);
     assert_eq!(fixture.pending_refreshes(), 2);
 }
 

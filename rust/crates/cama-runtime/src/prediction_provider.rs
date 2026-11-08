@@ -44,7 +44,7 @@ use tracing::{debug, warn};
 use crate::ApplicationConfig;
 use crate::discord_transport::{
     DiscordAllowedMentions, DiscordGuildPlayerNameResolver, DiscordIdPlayerNameResolver,
-    DiscordMessage, DiscordTransport, GuildPlayerNameResolver,
+    DiscordMessage, DiscordTransport, GuildPlayerNameDirectory, GuildPlayerNameResolver,
 };
 use crate::gamba_guild_source::GambaGuildSource;
 use crate::ids::signed_id;
@@ -1099,13 +1099,14 @@ impl PredictionInteractionHandler {
         initial_fair: i64,
     ) -> Result<(), String> {
         let market_message = self.market_message(prediction_id, None, true).await?;
-        let announcement = DiscordMessage::default_mentions(InteractionResponse::message(format!(
-            "📈 **New market #{prediction_id}** opened by <@{creator_id}>\n\
-                 \"{question}\" — starting at YES {initial_fair}%"
+        let creator_name = self.player_name(guild_id, creator_id).await;
+        let display_question = self.display_text(guild_id, question).await;
+        let announcement = DiscordMessage::silent(InteractionResponse::message(format!(
+            "📈 **New market #{prediction_id}** opened by {creator_name}\n\
+                 \"{display_question}\" — starting at YES {initial_fair}%"
         )));
         // Thread names are plain text: Discord never renders mentions there.
-        let thread_name =
-            market_thread_name(prediction_id, &self.display_text(guild_id, question).await);
+        let thread_name = market_thread_name(prediction_id, &display_question);
         let surface = self
             .command_discord
             .create_prediction_market_surface(
@@ -1225,6 +1226,14 @@ impl PredictionInteractionHandler {
             content_mode: Default::default(),
             suppress_notifications: false,
         })
+    }
+
+    /// One player's readable name for announcements.
+    async fn player_name(&self, guild_id: i64, discord_id: i64) -> String {
+        self.player_names
+            .resolve_names(guild_id, &[discord_id])
+            .await
+            .resolve(discord_id)
     }
 
     /// The market question with mentions rendered as readable names.
@@ -1867,13 +1876,12 @@ impl PredictionInteractionHandler {
         })
         .await?;
         let announce = format!(
-            "📈 Market #{prediction_id} fair manually set by <@{}>: YES {old_price}% → {new_price}%",
-            command.user_id
+            "📈 Market #{prediction_id} fair manually set by {}: YES {old_price}% → {new_price}%",
+            self.player_name(market.guild_id, command.user_id).await
         );
         followup(
             &responder,
-            InteractionResponse::message(&announce)
-                .with_user_mentions(vec![u64::try_from(command.user_id).unwrap_or_default()]),
+            InteractionResponse::message(&announce).without_mentions(),
         )
         .await?;
         if let Err(error) = self.refresh_open_market_message(prediction_id).await {
@@ -1927,8 +1935,8 @@ impl PredictionInteractionHandler {
         })
         .await?;
         let announce = format!(
-            "🔧 Market #{prediction_id} manually refreshed by <@{}>: YES {}% → {}% ({} trade{} since last refresh)",
-            command.user_id,
+            "🔧 Market #{prediction_id} manually refreshed by {}: YES {}% → {}% ({} trade{} since last refresh)",
+            self.player_name(market.guild_id, command.user_id).await,
             refresh.old_price,
             refresh.new_price,
             refresh.trade_count,
@@ -1936,8 +1944,7 @@ impl PredictionInteractionHandler {
         );
         followup(
             &responder,
-            InteractionResponse::message(&announce)
-                .with_user_mentions(vec![u64::try_from(command.user_id).unwrap_or_default()]),
+            InteractionResponse::message(&announce).without_mentions(),
         )
         .await?;
         if let Err(error) = self.refresh_open_market_message(prediction_id).await {
@@ -1992,11 +1999,11 @@ impl PredictionInteractionHandler {
                 .await;
             }
         };
-        let announce = cancellation_announcement(&cancellation, command.user_id);
+        let actor_name = self.player_name(market.guild_id, command.user_id).await;
+        let announce = cancellation_announcement(&cancellation, &actor_name);
         followup(
             &responder,
-            InteractionResponse::message(&announce)
-                .with_user_mentions(vec![u64::try_from(command.user_id).unwrap_or_default()]),
+            InteractionResponse::message(&announce).without_mentions(),
         )
         .await?;
         if let (Some(thread_id), Some(message_id)) = (market.thread_id, market.embed_message_id) {
@@ -2100,16 +2107,15 @@ impl PredictionInteractionHandler {
             }
         };
         let announce = format!(
-            "↩️ Market #{prediction_id} resolution rolled back by <@{}>. Previous outcome: **{}**. Reversed {} {JOPACOIN_EMOTE} across {} holder(s). Trading is open again.",
-            command.user_id,
+            "↩️ Market #{prediction_id} resolution rolled back by {}. Previous outcome: **{}**. Reversed {} {JOPACOIN_EMOTE} across {} holder(s). Trading is open again.",
+            self.player_name(guild_id, command.user_id).await,
             side_name(rollback.previous_outcome).to_ascii_uppercase(),
             rollback.total_reversed,
             rollback.affected_players
         );
         followup(
             &responder,
-            InteractionResponse::message(&announce)
-                .with_user_mentions(vec![u64::try_from(command.user_id).unwrap_or_default()]),
+            InteractionResponse::message(&announce).without_mentions(),
         )
         .await?;
         let repository = self.predictions.clone();
@@ -2239,7 +2245,16 @@ impl PredictionInteractionHandler {
                 .await;
             }
         };
-        let chunks = resolution_chunks(&resolution, &display_question);
+        let participant_ids = resolution
+            .participants
+            .iter()
+            .map(|participant| participant.discord_id)
+            .collect::<Vec<_>>();
+        let participant_names = self
+            .player_names
+            .resolve_names(market.guild_id, &participant_ids)
+            .await;
+        let chunks = resolution_chunks(&resolution, &display_question, &participant_names);
         let chart = self.prediction_chart(prediction_id).await.ok();
         for (index, chunk) in chunks.iter().enumerate() {
             self.followup_with_optional_chart(
@@ -3104,16 +3119,22 @@ fn python_round(value: f64) -> i64 {
     }
 }
 
-fn cancellation_announcement(cancellation: &Cancellation, actor_id: i64) -> String {
+fn cancellation_announcement(cancellation: &Cancellation, actor_name: &str) -> String {
     format!(
-        "🚫 Market #{} cancelled by <@{actor_id}>. Refunded {} {JOPACOIN_EMOTE} across {} holder(s).",
+        "🚫 Market #{} cancelled by {actor_name}. Refunded {} {JOPACOIN_EMOTE} across {} holder(s).",
         cancellation.prediction_id,
         cancellation.total_refunded,
         cancellation.refunded.len()
     )
 }
 
-fn resolution_chunks(resolution: &Resolution, question: &str) -> Vec<String> {
+/// Participants are pinged with their results; each line leads with the
+/// readable name so it never depends on the client resolving the mention.
+fn resolution_chunks(
+    resolution: &Resolution,
+    question: &str,
+    names: &GuildPlayerNameDirectory,
+) -> Vec<String> {
     let mut participants = resolution.participants.clone();
     participants.sort_by_key(|participant| std::cmp::Reverse(participant.profit));
     let up = participants
@@ -3137,7 +3158,8 @@ fn resolution_chunks(resolution: &Resolution, question: &str) -> Vec<String> {
     } else {
         lines.extend(participants.iter().map(|participant| {
             format!(
-                "<@{}> spent {} ({} yes / {} no) → won {} JC (net {:+})",
+                "{} (<@{}>) spent {} ({} yes / {} no) → won {} JC (net {:+})",
+                names.resolve(participant.discord_id),
                 participant.discord_id,
                 participant.cost_basis,
                 participant.yes_contracts,

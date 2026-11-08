@@ -362,15 +362,13 @@ impl PredictionRefreshWorker {
                 if !open {
                     return Ok(());
                 }
-                let mut users = summary_mention_users(content);
-                users.sort_unstable();
-                users.dedup();
-                let response = InteractionResponse::message(content.clone());
-                let message = if users.is_empty() {
-                    DiscordMessage::silent(response)
-                } else {
-                    DiscordMessage::mentioning(response, users.into_iter().collect::<BTreeSet<_>>())
-                };
+                // The stored summary names its biggest trader by mention;
+                // post it with the trader's readable name instead.
+                let content = self
+                    .discord
+                    .prediction_market_text(publication.guild_id, content)
+                    .await;
+                let message = DiscordMessage::silent(InteractionResponse::message(content));
                 let delivered = self
                     .discord
                     .send_prediction_thread_message(*thread_id, message)

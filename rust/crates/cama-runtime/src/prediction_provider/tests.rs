@@ -816,11 +816,16 @@ async fn create_persists_only_real_surface_ids_and_installs_exact_persistent_but
     assert_eq!(created.len(), 1);
     let (channel_id, announcement, thread_name, market_message) = &created[0];
     assert_eq!(*channel_id, COMMAND_CHANNEL);
-    assert_eq!(
-        announcement.allowed_mentions,
-        DiscordAllowedMentions::Default
+    assert_eq!(announcement.allowed_mentions, DiscordAllowedMentions::None);
+    assert!(
+        announcement
+            .response
+            .content
+            .contains("opened by Unknown player\n\"Will @Trader win this market?\""),
+        "{}",
+        announcement.response.content
     );
-    assert!(announcement.response.content.contains("opened by <@99>"));
+    assert!(!announcement.response.content.contains("<@"));
     assert_eq!(thread_name, "Market #1: Will @Trader win this market?");
     assert_eq!(
         market_message.allowed_mentions,
@@ -1810,11 +1815,14 @@ async fn remaining_live_subcommands_and_position_button_preserve_python_visibili
     let set_fair = set_fair.snapshot();
     assert_eq!(set_fair.deferred, [false]);
     assert!(set_fair.followups[0].content.contains("YES 50% → 60%"));
+    assert!(
+        set_fair.followups[0]
+            .content
+            .contains("fair manually set by Unknown player:")
+    );
     assert_eq!(
         set_fair.followups[0].allowed_mentions,
-        crate::registration::InteractionAllowedMentions::Users(vec![
-            u64::try_from(ADMIN).expect("positive admin ID")
-        ])
+        crate::registration::InteractionAllowedMentions::None
     );
 
     let force = Arc::new(CapturingResponder::default());
@@ -2071,6 +2079,84 @@ fn market_thread_names_stay_within_discords_limit() {
             name.encode_utf16().count() <= 100,
             "{} UTF-16 units: {name}",
             name.encode_utf16().count()
+        );
+    }
+}
+
+#[tokio::test]
+async fn market_announcements_name_admins_and_ping_participants_beside_their_names() {
+    let fixture = Fixture::migrated();
+    fixture.player(TRADER, 1_000);
+    let prediction_id = fixture.market("Will every announcement use readable names?");
+    PredictionRepository::new(&fixture.path)
+        .buy_contracts_atomic_with_max(prediction_id, TRADER, ContractSide::Yes, 2, 100)
+        .expect("buy named contracts");
+    let provider = fixture
+        .provider()
+        .with_player_names(Arc::new(FixedPlayerNames(GuildPlayerNameDirectory::new(
+            Some(BTreeMap::from([
+                (ADMIN as u64, "Market Admin".to_owned()),
+                (TRADER as u64, "Server Trader".to_owned()),
+            ])),
+        ))));
+    let mut builder = RegistryBuilder::default();
+    builder
+        .add_provider(&provider)
+        .expect("register prediction provider");
+    let registry = builder.build();
+    let run = |subcommand: &'static str, options: Vec<InteractionOption>| {
+        let registry = &registry;
+        async move {
+            let responder = Arc::new(CapturingResponder::default());
+            registry
+                .command_handler("predict")
+                .expect("predict command handler")
+                .handle(
+                    command_request(subcommand, options, ADMIN, None),
+                    responder.clone(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{subcommand} failed: {error}"));
+            responder.snapshot()
+        }
+    };
+
+    let resolved = run(
+        "resolve",
+        vec![
+            integer("prediction_id", prediction_id),
+            string("outcome", "yes"),
+        ],
+    )
+    .await;
+    let settlement = &resolved.followups[0];
+    assert!(
+        settlement.content.contains("Server Trader (<@100>) spent "),
+        "{}",
+        settlement.content
+    );
+    assert_eq!(
+        settlement.allowed_mentions,
+        crate::registration::InteractionAllowedMentions::Users(vec![TRADER as u64])
+    );
+
+    let rolled_back = run("rollback", vec![integer("prediction_id", prediction_id)]).await;
+    let cancelled = run("cancel", vec![integer("prediction_id", prediction_id)]).await;
+    for (snapshot, expected) in [
+        (&rolled_back, "resolution rolled back by Market Admin."),
+        (&cancelled, "cancelled by Market Admin."),
+    ] {
+        let announcement = &snapshot.followups[0];
+        assert!(
+            announcement.content.contains(expected),
+            "{}",
+            announcement.content
+        );
+        assert!(!announcement.content.contains("<@"));
+        assert!(!announcement.content.contains(&ADMIN.to_string()));
+        assert_eq!(
+            announcement.allowed_mentions,
+            crate::registration::InteractionAllowedMentions::None
         );
     }
 }

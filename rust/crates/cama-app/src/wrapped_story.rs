@@ -5,6 +5,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
+
 include!("wrapped_story/flavor_catalog.rs");
 
 #[path = "wrapped_story/chapters.rs"]
@@ -311,8 +313,9 @@ fn resolve_pairwise(rows: &[PairwiseRaw], names: &BTreeMap<i64, String>) -> Vec<
             discord_id: row.peer_id,
             username: names
                 .get(&row.peer_id)
-                .cloned()
-                .unwrap_or_else(|| row.peer_id.to_string()),
+                .and_then(|name| readable_player_name(name))
+                .unwrap_or(UNKNOWN_PLAYER)
+                .to_owned(),
             games: row.games,
             wins: row.wins,
             win_rate: row.win_rate,

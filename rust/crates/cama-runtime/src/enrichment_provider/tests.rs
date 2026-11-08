@@ -2497,3 +2497,44 @@ async fn coordinator_statistics_publish_immediately_and_original_graph_reads_lat
     assert_eq!(participant, (0, 2));
     assert_eq!(server.requests(1), vec!["GET /matches/9002 HTTP/1.1"]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_message_recent_matches_never_name_a_player_by_id() {
+    const UNLINKED: u64 = 581_234_567_890_123_421;
+    let (_directory, path) = migrated();
+    let provider =
+        EnrichmentRegistrationProvider::test_new(&path, &application_config(), offline_services())
+            .unwrap();
+    let responder = Arc::new(CapturingResponder::default());
+    registry(&provider)
+        .command_handler("matches")
+        .unwrap()
+        .handle(
+            command(
+                "matches",
+                "recent",
+                vec![option(
+                    "user",
+                    InteractionValue::User {
+                        id: UNLINKED,
+                        display_name: None,
+                        is_bot: Some(false),
+                    },
+                )],
+                ADMIN,
+                None,
+                None,
+            ),
+            responder.clone(),
+        )
+        .await
+        .unwrap();
+
+    let captured = responder.captured.lock().unwrap();
+    let content = &captured.followups[0].content;
+    assert_eq!(
+        content,
+        "Unknown player hasn't linked their Steam account. Use `/player link` first."
+    );
+    assert!(!content.contains(&UNLINKED.to_string()));
+}

@@ -1211,7 +1211,7 @@ async fn every_mafia_command_leaf_dispatches_through_live_handler() {
     let act = dispatch_mafia_command(&fixture, 1, mafia_leaf("act", vec![target.clone()])).await;
     assert_eq!(
         response_of(&act).content,
-        "🔪 Kill vote registered for <@5>."
+        "🔪 Kill vote registered for Unknown player."
     );
     let vote = dispatch_mafia_command(&fixture, 5, mafia_leaf("vote", vec![target.clone()])).await;
     assert_eq!(response_of(&vote).content, "Day phase is not active.");
@@ -1319,7 +1319,7 @@ async fn python_mafia_act_command_case() {
     assert_eq!(
         response_of(&dispatch_mafia_command(&fixture, 1, mafia_leaf("act", vec![target])).await,)
             .content,
-        "🔪 Kill vote registered for <@5>."
+        "🔪 Kill vote registered for Unknown player."
     );
 }
 

@@ -36,6 +36,7 @@ use cama_db::tax_repository::{
     TaxBankruptcyAction, TaxBankruptcyOutcome, TaxBankruptcyRequest, TaxFineOutcome,
     TaxFineRequest, TaxGuildSnapshot, TaxLedgerEntry, TaxLedgerSourceTotal, TaxRepository,
 };
+use cama_domain::discord_content::UNKNOWN_PLAYER;
 use cama_domain::formatting::{JOPACOIN_EMOTE, format_grouped, format_grouped_signed};
 use cama_domain::permissions::{
     DiscordPermissions, PermissionContext, has_admin_permission, has_tax_man_permission,
@@ -43,7 +44,9 @@ use cama_domain::permissions::{
 use chrono::Utc;
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::discord_transport::{
+    DiscordIdPlayerNameResolver, GuildPlayerNameDirectory, GuildPlayerNameResolver,
+};
 use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, string_option};
 use crate::registration::{
@@ -81,6 +84,7 @@ impl TaxRegistrationProvider {
                 values.prediction_initial_fair_default,
             ),
             fine_cooldown_seconds: values.tax_fine_cooldown_seconds,
+            player_names: Arc::new(DiscordIdPlayerNameResolver),
         });
         let economy_config = EconomyEventConfig {
             enabled: values.economy_events_enabled,
@@ -129,9 +133,11 @@ impl TaxRegistrationProvider {
 
     #[must_use]
     pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
-        Arc::get_mut(&mut self.handler)
-            .expect("new tax provider owns its handler")
-            .player_names = player_names;
+        let handler = Arc::get_mut(&mut self.handler).expect("new tax provider owns its handler");
+        Arc::get_mut(&mut handler.tax)
+            .expect("new tax provider owns its ledger port")
+            .player_names = Arc::clone(&player_names);
+        handler.player_names = player_names;
         self
     }
 }
@@ -382,7 +388,7 @@ impl InteractionHandler for TaxHandler {
                     TaxCommandContext {
                         interaction_id,
                         actor_id: user_id,
-                        actor_display_name: user_id.to_string(),
+                        actor_display_name: UNKNOWN_PLAYER.to_owned(),
                         guild_id,
                         member_permissions,
                         subcommand,
@@ -1058,9 +1064,32 @@ enum PlayerPageError {
 struct SqliteTaxPort {
     repository: TaxRepository,
     fine_cooldown_seconds: i64,
+    /// Ledger pages render synchronously, so account names come from the
+    /// member cache and last-seen archive.
+    player_names: Arc<dyn GuildPlayerNameResolver>,
 }
 
 impl SqliteTaxPort {
+    fn named_ledger_rows(
+        &self,
+        guild_id: i64,
+        entries: Vec<TaxLedgerEntry>,
+    ) -> Result<Vec<LedgerRow>, String> {
+        let account_ids = entries
+            .iter()
+            .filter(|entry| entry.account_type != "nonprofit")
+            .filter_map(|entry| entry.account_id)
+            .collect::<Vec<_>>();
+        let names = self
+            .player_names
+            .names_for_guild(guild_id, &account_ids)
+            .unwrap_or_default();
+        entries
+            .into_iter()
+            .map(|entry| ledger_entry(entry, &names))
+            .collect()
+    }
+
     fn guild_snapshot(&self, guild_id: i64) -> Result<TaxGuildSnapshot, String> {
         self.repository
             .guild_snapshot(guild_id, Utc::now().timestamp())
@@ -1103,19 +1132,19 @@ impl LedgerReadPort for SqliteTaxPort {
         offset: usize,
         user_id: Option<u64>,
     ) -> Result<Vec<LedgerRow>, Self::Error> {
-        self.repository
+        let guild_id = signed_id(guild_id, "guild").map_err(|error| error.to_string())?;
+        let entries = self
+            .repository
             .recent_ledger(
-                signed_id(guild_id, "guild").map_err(|error| error.to_string())?,
+                guild_id,
                 limit,
                 offset,
                 user_id
                     .map(|id| signed_id(id, "user").map_err(|error| error.to_string()))
                     .transpose()?,
             )
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(ledger_entry)
-            .collect()
+            .map_err(|error| error.to_string())?;
+        self.named_ledger_rows(guild_id, entries)
     }
 }
 
@@ -1140,7 +1169,9 @@ impl PlayerAuditReadPort for SqliteTaxPort {
             )
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "target_not_registered".to_owned())?;
-        player_snapshot(snapshot)
+        player_snapshot(snapshot, |entries| {
+            self.named_ledger_rows(guild_id, entries)
+        })
     }
 }
 
@@ -1479,21 +1510,31 @@ fn economy_event(event: cama_db::economy_event_repository::EconomyEvent) -> Econ
     }
 }
 
-fn ledger_entry(entry: TaxLedgerEntry) -> Result<LedgerRow, String> {
-    let account = if entry.account_type == "nonprofit" {
-        LedgerAccount::Reserve
+fn ledger_entry(
+    entry: TaxLedgerEntry,
+    names: &GuildPlayerNameDirectory,
+) -> Result<LedgerRow, String> {
+    let (account, account_name) = if entry.account_type == "nonprofit" {
+        (LedgerAccount::Reserve, None)
     } else {
-        LedgerAccount::Player(
-            entry
-                .account_id
-                .and_then(|id| u64::try_from(id).ok())
-                .unwrap_or_default(),
+        (
+            LedgerAccount::Player(
+                entry
+                    .account_id
+                    .and_then(|id| u64::try_from(id).ok())
+                    .unwrap_or_default(),
+            ),
+            Some(entry.account_id.map_or_else(
+                || UNKNOWN_PLAYER.to_owned(),
+                |account_id| names.resolve(account_id),
+            )),
         )
     };
     Ok(LedgerRow {
         ledger_id: entry.ledger_id,
         guild_id: u64::try_from(entry.guild_id).map_err(|_| "invalid ledger guild id")?,
         account,
+        account_name,
         delta: entry.delta,
         balance_before: entry.balance_before,
         balance_after: entry.balance_after,
@@ -1508,6 +1549,7 @@ fn ledger_entry(entry: TaxLedgerEntry) -> Result<LedgerRow, String> {
 
 fn player_snapshot(
     snapshot: cama_db::tax_repository::TaxPlayerSnapshot,
+    ledger_rows: impl FnOnce(Vec<TaxLedgerEntry>) -> Result<Vec<LedgerRow>, String>,
 ) -> Result<PlayerSnapshot, String> {
     let positions = snapshot
         .prediction_exposure
@@ -1546,11 +1588,7 @@ fn player_snapshot(
             },
             positions,
         },
-        recent_ledger: snapshot
-            .recent_ledger
-            .into_iter()
-            .map(ledger_entry)
-            .collect::<Result<_, _>>()?,
+        recent_ledger: ledger_rows(snapshot.recent_ledger)?,
     })
 }
 
@@ -1799,7 +1837,7 @@ fn user_option(
     name: &str,
 ) -> Result<Option<UserRef>, InteractionHandlerError> {
     Ok(crate::option_ext::user_option(options, name)?.map(|user| {
-        let display_name = user.display_name_or_id();
+        let display_name = user.readable_display_name();
         UserRef {
             id: user.raw_id,
             name: display_name.to_lowercase(),

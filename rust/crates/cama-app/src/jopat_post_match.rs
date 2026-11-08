@@ -254,7 +254,6 @@ const fn template(text: &'static str, required: &'static [FactKey]) -> FallbackT
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JopatProtocolSpec {
     pub heading: &'static str,
-    pub instruction: &'static str,
     pub hype_fallbacks: &'static [FallbackTemplate],
     pub roast_fallbacks: &'static [FallbackTemplate],
     pub neutral_fallbacks: &'static [FallbackTemplate],
@@ -497,49 +496,42 @@ const CHAT_NEUTRAL: &[FallbackTemplate] = &[template(
 
 const COMBAT_SPEC: JopatProtocolSpec = JopatProtocolSpec {
     heading: "COMBAT TELEMETRY",
-    instruction: "Issue a terse combat audit in JOPA-T's deadpan corporate voice; judge only the reported gameplay metrics.",
     hype_fallbacks: COMBAT_HYPE,
     roast_fallbacks: COMBAT_ROAST,
     neutral_fallbacks: COMBAT_NEUTRAL,
 };
 const MARKET_SPEC: JopatProtocolSpec = JopatProtocolSpec {
     heading: "MARKET SETTLEMENT",
-    instruction: "Deliver a compact settlement notice in JOPA-T's corporate-terminal voice; mock only the reported wager result.",
     hype_fallbacks: MARKET_HYPE,
     roast_fallbacks: MARKET_ROAST,
     neutral_fallbacks: MARKET_NEUTRAL,
 };
 const ASCENSION_SPEC: JopatProtocolSpec = JopatProtocolSpec {
     heading: "CLIENT ASCENSION",
-    instruction: "Announce a narrowly verified rise in status in JOPA-T's dry corporate voice; treat success as a temporary anomaly.",
     hype_fallbacks: ASCENSION_HYPE,
     roast_fallbacks: EMPTY_FALLBACKS,
     neutral_fallbacks: EMPTY_FALLBACKS,
 };
 const PERFORMANCE_SPEC: JopatProtocolSpec = JopatProtocolSpec {
     heading: "PERFORMANCE REVIEW",
-    instruction: "Write a short performance review in JOPA-T's unified corporate voice; criticize only supplied match performance.",
     hype_fallbacks: PERFORMANCE_HYPE,
     roast_fallbacks: PERFORMANCE_ROAST,
     neutral_fallbacks: PERFORMANCE_NEUTRAL,
 };
 const PATCH_SPEC: JopatProtocolSpec = JopatProtocolSpec {
     heading: "PATCH DEPLOYMENT",
-    instruction: "Frame the reported gameplay as a compact software patch note in JOPA-T's deadpan terminal voice.",
     hype_fallbacks: PATCH_HYPE,
     roast_fallbacks: PATCH_ROAST,
     neutral_fallbacks: PATCH_NEUTRAL,
 };
 const COMPLIANCE_SPEC: JopatProtocolSpec = JopatProtocolSpec {
     heading: "COMPLIANCE INCIDENT",
-    instruction: "Issue a brief compliance incident report in JOPA-T's corporate gambling-terminal voice; cite only supplied betting behavior.",
     hype_fallbacks: COMPLIANCE_HYPE,
     roast_fallbacks: COMPLIANCE_ROAST,
     neutral_fallbacks: COMPLIANCE_NEUTRAL,
 };
 const CHAT_SPEC: JopatProtocolSpec = JopatProtocolSpec {
     heading: "CHAT INGEST",
-    instruction: "Summarize the match as a terse chat-ingest finding in JOPA-T's single corporate identity; roast only gameplay claims.",
     hype_fallbacks: CHAT_HYPE,
     roast_fallbacks: CHAT_ROAST,
     neutral_fallbacks: CHAT_NEUTRAL,
@@ -649,75 +641,6 @@ where
 {
     let candidates = protocol_candidates(context);
     candidates[choice.choose_index(candidates.len()) % candidates.len()]
-}
-
-#[must_use]
-pub fn build_event_description(protocol: JopatProtocol, context: &JopatPostMatchContext) -> String {
-    let spec = protocol_spec(protocol);
-    let mut facts = context.prompt_context();
-    redact_prompt_name(&mut facts, "winner_name", "[verified winner client]");
-    redact_prompt_name(&mut facts, "loser_name", "[verified loser client]");
-    format!(
-        "Protocol: {}\nInstruction: {}\nKnown facts: {}\nUse only these known facts. Do not invent heroes, stats, or outcomes.",
-        spec.heading,
-        spec.instruction,
-        serialize_prompt_facts(&facts)
-    )
-}
-
-fn redact_prompt_name(
-    facts: &mut BTreeMap<&'static str, PromptFact>,
-    key: &'static str,
-    replacement: &str,
-) {
-    if matches!(facts.get(key), Some(PromptFact::Text(value)) if !value.is_empty()) {
-        facts.insert(key, PromptFact::Text(replacement.to_owned()));
-    }
-}
-
-fn serialize_prompt_facts(facts: &BTreeMap<&str, PromptFact>) -> String {
-    let entries = facts
-        .iter()
-        .map(|(key, value)| {
-            let value = match value {
-                PromptFact::Text(value) => format!("\"{}\"", json_escape_ascii(value)),
-                PromptFact::Number(value) => value.as_str().to_owned(),
-                PromptFact::Integer(value) => value.to_string(),
-            };
-            format!("\"{}\": {value}", json_escape_ascii(key))
-        })
-        .collect::<Vec<_>>();
-    format!("{{{}}}", entries.join(", "))
-}
-
-fn json_escape_ascii(value: &str) -> String {
-    let mut escaped = String::new();
-    for character in value.chars() {
-        match character {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\u{8}' => escaped.push_str("\\b"),
-            '\u{c}' => escaped.push_str("\\f"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            character if (' '..='~').contains(&character) => escaped.push(character),
-            character => push_json_unicode_escape(&mut escaped, character),
-        }
-    }
-    escaped
-}
-
-fn push_json_unicode_escape(output: &mut String, character: char) {
-    let scalar = u32::from(character);
-    if scalar <= 0xffff {
-        output.push_str(&format!("\\u{scalar:04x}"));
-        return;
-    }
-    let offset = scalar - 0x1_0000;
-    let high = 0xd800 + (offset >> 10);
-    let low = 0xdc00 + (offset & 0x3ff);
-    output.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
 }
 
 pub fn render_fallback<C>(

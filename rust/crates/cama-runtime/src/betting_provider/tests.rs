@@ -129,12 +129,12 @@ fn bets_pages_preserve_every_row_within_discord_embed_limits() {
 #[test]
 fn investment_target_validation_rejects_self_short_and_unregistered_targets() {
     assert_eq!(
-        validate_investment_target(1, 1, "short", true, true),
+        validate_investment_target(1, 1, "Investor", "short", true, true),
         Err("You cannot short yourself.".to_owned())
     );
     assert_eq!(
-        validate_investment_target(1, 999, "long", true, false),
-        Err("<@999> is not registered.".to_owned())
+        validate_investment_target(1, 999, "Unregistered Target", "long", true, false),
+        Err("Unregistered Target is not registered.".to_owned())
     );
 }
 
@@ -252,7 +252,7 @@ async fn economy_invest_command_sets_lists_and_removes_positions() {
     assert!(
         recording.responses.lock().unwrap()[0]
             .content
-            .contains("Removed your investment in <@2>.")
+            .contains("Removed your investment in Unknown player.")
     );
     assert!(
         AutobetInvestmentRepository::new(database.path())
@@ -309,7 +309,7 @@ async fn economy_invest_position_removal_survives_departed_target() {
     assert!(
         recording.responses.lock().unwrap()[0]
             .content
-            .contains("Removed your investment in <@2>.")
+            .contains("Removed your investment in Unknown player.")
     );
     assert!(
         AutobetInvestmentRepository::new(database.path())
@@ -3217,15 +3217,16 @@ fn wheel_choice_and_blue_preview_embeds_match_python_presentation() {
             color: "#000000",
         },
     ];
+    const SPINNER: i64 = 734_512_998_001;
     let pending = PendingWheelInteraction {
         kind: WheelInteractionKind::Scrying,
-        user_id: 7,
+        user_id: SPINNER,
         guild_id: 42,
         created_at: Instant::now(),
         options,
         wheel_wedges: Vec::new(),
         golden: false,
-        display_name: None,
+        display_name: Some("Wheel Spinner".to_owned()),
         initial_attachment: None,
         votes: BTreeMap::new(),
         spin_kind: WheelKind::Regular,
@@ -3247,7 +3248,7 @@ fn wheel_choice_and_blue_preview_embeds_match_python_presentation() {
     assert_eq!(
         scrying.description.as_deref(),
         Some(
-            "🔮 <@7>, the Island reveals two fates:\n\n**A:** +25 JC\n**B:** LOSE (0 JC)\n\nChoose wisely. *(Blue mana: winnings reduced by 25%)*"
+            "🔮 Wheel Spinner, the Island reveals two fates:\n\n**A:** +25 JC\n**B:** LOSE (0 JC)\n\nChoose wisely. *(Blue mana: winnings reduced by 25%)*"
         )
     );
     let rows = wheel_interaction_rows("betting:scry:embed", &pending);
@@ -3276,7 +3277,19 @@ fn wheel_choice_and_blue_preview_embeds_match_python_presentation() {
         let embed = wheel_interaction_prompt_embed(&candidate);
         assert_eq!(embed.title.as_deref(), Some(title));
         assert_eq!(embed.color, Some(color));
+        let description = embed.description.expect("prompt description");
+        assert!(description.contains("Wheel Spinner"));
+        assert!(!description.contains("<@"));
+        assert!(!description.contains(&SPINNER.to_string()));
     }
+    let mut unnamed = pending.clone();
+    unnamed.kind = WheelInteractionKind::Discover;
+    unnamed.display_name = Some(format!("<@{SPINNER}>"));
+    let description = wheel_interaction_prompt_embed(&unnamed)
+        .description
+        .expect("prompt description");
+    assert!(description.contains("Unknown player"));
+    assert!(!description.contains("<@"));
 
     let resolution = PendingWheelResolution {
         message: "Result settled.".to_owned(),
@@ -3296,7 +3309,7 @@ fn wheel_choice_and_blue_preview_embeds_match_python_presentation() {
     );
     assert_eq!(
         trial_timeout.embeds[0].description.as_deref(),
-        Some("The town decided: **25** for <@7>!")
+        Some("The town decided: **25** for Wheel Spinner!")
     );
 
     let mut discover = pending;
@@ -3308,7 +3321,7 @@ fn wheel_choice_and_blue_preview_embeds_match_python_presentation() {
     );
     assert_eq!(
         discover_timeout.embeds[0].description.as_deref(),
-        Some("<@7> didn't choose in time. The worst fate applies: **25**!")
+        Some("Wheel Spinner didn't choose in time. The worst fate applies: **25**!")
     );
 }
 
@@ -3344,10 +3357,19 @@ fn disbursement_vote_audit_matches_python_pagination_contract() {
         requester_id: 7,
         proposal,
         votes,
+        voter_names: GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
+            1_000,
+            "First Voter".to_owned(),
+        )]))),
         page: 0,
         created_at: Instant::now(),
     };
     let response = disbursement_votes_response(&state);
+    let voters = &response.embeds[0].fields[2].value;
+    assert!(voters.contains("• First Voter → Even Split"), "{voters}");
+    assert!(voters.contains("• Unknown player → Even Split"), "{voters}");
+    assert!(!voters.contains("<@"), "{voters}");
+    assert!(!voters.contains("1001"), "{voters}");
     assert_eq!(
         response.embeds[0].title.as_deref(),
         Some("🔍 Disbursement Vote Details (Tax Man)")
@@ -4536,4 +4558,160 @@ async fn wheel_victim_names_use_last_seen_names_beneath_the_cache() {
             (9, "Unknown player".to_owned()),
         ])
     );
+}
+
+const NAMED_PAYER: i64 = 581_234_567_890_123_401;
+const NAMED_TARGET: i64 = 581_234_567_890_123_402;
+const NAMELESS_PLAYER: i64 = 581_234_567_890_123_403;
+
+fn assert_names_players_without_ids(text: &str) {
+    assert!(!text.contains("<@"), "{text}");
+    for id in [NAMED_PAYER, NAMED_TARGET, NAMELESS_PLAYER] {
+        assert!(!text.contains(&id.to_string()), "{text}");
+    }
+}
+
+fn player_option(id: i64) -> InteractionOption {
+    InteractionOption {
+        name: "player".to_owned(),
+        value: InteractionValue::User {
+            id: u64::try_from(id).expect("test id"),
+            display_name: None,
+            is_bot: Some(false),
+        },
+    }
+}
+
+fn amount_option(amount: i64) -> InteractionOption {
+    InteractionOption {
+        name: "amount".to_owned(),
+        value: InteractionValue::Integer(amount),
+    }
+}
+
+#[tokio::test]
+async fn economy_tip_debt_and_bankruptcy_messages_name_players_without_mentions() {
+    let database = NamedTempFile::new().expect("named economy database");
+    initialize_or_migrate(database.path()).expect("named economy schema");
+    let players = PlayerRepository::new(database.path());
+    players
+        .add(&NewPlayer::new(NAMED_PAYER, "payer-registration", Some(42)))
+        .expect("payer");
+    players
+        .add(&NewPlayer::new(
+            NAMED_TARGET,
+            "target-registration",
+            Some(42),
+        ))
+        .expect("target");
+    players
+        .update_balance(NAMED_PAYER, Some(42), 500)
+        .expect("payer balance");
+    players
+        .update_balance(NAMED_TARGET, Some(42), -100)
+        .expect("target debt");
+    let discord = Arc::new(PartialMemberCacheDiscord {
+        cached: BTreeMap::from([(NAMED_PAYER as u64, "Generous Payer".to_owned())]),
+        last_seen: BTreeMap::from([(NAMED_TARGET as u64, "Indebted Target".to_owned())]),
+        ..PartialMemberCacheDiscord::default()
+    });
+    let provider = partial_member_cache_provider(&database, discord);
+    let recording = RecordingResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+
+    provider
+        .handler
+        .tip(
+            NAMED_PAYER,
+            Some(42),
+            None,
+            &[player_option(NAMED_TARGET), amount_option(10)],
+            &responder,
+        )
+        .await
+        .expect("tip");
+    provider
+        .handler
+        .paydebt(
+            NAMED_PAYER,
+            Some(42),
+            &[player_option(NAMED_TARGET), amount_option(50)],
+            &responder,
+        )
+        .await
+        .expect("debt payment");
+    provider
+        .handler
+        .bankruptcy(NAMED_TARGET, Some(42), None, &responder)
+        .await
+        .expect("bankruptcy");
+    provider
+        .handler
+        .tip(
+            NAMED_PAYER,
+            Some(42),
+            None,
+            &[player_option(NAMELESS_PLAYER), amount_option(10)],
+            &responder,
+        )
+        .await
+        .expect("unregistered tip");
+
+    let responses = recording.responses.lock().unwrap();
+    assert_eq!(responses.len(), 4);
+    let tip = &responses[0];
+    assert!(
+        tip.content.contains("Generous Payer tipped 10 ")
+            && tip.content.contains(" to Indebted Target!"),
+        "{}",
+        tip.content
+    );
+    let debt = &responses[1];
+    assert!(
+        debt.content.starts_with("Generous Payer paid 50 ")
+            && debt.content.contains("toward Indebted Target's debt!"),
+        "{}",
+        debt.content
+    );
+    let bankruptcy = &responses[2];
+    assert!(
+        bankruptcy
+            .content
+            .starts_with("**Indebted Target HAS DECLARED BANKRUPTCY**"),
+        "{}",
+        bankruptcy.content
+    );
+    for public in [tip, debt, bankruptcy] {
+        assert_names_players_without_ids(&public.content);
+        assert_eq!(public.allowed_mentions, InteractionAllowedMentions::None);
+    }
+    let unregistered = &responses[3];
+    assert!(unregistered.ephemeral);
+    assert_eq!(unregistered.content, "Unknown player is not registered.");
+    assert_names_players_without_ids(&unregistered.content);
+}
+
+#[test]
+fn disbursement_result_names_recipients_without_mentions() {
+    let execution = DisbursementExecution {
+        method: "even".to_owned(),
+        total_disbursed: 30,
+        distributions: vec![(NAMED_PAYER, 20), (NAMELESS_PLAYER, 10)],
+        cancelled: false,
+        message: None,
+    };
+    let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
+        NAMED_PAYER as u64,
+        "Generous Payer".to_owned(),
+    )])));
+
+    let response = disbursement_response(&execution, false, &names);
+    let description = response.embeds[0]
+        .description
+        .as_deref()
+        .expect("disbursement description");
+
+    assert!(description.contains("Generous Payer: +20"), "{description}");
+    assert!(description.contains("Unknown player: +10"), "{description}");
+    assert_names_players_without_ids(description);
 }

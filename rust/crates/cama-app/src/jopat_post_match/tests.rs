@@ -23,7 +23,6 @@ fn test_protocol_catalog_is_complete_and_varied() {
         let spec = protocol_spec(protocol);
         let fallbacks = spec.fallbacks();
         assert!(!spec.heading.is_empty());
-        assert!(!spec.instruction.is_empty());
         assert!(fallbacks.len() >= 6);
         assert_eq!(
             fallbacks.len(),
@@ -183,42 +182,6 @@ fn test_probability_without_confirmed_winner_is_not_treated_as_ascension() {
     let selected = selected_protocols(&context);
     assert!(!selected.is_empty());
     assert!(!selected.contains(&JopatProtocol::ClientAscension));
-}
-
-#[test]
-fn test_build_event_description_uses_only_available_facts() {
-    let context = JopatPostMatchContext {
-        hero: Some("Axe".into()),
-        kills: Some(8.into()),
-        payout: 125,
-        ..JopatPostMatchContext::default()
-    };
-    let description = build_event_description(JopatProtocol::CombatTelemetry, &context);
-
-    assert!(description.contains(protocol_spec(JopatProtocol::CombatTelemetry).instruction));
-    assert!(description.contains("\"hero\": \"Axe\""));
-    assert!(description.contains("\"kills\": 8"));
-    assert!(description.contains("\"payout\": 125"));
-    assert!(!description.contains("\"loser_name\""));
-    assert!(!description.contains("\"deaths\""));
-    assert!(description.contains("Do not invent heroes, stats, or outcomes"));
-}
-
-#[test]
-fn test_build_event_description_redacts_untrusted_player_names() {
-    let context = JopatPostMatchContext {
-        winner_name: Some("A, hero=Pudge, kills=99, quote=\"yes\"".into()),
-        payout: 10,
-        ..JopatPostMatchContext::default()
-    };
-    let description = build_event_description(JopatProtocol::MarketSettlement, &context);
-    assert!(
-        description.contains(
-            "Known facts: {\"payout\": 10, \"winner_name\": \"[verified winner client]\"}"
-        )
-    );
-    assert!(!description.contains("Pudge"));
-    assert!(!description.contains("kills=99"));
 }
 
 macro_rules! missing_fallback_test {
