@@ -181,7 +181,7 @@ impl CurfewRepository {
         window: &CurfewWindow,
         effective_at: DateTime<Utc>,
     ) -> Result<(), rusqlite::Error> {
-        upsert_pending_window(&self.connection()?, window, effective_at)
+        upsert_pending_window(&*self.connection()?, window, effective_at)
     }
 
     /// Stage a strict-mode delete: the window stays live (and enforced)
