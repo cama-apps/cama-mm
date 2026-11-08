@@ -53,10 +53,43 @@ impl AiProvider for ScriptedProvider {
     }
 }
 
+/// Attempt clock that only moves when the test (or a fake) advances it.
+struct ManualAttemptClock {
+    base: Instant,
+    offset: Mutex<Duration>,
+}
+
+impl ManualAttemptClock {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            base: Instant::now(),
+            offset: Mutex::new(Duration::ZERO),
+        })
+    }
+
+    fn advance(&self, by: Duration) {
+        *self.offset.lock().expect("clock lock") += by;
+    }
+}
+
+impl AttemptClock for ManualAttemptClock {
+    fn now(&self) -> Instant {
+        self.base + *self.offset.lock().expect("clock lock")
+    }
+}
+
+/// A cold load the test controls: it waits for `release`, then moves the
+/// attempt clock forward by `duration`, standing in for a slow SDK import.
+struct ColdLoad {
+    clock: Arc<ManualAttemptClock>,
+    duration: Duration,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
 struct StaticLoader {
     provider: Arc<dyn AiProvider>,
     loads: AtomicUsize,
-    delay: Duration,
+    cold_load: Option<ColdLoad>,
     events: Option<EventLog>,
     fail_first: AtomicBool,
 }
@@ -66,7 +99,7 @@ impl StaticLoader {
         Arc::new(Self {
             provider,
             loads: AtomicUsize::new(0),
-            delay: Duration::ZERO,
+            cold_load: None,
             events: None,
             fail_first: AtomicBool::new(false),
         })
@@ -82,8 +115,13 @@ impl ProviderLoader for StaticLoader {
                 .expect("event lock")
                 .push(("configured".to_owned(), thread::current().id()));
         }
-        if !self.delay.is_zero() {
-            thread::sleep(self.delay);
+        if let Some(cold) = &self.cold_load {
+            cold.release
+                .lock()
+                .expect("release lock")
+                .recv()
+                .expect("cold load released");
+            cold.clock.advance(cold.duration);
         }
         if self.fail_first.swap(false, Ordering::SeqCst) {
             return Err(ProviderError::new(
@@ -194,29 +232,45 @@ fn test_first_provider_use_loads_litellm_off_loop_before_timeout() {
         ..ScriptedProvider::default()
     });
     let adapter: Arc<dyn AiProvider> = provider;
+    // A generous real budget: the attempt clock alone decides whether the
+    // cold load is charged against it.
+    let timeout = Duration::from_secs(60);
+    let clock = ManualAttemptClock::new();
+    let (release, released) = mpsc::channel();
     let loader = Arc::new(StaticLoader {
         provider: adapter,
         loads: AtomicUsize::new(0),
-        delay: Duration::from_millis(40),
+        // On the attempt clock the cold load takes twice the provider
+        // timeout, so charging it to the attempt would leave no budget.
+        cold_load: Some(ColdLoad {
+            clock: clock.clone(),
+            duration: timeout * 2,
+            release: Mutex::new(released),
+        }),
         events: Some(events.clone()),
         fail_first: AtomicBool::new(false),
     });
     let mut config = provider_config("cerebras/zai-glm-4.7");
-    config.timeout = Duration::from_millis(20);
+    config.timeout = timeout;
     let loader_port: Arc<dyn ProviderLoader> = loader.clone();
-    let service = Arc::new(AIService::new(config, loader_port));
-    let barrier = Arc::new(std::sync::Barrier::new(7));
+    let service = Arc::new(AIService::new(config, loader_port).with_deadline_clock(clock));
+    let started = Arc::new(AtomicUsize::new(0));
     let callers = (0..6)
         .map(|_| {
             let service = service.clone();
-            let barrier = barrier.clone();
+            let started = started.clone();
             thread::spawn(move || {
-                barrier.wait();
+                started.fetch_add(1, Ordering::SeqCst);
                 service.complete("prompt", None, 0.7, None, "llm.complete")
             })
         })
         .collect::<Vec<_>>();
-    barrier.wait();
+    // Hold the cold load until every caller is on its way in, so they all
+    // share the one in-flight load.
+    while started.load(Ordering::SeqCst) < 6 {
+        thread::yield_now();
+    }
+    release.send(()).expect("release the cold load");
     for caller_thread in callers {
         assert_eq!(
             caller_thread.join().expect("caller thread"),
