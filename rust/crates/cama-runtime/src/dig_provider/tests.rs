@@ -9660,3 +9660,339 @@ async fn artifacts_command_without_finds_says_so_under_the_catalog() {
         mine.description
     );
 }
+
+const PENDING_STONE_ROUTE: &str = r#"{"layer":"Stone","start_depth":25,"end_depth":50,"offered":["shored_passage","old_supports","fossil_seam"],"selected":null}"#;
+
+fn set_route_state(database: &NamedTempFile, route_state: Option<&str>) {
+    Connection::open(database.path())
+        .expect("open route fixture")
+        .execute(
+            "UPDATE tunnels SET route_state=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![route_state, USER as i64, GUILD as i64],
+        )
+        .expect("seed route state");
+}
+
+fn selected_route(database: &NamedTempFile) -> Option<String> {
+    let raw: Option<String> = Connection::open(database.path())
+        .expect("open route state")
+        .query_row(
+            "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+            |row| row.get(0),
+        )
+        .expect("route state");
+    cama_app::dig_routes::parse_route_state(raw.as_deref()).and_then(|state| state.selected)
+}
+
+fn stone_route_choice() -> super::DigRouteChoiceView {
+    super::route_choice_from_state(Some(PENDING_STONE_ROUTE)).expect("pending Stone route")
+}
+
+#[tokio::test]
+async fn pending_route_dig_reopens_the_junction_and_one_click_locks_the_route() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    set_route_state(&database, Some(PENDING_STONE_ROUTE));
+
+    // A dig with an unchosen route reopens the junction instead of digging.
+    let reopen = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), reopen.clone())
+        .await
+        .expect("pending route reopens the junction");
+    let junction = reopen
+        .followups
+        .lock()
+        .expect("junction followups")
+        .iter()
+        .find(|response| {
+            response
+                .embeds
+                .first()
+                .is_some_and(|embed| embed.title.as_deref() == Some("Stone Junction"))
+        })
+        .cloned()
+        .expect("junction view");
+    let old_supports = junction.components[0]
+        .buttons
+        .iter()
+        .find(|button| button.custom_id.ends_with(":old_supports"))
+        .expect("Old Supports button")
+        .custom_id
+        .clone();
+
+    let click = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(old_supports.clone(), Vec::new()),
+            click.clone(),
+        )
+        .await
+        .expect("route click");
+    let locked = click.original_edits.lock().expect("route edits");
+    assert_eq!(locked.len(), 1);
+    assert_eq!(
+        locked[0].embeds[0].title.as_deref(),
+        Some("Route Locked: Old Supports")
+    );
+    assert!(
+        locked[0].components.is_empty(),
+        "the route buttons are removed"
+    );
+    drop(locked);
+    assert_eq!(selected_route(&database).as_deref(), Some("old_supports"));
+
+    // A second click on the same view is acknowledged but settles nothing.
+    let again = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(component_request(old_supports, Vec::new()), again.clone())
+        .await
+        .expect("duplicate route click");
+    assert_eq!(again.defers.lock().unwrap().as_slice(), &[false]);
+    assert!(again.original_edits.lock().unwrap().is_empty());
+    assert!(again.followups.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_route_choice_releases_the_view_for_another_try() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    // The view offers a route, but the tunnel no longer has a pending choice.
+    set_route_state(&database, None);
+    let token = provider
+        .handler
+        .create_route_view(
+            USER as i64,
+            GUILD as i64,
+            stone_route_choice(),
+            super::unix_now(),
+        )
+        .expect("route view");
+    let custom_id = super::route_component_id(
+        &provider.handler.state.view_nonce,
+        USER as i64,
+        GUILD as i64,
+        &token,
+        "old_supports",
+    );
+
+    for attempt in 0..2 {
+        let click = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                component_request(custom_id.clone(), Vec::new()),
+                click.clone(),
+            )
+            .await
+            .expect("failed route click");
+        let followups = click.followups.lock().unwrap();
+        assert_eq!(followups.len(), 1, "attempt {attempt}");
+        assert!(followups[0].ephemeral);
+        assert!(
+            !followups[0].content.contains("expired"),
+            "attempt {attempt}: {}",
+            followups[0].content
+        );
+        assert!(click.original_edits.lock().unwrap().is_empty());
+    }
+    assert_eq!(selected_route(&database), None);
+}
+
+#[tokio::test]
+async fn timed_out_route_view_never_selects_a_route() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    set_route_state(&database, Some(PENDING_STONE_ROUTE));
+    let token = provider
+        .handler
+        .create_route_view(
+            USER as i64,
+            GUILD as i64,
+            stone_route_choice(),
+            super::unix_now() - super::ROUTE_VIEW_TIMEOUT_SECONDS,
+        )
+        .expect("route view");
+    let custom_id = super::route_component_id(
+        &provider.handler.state.view_nonce,
+        USER as i64,
+        GUILD as i64,
+        &token,
+        "fossil_seam",
+    );
+
+    let click = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(component_request(custom_id, Vec::new()), click.clone())
+        .await
+        .expect("expired route click");
+    let responses = click.responses.lock().unwrap();
+    assert!(
+        responses
+            .last()
+            .is_some_and(|response| response.content.contains("This route view expired")),
+        "{responses:?}"
+    );
+    assert_eq!(selected_route(&database), None);
+}
+
+fn bonus_selecting_action_id(from: i64) -> i64 {
+    (from..from + 10_000)
+        .find(|action_id| {
+            cama_app::dig_bonus_events::pick_dig_bonus(super::deterministic_dig_bonus_roll(
+                *action_id,
+            ))
+            .is_some()
+        })
+        .expect("stable test action should select a bonus")
+}
+
+#[tokio::test]
+async fn dig_bonus_never_rolls_for_a_blocked_or_first_dig() {
+    let (_database, provider, _discord) = fixture();
+    let dispatcher = Arc::new(RecordingBonusDispatcher::default());
+    provider.set_bonus_dispatcher(dispatcher.clone());
+    for (success, first_dig) in [(false, false), (true, true)] {
+        let mut outcome = hook_outcome();
+        outcome.action_id = Some(bonus_selecting_action_id(1));
+        outcome.success = success;
+        outcome.first_dig = first_dig;
+        provider
+            .handler
+            .maybe_send_dig_bonus(
+                &outcome,
+                USER as i64,
+                GUILD as i64,
+                CHANNEL as i64,
+                Arc::new(TestResponder::default()),
+            )
+            .await;
+    }
+    assert!(dispatcher.bonuses.lock().expect("bonus calls").is_empty());
+}
+
+#[tokio::test]
+async fn failed_bonus_dispatch_says_the_reward_may_already_be_recorded() {
+    let (_database, provider, _discord) = fixture();
+    provider.set_bonus_dispatcher(Arc::new(FailingBonusDispatcher::default()));
+    let mut outcome = hook_outcome();
+    outcome.action_id = Some(bonus_selecting_action_id(1));
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .maybe_send_dig_bonus(
+            &outcome,
+            USER as i64,
+            GUILD as i64,
+            CHANNEL as i64,
+            responder.clone(),
+        )
+        .await;
+
+    let followups = responder.followups.lock().expect("bonus failure report");
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert_eq!(
+        followups[0].content,
+        cama_app::dig_bonus_events::PARTIAL_BONUS_FAILURE
+    );
+    assert!(followups[0].content.contains("may already be recorded"));
+}
+
+/// Records how much of the dig result had been delivered when its bonus ran.
+struct OrderingBonusDispatcher {
+    responder: Arc<TestResponder>,
+    discord: Arc<TestDiscord>,
+    delivered_before_bonus: StdMutex<Vec<(i64, usize)>>,
+}
+
+#[async_trait]
+impl DigBonusDispatchPort for OrderingBonusDispatcher {
+    async fn dispatch_bonus(
+        &self,
+        action_id: i64,
+        _user_id: i64,
+        _guild_id: i64,
+        _channel_id: i64,
+        _bonus: cama_app::dig_bonus_events::DigBonus,
+        _responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let delivered = self.responder.followups.lock().expect("followups").len()
+            + self.discord.public.lock().expect("public posts").len();
+        self.delivered_before_bonus
+            .lock()
+            .expect("bonus order")
+            .push((action_id, delivered));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn dig_bonus_runs_only_after_the_dig_result_is_delivered() {
+    let (database, provider, discord) = fixture();
+    provider
+        .handler
+        .handle(go_request(), Arc::new(TestResponder::default()))
+        .await
+        .expect("first dig creates a tunnel");
+    let action_id = bonus_selecting_action_id(100);
+    let connection = Connection::open(database.path()).expect("bonus fixture");
+    connection
+        .execute(
+            "UPDATE sqlite_sequence SET seq=?1 WHERE name='dig_actions'",
+            params![action_id - 1],
+        )
+        .expect("align the next dig action id");
+    connection
+        .execute(
+            "UPDATE tunnels SET last_dig_at=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![super::unix_now() - 86_400, USER as i64, GUILD as i64],
+        )
+        .expect("clear the dig cooldown");
+    drop(connection);
+    discord.public.lock().expect("public posts").clear();
+    let responder = Arc::new(TestResponder::default());
+    let dispatcher = Arc::new(OrderingBonusDispatcher {
+        responder: responder.clone(),
+        discord: discord.clone(),
+        delivered_before_bonus: StdMutex::new(Vec::new()),
+    });
+    provider.set_bonus_dispatcher(dispatcher.clone());
+
+    provider
+        .handler
+        .handle(go_request(), responder.clone())
+        .await
+        .expect("second dig");
+
+    let order = dispatcher
+        .delivered_before_bonus
+        .lock()
+        .expect("bonus order");
+    assert_eq!(order.len(), 1, "{order:?}");
+    assert_eq!(order[0].0, action_id);
+    assert!(
+        order[0].1 > 0,
+        "the dig result is delivered before its bonus"
+    );
+}
