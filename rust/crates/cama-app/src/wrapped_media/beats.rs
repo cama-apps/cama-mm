@@ -119,6 +119,20 @@ impl Type {
             Case::Lower => value.to_lowercase(),
         }
     }
+
+    /// The design size, lowered just enough for the widest word of `text` to
+    /// fit the column, so a long word shrinks instead of breaking mid-word.
+    fn size_for(self, text: &str) -> f32 {
+        let widest = text
+            .split_whitespace()
+            .map(|word| text_width(word, self.size, self.face))
+            .fold(0.0_f32, f32::max);
+        if widest <= COLUMN as f32 {
+            self.size
+        } else {
+            (self.size * COLUMN as f32 / widest).floor()
+        }
+    }
 }
 
 /// The setup line above the number: two lines at most.
@@ -143,7 +157,8 @@ fn punch_type(treatment: WrappedPunch) -> Type {
 /// only.
 fn fits(value: &str, style: Type) -> bool {
     let text = style.apply(value);
-    let (size, rows) = fit_text(&text, style.face, style.size, COLUMN, style.height);
+    let start = style.size_for(&text);
+    let (size, rows) = fit_text(&text, style.face, start, COLUMN, style.height);
     size >= style.minimum && rows.join(" ") == text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -159,13 +174,9 @@ fn text_height(value: &str, style: Type) -> i32 {
     if value.trim().is_empty() {
         return 0;
     }
-    let (size, rows) = fit_text(
-        &style.apply(value),
-        style.face,
-        style.size,
-        COLUMN,
-        style.height,
-    );
+    let text = style.apply(value);
+    let start = style.size_for(&text);
+    let (size, rows) = fit_text(&text, style.face, start, COLUMN, style.height);
     block_height(rows.len(), size, style.face).ceil() as i32
 }
 
@@ -182,7 +193,8 @@ fn text(
 ) -> i32 {
     let value = style.apply(value);
     let rect = (MARGIN, y, COLUMN, style.height);
-    stage.block(&value, rect, style.size, style.face, color, align, rise)
+    let size = style.size_for(&value);
+    stage.block(&value, rect, size, style.face, color, align, rise)
 }
 
 /// The top of a block `height` tall, centered between the chrome bands.

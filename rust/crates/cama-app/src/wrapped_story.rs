@@ -13,6 +13,8 @@ include!("wrapped_story/flavor_catalog.rs");
 pub mod chapters;
 #[path = "wrapped_story/personal_moments.rs"]
 mod personal_moments;
+#[path = "wrapped_story/roast_pools.rs"]
+pub mod roast_pools;
 pub use personal_moments::{
     PersonalMoment, PersonalMomentMatch, PersonalStory, personal_moments, personal_superlatives,
 };

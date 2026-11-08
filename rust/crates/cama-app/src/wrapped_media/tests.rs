@@ -478,6 +478,53 @@ fn two_beat_copy_fits_rejects_overlong_lines() {
 }
 
 #[test]
+fn long_words_shrink_instead_of_breaking() {
+    // Each is one word wider than the column at some treatment's design
+    // size, yet fits whole above that treatment's minimum.
+    for punch in ["Calculated.", "Calculated. Obviously.", "Respectfully."] {
+        assert!(two_beat_copy_fits("You won at", punch), "{punch}");
+    }
+}
+
+#[test]
+fn every_pool_line_fits_its_beat() {
+    // The widest value each placeholder takes on a real card; names longer
+    // than the inline limit only reach the credit line.
+    let worst = [
+        ("{n}", "23,400"),
+        ("{hero}", "Keeper of the Light"),
+        ("{rank}", "187"),
+        ("{of}", "187"),
+        ("{time}", "12:59 AM"),
+        ("{item}", "Black King Bar"),
+    ];
+    let beats = crate::wrapped_story::roast_pools::all_beats();
+    assert!(!beats.is_empty());
+    let mut misfits = Vec::new();
+    for beat in beats {
+        for name in ["Alexandria", "Maximilianus"] {
+            let fill = |line: &str| {
+                worst
+                    .iter()
+                    .fold(line.replace("{name}", name), |text, (slot, value)| {
+                        text.replace(slot, value)
+                    })
+            };
+            let (setup, punch) = (fill(beat.setup), fill(beat.punch));
+            if !two_beat_copy_fits(&setup, &punch) {
+                misfits.push(format!("{setup} / {punch}"));
+            }
+        }
+    }
+    misfits.dedup();
+    assert!(
+        misfits.is_empty(),
+        "{} misfits: {misfits:#?}",
+        misfits.len()
+    );
+}
+
+#[test]
 fn reveal_stays_small_over_a_detailed_image() {
     let mut slide = busy("custom");
     slide.layout = WrappedLayout::Spotlight;
