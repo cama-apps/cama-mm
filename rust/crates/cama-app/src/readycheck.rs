@@ -10,12 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cama_db::readycheck_repository::PersistedLobbyState;
-
 use crate::dedicated_lobby_channel::{ChannelId, GuildId, LobbyScope, MessageId, UserId};
 use crate::embeds::LobbyKind;
 
-pub const FULL_LOBBY_SIZE: usize = 10;
 /// A ready check against a near-empty lobby wastes everyone's react; this is
 /// a fixed floor rather than a per-guild setting for now.
 pub const MINIMUM_READYCHECK_PLAYERS: usize = 10;
@@ -26,8 +23,6 @@ pub const READYCHECK_STALE_SECONDS: f64 = 30.0 * 60.0;
 /// ready check: it stops tracking reactions and roster changes, and the next
 /// `/readycheck` posts a new one.
 pub const READYCHECK_SWEEP_SECONDS: f64 = 5.0 * 60.0;
-pub const READY_LOBBY_RECOMMENDATION: &str = "Run `/readycheck` before `/shuffle`.";
-
 #[must_use]
 pub fn readycheck_description(player_count: usize, ready_threshold: usize) -> String {
     let mut description = format!("**{player_count}** players in lobby");
@@ -114,21 +109,8 @@ impl ReadyLobby {
         true
     }
 
-    /// The deprecated conditional queue is deliberately closed.
-    pub const fn add_conditional_player(&mut self, _player_id: UserId) -> bool {
-        false
-    }
-
     pub fn remove_player(&mut self, player_id: UserId) -> bool {
         if !self.players.remove(&player_id) {
-            return false;
-        }
-        self.player_join_times.remove(&player_id);
-        true
-    }
-
-    pub fn remove_conditional_player(&mut self, player_id: UserId) -> bool {
-        if !self.legacy_conditional_players.remove(&player_id) {
             return false;
         }
         self.player_join_times.remove(&player_id);
@@ -144,167 +126,6 @@ impl ReadyLobby {
     pub fn is_ready(&self, threshold: usize) -> bool {
         self.total_count() >= threshold
     }
-
-    #[must_use]
-    pub fn to_document(&self) -> LobbyDocument {
-        LobbyDocument {
-            lobby_id: self.scope.lobby_id(),
-            guild_id: self.scope.guild_id.0,
-            kind: self.scope.kind,
-            created_by: self.created_by.0,
-            created_at: self.created_at.clone(),
-            players: self.players.iter().map(|player_id| player_id.0).collect(),
-            conditional_players: Vec::new(),
-            player_join_times: self
-                .player_join_times
-                .iter()
-                .map(|(player_id, timestamp)| (player_id.0.to_string(), *timestamp))
-                .collect(),
-            status: self.status,
-        }
-    }
-
-    #[must_use]
-    pub fn from_document(document: LobbyDocument) -> Self {
-        let players = document
-            .players
-            .into_iter()
-            .map(UserId)
-            .collect::<BTreeSet<_>>();
-        let player_join_times = document
-            .player_join_times
-            .into_iter()
-            .filter_map(|(player_id, timestamp)| {
-                let player_id = player_id.parse::<i64>().ok().map(UserId)?;
-                players
-                    .contains(&player_id)
-                    .then_some((player_id, timestamp))
-            })
-            .collect();
-        Self {
-            scope: LobbyScope::new(GuildId(document.guild_id), document.kind),
-            created_by: UserId(document.created_by),
-            created_at: document.created_at,
-            players,
-            // Python intentionally drops the deprecated queue on model decode.
-            legacy_conditional_players: BTreeSet::new(),
-            player_join_times,
-            status: document.status,
-            thread_id: None,
-        }
-    }
-
-    #[must_use]
-    pub fn to_persisted(&self) -> PersistedLobbyState {
-        PersistedLobbyState {
-            lobby_id: self.scope.lobby_id(),
-            guild_id: self.scope.guild_id.0,
-            players: self.players.iter().map(|player_id| player_id.0).collect(),
-            conditional_players: self
-                .legacy_conditional_players
-                .iter()
-                .map(|player_id| player_id.0)
-                .collect(),
-            status: self.status.as_str().to_owned(),
-            created_by: self.created_by.0,
-            created_at: self.created_at.clone(),
-            message_id: None,
-            channel_id: None,
-            thread_id: self.thread_id.map(|thread_id| thread_id.0),
-            embed_message_id: None,
-            origin_channel_id: None,
-            player_join_times: self
-                .player_join_times
-                .iter()
-                .map(|(player_id, timestamp)| (player_id.0, *timestamp))
-                .collect(),
-        }
-    }
-
-    #[must_use]
-    pub fn from_persisted(state: PersistedLobbyState) -> Self {
-        let kind = if state.lobby_id
-            == LobbyScope::new(GuildId::DEFAULT, LobbyKind::LowSkill).lobby_id()
-        {
-            LobbyKind::LowSkill
-        } else {
-            LobbyKind::Open
-        };
-        let players = state
-            .players
-            .into_iter()
-            .map(UserId)
-            .collect::<BTreeSet<_>>();
-        Self {
-            scope: LobbyScope::new(GuildId(state.guild_id), kind),
-            created_by: UserId(state.created_by),
-            created_at: state.created_at,
-            legacy_conditional_players: state.conditional_players.into_iter().map(UserId).collect(),
-            player_join_times: state
-                .player_join_times
-                .into_iter()
-                .filter_map(|(player_id, timestamp)| {
-                    let player_id = UserId(player_id);
-                    players
-                        .contains(&player_id)
-                        .then_some((player_id, timestamp))
-                })
-                .collect(),
-            players,
-            status: LobbyStatus::from_storage(&state.status),
-            thread_id: state.thread_id.map(ChannelId),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct LobbyDocument {
-    pub lobby_id: i64,
-    pub guild_id: i64,
-    pub kind: LobbyKind,
-    pub created_by: i64,
-    pub created_at: String,
-    pub players: Vec<i64>,
-    pub conditional_players: Vec<i64>,
-    pub player_join_times: BTreeMap<String, f64>,
-    pub status: LobbyStatus,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ActivityKind {
-    Game,
-    Custom,
-    Streaming,
-    Other,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MemberActivity {
-    pub kind: ActivityKind,
-    pub name: Option<String>,
-}
-
-impl MemberActivity {
-    #[must_use]
-    pub fn game(name: impl Into<String>) -> Self {
-        Self {
-            kind: ActivityKind::Game,
-            name: Some(name.into()),
-        }
-    }
-}
-
-/// Discord activity names are untrusted presentation strings. Matching is
-/// intentionally case-insensitive and accepts the embedded `Dota 2` phrase,
-/// matching Python for game and generic activity objects alike.
-#[must_use]
-pub fn is_playing_dota(activities: &[MemberActivity]) -> bool {
-    activities.iter().any(|activity| {
-        activity
-            .name
-            .as_deref()
-            .is_some_and(|name| name.to_lowercase().contains("dota 2"))
-    })
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -552,15 +373,6 @@ impl ReadycheckService {
             .scopes
             .get(&scope)
             .and_then(|scoped| scoped.lobby.clone())
-    }
-
-    #[must_use]
-    pub fn persisted_lobby(&self, scope: LobbyScope) -> Option<PersistedLobbyState> {
-        self.lobby(scope).map(|lobby| lobby.to_persisted())
-    }
-
-    pub fn restore_persisted_lobby(&self, state: PersistedLobbyState) {
-        self.put_lobby(ReadyLobby::from_persisted(state));
     }
 
     pub fn join_lobby_at(&self, scope: LobbyScope, player_id: UserId, joined_at: f64) -> bool {

@@ -30,9 +30,9 @@ use cama_domain::guild_config::GuildConfigStore;
 use chrono::Utc;
 use tracing::{debug, error, warn};
 
-use crate::discord_transport::{DiscordAllowedMentions, DiscordMessage};
+use crate::discord_transport::{DiscordAllowedMentions, DiscordMessage, GuildPlayerNameDirectory};
 use crate::first_game_pool_worker::FirstGamePoolGuildSource;
-use crate::registration::{InteractionEmbed, InteractionResponse};
+use crate::registration::InteractionResponse;
 use crate::{BackgroundWorker, BackgroundWorkerSpec, SerenityDiscordTransport, WorkerContext};
 
 pub const DUEL_CHALLENGES_WORKER_NAME: &str = "duel_challenges";
@@ -221,6 +221,9 @@ pub(crate) trait DuelDiscordPort: FirstGamePoolGuildSource + Send + Sync {
         message_id: i64,
         message: DiscordMessage,
     ) -> Result<(), String>;
+
+    /// Readable duelist names for lifecycle embeds; never IDs or mentions.
+    async fn player_names(&self, guild_id: i64, discord_ids: &[i64]) -> GuildPlayerNameDirectory;
 }
 
 /// Supervised 60-second adapter for Python-compatible duel lifecycle work.
@@ -504,9 +507,18 @@ impl DuelChallengesWorker {
         if origin.as_ref().and_then(|channel| channel.guild_id) != Some(challenge.guild_id) {
             return;
         }
-        let response = InteractionResponse::message("")
-            .without_mentions()
-            .embed(expired_challenge_embed(challenge, flavor));
+        let names = self
+            .discord
+            .player_names(
+                challenge.guild_id,
+                &[challenge.challenger_id, challenge.recipient_id],
+            )
+            .await;
+        let mut expired = challenge.clone();
+        expired.status = DuelStatus::Expired;
+        let response = InteractionResponse::message("").without_mentions().embed(
+            crate::duel_provider::challenge_embed(&expired, flavor, &names),
+        );
         if let Err(edit_error) = self
             .discord
             .edit_message(
@@ -801,50 +813,6 @@ fn flavor_details(challenge: &DuelChallenge) -> FlavorDetails {
         status: challenge.status.as_str(),
         trial: challenge.trial_type.map(DuelTrial::as_str),
     }
-}
-
-fn expired_challenge_embed(challenge: &DuelChallenge, flavor: &str) -> InteractionEmbed {
-    InteractionEmbed::titled("Challenge of Honor")
-        .description(flavor)
-        .color(0x60_7D_8B)
-        .field("Challenge", format!("#{}", challenge.challenge_id), true)
-        .field("Status", "Expired", true)
-        .field("Wager", format!("{} JC", challenge.wager), true)
-        .field(
-            "Issuance Fee",
-            format!(
-                "{} JC — nonrefundable after delivery",
-                challenge.issuance_fee
-            ),
-            true,
-        )
-        .field(
-            "Challenger",
-            format!("<@{}>", challenge.challenger_id),
-            true,
-        )
-        .field(
-            "Challenger Rating",
-            format!(
-                "{:.0} ± {:.0}",
-                challenge.challenger_glicko, challenge.challenger_rd
-            ),
-            true,
-        )
-        .field("Recipient", format!("<@{}>", challenge.recipient_id), true)
-        .field(
-            "Recipient Rating",
-            format!(
-                "{:.0} ± {:.0}",
-                challenge.recipient_glicko, challenge.recipient_rd
-            ),
-            true,
-        )
-        .field(
-            "Decline Penalty",
-            format!("{} JC", challenge.decline_penalty()),
-            true,
-        )
 }
 
 fn trial_label(trial: DuelTrial) -> &'static str {

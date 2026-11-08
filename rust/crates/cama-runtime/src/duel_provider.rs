@@ -1018,7 +1018,7 @@ fn duel_name(names: &GuildPlayerNameDirectory, discord_id: i64) -> String {
     escape_discord_text(&names.resolve(discord_id))
 }
 
-fn challenge_embed(
+pub(crate) fn challenge_embed(
     challenge: &DuelChallenge,
     flavor: &str,
     names: &GuildPlayerNameDirectory,

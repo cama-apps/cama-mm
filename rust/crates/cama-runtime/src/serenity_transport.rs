@@ -3439,6 +3439,19 @@ impl DuelDiscordPort for SerenityDiscordTransport {
             .map_err(|_| "Discord message ID is outside the supported range".to_owned())?;
         DiscordTransport::edit_message(self, channel_id, message_id, message).await
     }
+
+    async fn player_names(
+        &self,
+        guild_id: i64,
+        discord_ids: &[i64],
+    ) -> crate::discord_transport::GuildPlayerNameDirectory {
+        crate::discord_transport::resolve_guild_player_names(
+            self,
+            u64::try_from(guild_id).ok(),
+            discord_ids,
+        )
+        .await
+    }
 }
 
 #[async_trait]
