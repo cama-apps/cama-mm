@@ -78,3 +78,6 @@ pub(crate) fn fast_database() -> FastTestDatabase {
         _keeper: keeper,
     }
 }
+
+#[path = "test_support/penance_ledger_tests.rs"]
+pub(crate) mod penance_ledger;

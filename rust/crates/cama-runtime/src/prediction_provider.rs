@@ -22,6 +22,7 @@ use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::gambling_stats_repository::{GamblingStatsRepository, GamblingStatsService};
 use cama_db::guild_config_repository::GuildConfigRepository;
+use cama_db::loan_repository::LoanRepository;
 use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::prediction_resolution_repository::{
@@ -627,6 +628,7 @@ impl PredictionRegistrationProvider {
         Self {
             handler: Arc::new(PredictionInteractionHandler {
                 predictions: PredictionRepository::new(&path),
+                penalties: LoanRepository::new(&path),
                 resolutions: PredictionResolutionRepository::new(&path),
                 pets: PetEvolutionRepository::new(&path),
                 low_priority: LowPriorityRepository::new(&path),
@@ -669,6 +671,8 @@ impl RegistrationProvider for PredictionRegistrationProvider {
 
 struct PredictionInteractionHandler {
     predictions: PredictionRepository,
+    /// Charges the gamba-channel penance shared by every gamba command.
+    penalties: LoanRepository,
     resolutions: PredictionResolutionRepository,
     pets: PetEvolutionRepository,
     low_priority: LowPriorityRepository,
@@ -902,11 +906,11 @@ impl PredictionInteractionHandler {
         if valid {
             return Ok(true);
         }
-        let repository = self.predictions.clone();
+        let repository = self.penalties.clone();
         let user_id = command.user_id;
         let guild_id = command.guild_id;
         spawn_sqlite("gamba channel penalty", move || {
-            repository.debit_gamba_channel_penalty(user_id, guild_id)
+            repository.charge_gamba_channel_penalty_atomic(user_id, guild_id)
         })
         .await?;
         followup(

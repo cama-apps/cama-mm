@@ -126,6 +126,12 @@ impl Fixture {
                      bankruptcy_penalty INTEGER NOT NULL DEFAULT 0,
                      PRIMARY KEY (match_id, guild_id, discord_id)
                  );
+                 CREATE TABLE app_kv (
+                     guild_id INTEGER NOT NULL,
+                     key TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     PRIMARY KEY (guild_id, key)
+                 );
                  CREATE TABLE bankruptcy_state (
                      discord_id INTEGER NOT NULL,
                      guild_id INTEGER NOT NULL DEFAULT 0,

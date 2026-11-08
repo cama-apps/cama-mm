@@ -102,6 +102,14 @@ pub(super) fn transfer(tx: &Transaction<'_>, old: i64, new: i64) -> Result<(), T
             "0",
             PENDING,
         ),
+        // Frozen bet-settlement rates are keyed by bettor.
+        (
+            "app_kv",
+            "value",
+            "key GLOB 'bet-settlement-rates:*'",
+            "0",
+            &["#"],
+        ),
         (
             "app_kv",
             "value",
@@ -492,6 +500,27 @@ mod tests {
             let raw: String = conn.query_row(sql, [], |r| r.get(0)).unwrap();
             assert_eq!(&serde_json::from_str::<Value>(&raw).unwrap(), want);
         }
+    }
+
+    #[test]
+    fn moves_frozen_bet_settlement_rates_to_the_replacement_account() {
+        let db = fast_migrated_database();
+        let mut conn = Connection::open(db.path()).unwrap();
+        let rates = json!({
+            (OLD.to_string()): {"bankruptcy":0.15,"vanity_tax":0.0,"low_priority_tax":0.0},
+            "37": {"bankruptcy":0.0,"vanity_tax":0.1,"low_priority_tax":0.0}
+        });
+        kv(&conn, "bet-settlement-rates:9", &rates.to_string());
+        let tx = conn.transaction().unwrap();
+        transfer(&tx, OLD, NEW).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            payload(&conn, "bet-settlement-rates:9"),
+            json!({
+                (NEW.to_string()): {"bankruptcy":0.15,"vanity_tax":0.0,"low_priority_tax":0.0},
+                "37": {"bankruptcy":0.0,"vanity_tax":0.1,"low_priority_tax":0.0}
+            })
+        );
     }
 
     #[test]

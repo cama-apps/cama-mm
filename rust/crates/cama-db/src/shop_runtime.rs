@@ -829,6 +829,25 @@ impl ShopRuntimeRepository {
         Ok(results)
     }
 
+    /// [`Self::apply_hostile_losses`] for an outcome that may be retried
+    /// after part of it committed: a request whose event key is already
+    /// recorded for its victim returns that stored settlement, even when the
+    /// retry re-derived a different amount from balances the first attempt
+    /// already moved. Every new request settles in the same transaction.
+    pub fn apply_hostile_losses_once(
+        &self,
+        requests: &[HostileLossRequest],
+    ) -> Result<Vec<Result<HostileLossSettlement, String>>, ShopRuntimeRepositoryError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let results = apply_hostile_losses_with(&transaction, requests, true)?;
+        transaction.commit()?;
+        Ok(results)
+    }
+
     pub fn reconcile_purchased_pool(
         &self,
         discord_id: i64,
@@ -936,11 +955,33 @@ pub(crate) fn apply_hostile_losses_in(
     connection: &Connection,
     requests: &[HostileLossRequest],
 ) -> Result<Vec<Result<HostileLossSettlement, String>>, ShopRuntimeRepositoryError> {
+    apply_hostile_losses_with(connection, requests, false)
+}
+
+fn apply_hostile_losses_with(
+    connection: &Connection,
+    requests: &[HostileLossRequest],
+    reuse_recorded: bool,
+) -> Result<Vec<Result<HostileLossSettlement, String>>, ShopRuntimeRepositoryError> {
     if requests.is_empty() {
         return Ok(Vec::new());
     }
     let mut results = Vec::with_capacity(requests.len());
     for (index, request) in requests.iter().enumerate() {
+        if reuse_recorded
+            && let Some(existing) = find_hostile_event(
+                connection,
+                request.guild_id,
+                request.victim_id,
+                &request.event_key,
+            )?
+        {
+            results.push(Ok(HostileLossSettlement {
+                duplicate: true,
+                ..existing
+            }));
+            continue;
+        }
         let savepoint = format!("shop_hostile_{index}");
         connection.execute_batch(&format!("SAVEPOINT {savepoint}"))?;
         match validate_hostile_request(request)

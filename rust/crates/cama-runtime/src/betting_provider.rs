@@ -5,7 +5,6 @@
 //! Discord response composition.
 
 use std::borrow::Cow;
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -283,52 +282,56 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
             return Ok(());
         }
 
-        let mut selected = None;
-        {
-            let mut neon = self
-                .handler
-                .neon
-                .lock()
-                .map_err(|_| "betting Neon lock poisoned".to_owned())?;
-            if let Some(winner) = select_match_big_win(&request.participants) {
-                selected = neon.on_big_win(
-                    u64::try_from(winner.discord_id).unwrap_or_default(),
-                    Some(u64::try_from(guild_id).unwrap_or_default()),
-                    BigWinSource::Match,
-                    winner.payout,
-                    winner.flavor,
-                );
-            }
-            if selected.is_none() {
-                for loser in request
-                    .participants
-                    .iter()
-                    .filter(|participant| !participant.won && !participant.refunded)
-                {
-                    let discord_id = u64::try_from(loser.discord_id).unwrap_or_default();
-                    let guild = Some(u64::try_from(guild_id).unwrap_or_default());
-                    if loser.leverage >= 5 && loser.balance_after < 0 {
-                        selected = neon.on_leverage_loss(
-                            discord_id,
-                            guild,
-                            loser.amount,
-                            loser.leverage,
-                            loser.balance_after,
-                        );
-                    }
-                    if selected.is_none()
-                        && (loser.balance_after <= -self.handler.config.max_debt
-                            || (loser.balance_after == 0 && !loser.won))
+        let participants = request.participants.clone();
+        let max_debt = self.handler.config.max_debt;
+        let mut selected = self
+            .handler
+            .run_neon(move |neon| {
+                let mut selected = None;
+                if let Some(winner) = select_match_big_win(&participants) {
+                    selected = neon.on_big_win(
+                        u64::try_from(winner.discord_id).unwrap_or_default(),
+                        Some(u64::try_from(guild_id).unwrap_or_default()),
+                        BigWinSource::Match,
+                        winner.payout,
+                        winner.flavor,
+                    );
+                }
+                if selected.is_none() {
+                    for loser in participants
+                        .iter()
+                        .filter(|participant| !participant.won && !participant.refunded)
                     {
-                        selected =
-                            neon.on_bet_settled(discord_id, guild, loser.won, loser.balance_after);
-                    }
-                    if selected.is_some() {
-                        break;
+                        let discord_id = u64::try_from(loser.discord_id).unwrap_or_default();
+                        let guild = Some(u64::try_from(guild_id).unwrap_or_default());
+                        if loser.leverage >= 5 && loser.balance_after < 0 {
+                            selected = neon.on_leverage_loss(
+                                discord_id,
+                                guild,
+                                loser.amount,
+                                loser.leverage,
+                                loser.balance_after,
+                            );
+                        }
+                        if selected.is_none()
+                            && (loser.balance_after <= -max_debt
+                                || (loser.balance_after == 0 && !loser.won))
+                        {
+                            selected = neon.on_bet_settled(
+                                discord_id,
+                                guild,
+                                loser.won,
+                                loser.balance_after,
+                            );
+                        }
+                        if selected.is_some() {
+                            break;
+                        }
                     }
                 }
-            }
-        }
+                selected
+            })
+            .await?;
         if selected.is_none() {
             let loser_ids = active_settlement_loser_ids(&request.participants);
             let mut degen_scores = Vec::new();
@@ -346,21 +349,22 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
                     degen_scores.push((discord_id, score));
                 }
             }
-            let mut neon = self
+            selected = self
                 .handler
-                .neon
-                .lock()
-                .map_err(|_| "betting Neon lock poisoned".to_owned())?;
-            for (discord_id, score) in degen_scores {
-                selected = neon.on_degen_milestone(
-                    u64::try_from(discord_id).unwrap_or_default(),
-                    Some(u64::try_from(guild_id).unwrap_or_default()),
-                    score,
-                );
-                if selected.is_some() {
-                    break;
-                }
-            }
+                .run_neon(move |neon| {
+                    for (discord_id, score) in degen_scores {
+                        let selected = neon.on_degen_milestone(
+                            u64::try_from(discord_id).unwrap_or_default(),
+                            Some(u64::try_from(guild_id).unwrap_or_default()),
+                            score,
+                        );
+                        if selected.is_some() {
+                            return selected;
+                        }
+                    }
+                    None
+                })
+                .await?;
         }
         let Some(result) = selected else {
             warn!(
@@ -437,68 +441,68 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
         }
 
         let now = unix_seconds().unwrap_or_default();
-        let selected = {
-            let mut neon = self
-                .handler
-                .neon
-                .lock()
-                .map_err(|_| "betting Neon lock poisoned".to_owned())?;
-            neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-            let mut selected = None;
-            for milestone in &request.games_milestones {
-                if selected.is_some() {
-                    break;
-                }
-                let Ok(discord_id) = u64::try_from(milestone.discord_id) else {
-                    continue;
-                };
-                selected = neon.on_games_milestone(
-                    discord_id,
-                    u64::try_from(guild_id).ok(),
-                    milestone.games_played,
-                );
-                if selected.is_some() {
-                    break;
-                }
-            }
-            if selected.is_none() {
-                for streak in &request.win_streak_records {
-                    let Ok(discord_id) = u64::try_from(streak.discord_id) else {
+        let hook_request = request.clone();
+        let selected = self
+            .handler
+            .run_neon(move |neon| {
+                let request = hook_request;
+                neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+                let mut selected = None;
+                for milestone in &request.games_milestones {
+                    if selected.is_some() {
+                        break;
+                    }
+                    let Ok(discord_id) = u64::try_from(milestone.discord_id) else {
                         continue;
                     };
-                    selected = neon.on_win_streak_record(
+                    selected = neon.on_games_milestone(
                         discord_id,
                         u64::try_from(guild_id).ok(),
-                        streak.current_streak,
-                        streak.previous_best,
+                        milestone.games_played,
                     );
                     if selected.is_some() {
                         break;
                     }
                 }
-            }
-            if selected.is_none() {
-                for rivalry in &request.rivalries_detected {
-                    let Ok(player1_id) = u64::try_from(rivalry.player1_id) else {
-                        continue;
-                    };
-                    let Ok(player2_id) = u64::try_from(rivalry.player2_id) else {
-                        continue;
-                    };
-                    selected = neon.on_rivalry_detected(
-                        u64::try_from(guild_id).ok(),
-                        player1_id,
-                        player2_id,
-                        rivalry.games_against,
-                        rivalry.winrate_vs,
-                    );
-                    if selected.is_some() {
-                        break;
+                if selected.is_none() {
+                    for streak in &request.win_streak_records {
+                        let Ok(discord_id) = u64::try_from(streak.discord_id) else {
+                            continue;
+                        };
+                        selected = neon.on_win_streak_record(
+                            discord_id,
+                            u64::try_from(guild_id).ok(),
+                            streak.current_streak,
+                            streak.previous_best,
+                        );
+                        if selected.is_some() {
+                            break;
+                        }
                     }
                 }
-            }
-            selected
-        };
+                if selected.is_none() {
+                    for rivalry in &request.rivalries_detected {
+                        let Ok(player1_id) = u64::try_from(rivalry.player1_id) else {
+                            continue;
+                        };
+                        let Ok(player2_id) = u64::try_from(rivalry.player2_id) else {
+                            continue;
+                        };
+                        selected = neon.on_rivalry_detected(
+                            u64::try_from(guild_id).ok(),
+                            player1_id,
+                            player2_id,
+                            rivalry.games_against,
+                            rivalry.winrate_vs,
+                        );
+                        if selected.is_some() {
+                            break;
+                        }
+                    }
+                }
+                selected
+            })
+            .await?;
 
         let Some(result) = selected else {
             warn!(
@@ -602,14 +606,10 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
             leverage: request.leverage.max(1),
             ..JopatPostMatchContext::default()
         };
-        let result = {
-            let mut neon = self
-                .handler
-                .neon
-                .lock()
-                .map_err(|_| "betting Neon lock poisoned".to_owned())?;
-            neon.on_post_match_debrief(&context)
-        };
+        let result = self
+            .handler
+            .run_neon(move |neon| neon.on_post_match_debrief(&context))
+            .await?;
         if let Some(result) = result {
             if !self
                 .handler
@@ -883,7 +883,7 @@ impl BettingRegistrationProvider {
                 config,
                 discord,
                 vanity_tax,
-                neon: Mutex::new(neon),
+                neon: Arc::new(Mutex::new(neon)),
                 wager_refresh: Mutex::new(None),
                 rates: Mutex::new(BTreeMap::new()),
                 wheel_interactions: Mutex::new(BTreeMap::new()),
@@ -2429,6 +2429,49 @@ struct PendingWheelInteraction {
     /// public wheel prompt with the settled result.  This is intentionally
     /// process-local, matching Python's in-memory Discord view lifetime.
     original_responder: Option<Arc<dyn InteractionResponder>>,
+    /// Settlement progress shared by every clone of this interaction, so a
+    /// retried click or timeout sweep resumes the first attempt.
+    attempt: Arc<Mutex<WheelAttemptMemo>>,
+}
+
+/// What a pending wheel's first settlement attempt already fixed.
+///
+/// A failed settlement keeps the interaction for a later click or timeout
+/// sweep, and both retries come from this process-local map, so the memo is
+/// exactly as durable as the retry it guards. Without it a retry could pick a
+/// different option, re-claim a spent Red re-roll, or re-run outcome effects
+/// (a consumed pardon, a penalty extension) the first attempt committed.
+#[derive(Clone, Debug, Default)]
+struct WheelAttemptMemo {
+    /// The option and re-roll choice the first attempt settled.
+    selection: Option<(WheelOption, bool)>,
+    /// The Red re-roll claim committed.
+    reroll_claimed: bool,
+    /// Seed for the outcome's random draws, so a retry re-draws them.
+    rng_seed: Option<u64>,
+    /// The committed outcome and the balance it was resolved against.
+    outcome: Option<(i64, WheelResolution)>,
+}
+
+/// Fix the option a pending wheel settles with: the first attempt's choice
+/// wins over a later click or timeout default.
+fn pin_wheel_selection(
+    pending: &PendingWheelInteraction,
+    option: WheelOption,
+    use_reroll: bool,
+) -> (WheelOption, bool) {
+    lock_wheel_attempt(&pending.attempt)
+        .selection
+        .get_or_insert((option, use_reroll))
+        .clone()
+}
+
+fn lock_wheel_attempt(
+    attempt: &Mutex<WheelAttemptMemo>,
+) -> std::sync::MutexGuard<'_, WheelAttemptMemo> {
+    attempt
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn wheel_interaction_ttl(kind: WheelInteractionKind) -> Duration {
@@ -2582,7 +2625,7 @@ enum WheelComponentAction {
 enum WheelComponentDecision {
     Reply(String),
     Resolve(String, PendingWheelInteraction, WheelComponentAction),
-    ResolveTimeout(String, PendingWheelInteraction, WheelOption),
+    ResolveTimeout(String, PendingWheelInteraction, WheelOption, bool),
 }
 
 impl WheelComponentAction {
@@ -2667,7 +2710,7 @@ struct BettingInteractionHandler {
     config: BettingRuntimeConfig,
     discord: Arc<dyn DiscordTransport>,
     vanity_tax: Arc<dyn BettingVanityTaxPort>,
-    neon: Mutex<NeonDegenService>,
+    neon: Arc<Mutex<NeonDegenService>>,
     wager_refresh: Mutex<Option<Arc<dyn BettingWagerRefreshPort>>>,
     rates: Mutex<BTreeMap<RateKey, Vec<Instant>>>,
     wheel_interactions: Mutex<BTreeMap<String, PendingWheelInteraction>>,
@@ -2853,8 +2896,10 @@ impl BettingInteractionHandler {
             let effects = pending.effects.clone();
             let original_responder = pending.original_responder.clone();
             let vanity_taxable_ids = self.vanity_tax.taxable_ids(pending.guild_id);
-            let option = timeout_wheel_option(&pending);
+            let (option, use_reroll) =
+                pin_wheel_selection(&pending, timeout_wheel_option(&pending), false);
             let option_for_settlement = option.clone();
+            let attempt = Arc::clone(&pending.attempt);
             let member_snapshot = self.guild_member_snapshot(pending.guild_id).await;
             let player_names =
                 CachedDiscordWheelPlayerNames::new(Arc::clone(&self.discord), pending.guild_id);
@@ -2875,7 +2920,7 @@ impl BettingInteractionHandler {
                     &event_id,
                     &option_for_settlement,
                     unix_seconds()?,
-                    false,
+                    use_reroll,
                     pending.bonus_spin,
                     pending.last_regular_spin,
                     pending.event_win_multiplier,
@@ -2884,6 +2929,7 @@ impl BettingInteractionHandler {
                     &low_priority_taxable_ids,
                     member_snapshot.as_ref(),
                     &player_names,
+                    &attempt,
                 )
             })
             .await;
@@ -3243,10 +3289,13 @@ impl BettingInteractionHandler {
                         .to_owned()
                 })?;
                 in_flight.insert(key.clone());
+                let (option, use_reroll) =
+                    pin_wheel_selection(&pending, timeout_wheel_option(&pending), false);
                 break 'lookup Ok(WheelComponentDecision::ResolveTimeout(
                     key,
                     pending.clone(),
-                    timeout_wheel_option(&pending),
+                    option,
+                    use_reroll,
                 ));
             }
             if let WheelComponentAction::Vote { index, .. } = &action {
@@ -3292,7 +3341,7 @@ impl BettingInteractionHandler {
             WheelComponentDecision::Reply(message) => {
                 return respond_ephemeral(responder, &message).await;
             }
-            WheelComponentDecision::ResolveTimeout(key, pending, option) => {
+            WheelComponentDecision::ResolveTimeout(key, pending, option, use_reroll) => {
                 // Discord invalidates component tokens unless the initial
                 // acknowledgement arrives within three seconds. Rendering the
                 // selected wheel GIF is CPU-heavy, so acknowledge before any
@@ -3314,6 +3363,7 @@ impl BettingInteractionHandler {
                 let effects = pending.effects.clone();
                 let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
                 let option_for_settlement = option.clone();
+                let attempt = Arc::clone(&pending.attempt);
                 let member_snapshot = self.guild_member_snapshot(guild_id).await;
                 let player_names =
                     CachedDiscordWheelPlayerNames::new(Arc::clone(&self.discord), guild_id);
@@ -3334,7 +3384,7 @@ impl BettingInteractionHandler {
                         &event_id,
                         &option_for_settlement,
                         unix_seconds()?,
-                        false,
+                        use_reroll,
                         pending.bonus_spin,
                         pending.last_regular_spin,
                         pending.event_win_multiplier,
@@ -3343,6 +3393,7 @@ impl BettingInteractionHandler {
                         &low_priority_taxable_ids,
                         member_snapshot.as_ref(),
                         &player_names,
+                        &attempt,
                     )
                 })
                 .await;
@@ -3401,6 +3452,7 @@ impl BettingInteractionHandler {
                     .get(index)
                     .cloned()
                     .ok_or_else(|| "That Wheel option is no longer available.".to_owned())?;
+                let (option, use_reroll) = pin_wheel_selection(&pending, option, use_reroll);
                 (key, pending, option, use_reroll)
             }
         };
@@ -3452,6 +3504,7 @@ impl BettingInteractionHandler {
                 &low_priority_taxable_ids,
                 member_snapshot.as_ref(),
                 &player_names,
+                &pending.attempt,
             )
         })
         .await;
@@ -4292,6 +4345,24 @@ impl BettingInteractionHandler {
         Ok(())
     }
 
+    /// Run one Neon hook on the blocking pool. Hooks read and write SQLite
+    /// through the event port and can render a multi-frame GIF while holding
+    /// the service lock, none of which may stall a Tokio worker.
+    async fn run_neon<T, F>(&self, hook: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut NeonDegenService) -> T + Send + 'static,
+    {
+        let neon = Arc::clone(&self.neon);
+        sqlite("betting Neon hook", move || {
+            let mut neon = neon
+                .lock()
+                .map_err(|_| "betting Neon lock poisoned".to_owned())?;
+            Ok(hook(&mut neon))
+        })
+        .await
+    }
+
     async fn emit_neon_result(&self, channel_id: u64, result: NeonResult) {
         let _ = self.emit_neon_result_checked(channel_id, result).await;
     }
@@ -4353,18 +4424,22 @@ impl BettingInteractionHandler {
             return false;
         };
         let now = unix_seconds().unwrap_or_default();
-        let result = self.neon.lock().ok().and_then(|mut neon| {
-            neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-            (value < 0).then(|| {
-                neon.on_wheel_result_with_prior_balance(
-                    discord_id,
-                    Some(guild_id),
-                    value,
-                    Some(prior_balance),
-                    new_balance,
-                )
-            })?
-        });
+        let result = self
+            .run_neon(move |neon| {
+                neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+                (value < 0).then(|| {
+                    neon.on_wheel_result_with_prior_balance(
+                        discord_id,
+                        Some(guild_id),
+                        value,
+                        Some(prior_balance),
+                        new_balance,
+                    )
+                })?
+            })
+            .await
+            .ok()
+            .flatten();
         let fired = result.is_some();
         if let Some(result) = result {
             self.emit_neon_result(channel_id, result).await;
@@ -4385,10 +4460,14 @@ impl BettingInteractionHandler {
             return false;
         };
         let now = unix_seconds().unwrap_or_default();
-        let result = self.neon.lock().ok().and_then(|mut neon| {
-            neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-            neon.on_lightning_bolt(discord_id, Some(guild_id), total_taxed, players_hit)
-        });
+        let result = self
+            .run_neon(move |neon| {
+                neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+                neon.on_lightning_bolt(discord_id, Some(guild_id), total_taxed, players_hit)
+            })
+            .await
+            .ok()
+            .flatten();
         let fired = result.is_some();
         if let Some(result) = result {
             self.emit_neon_result(channel_id, result).await;
@@ -4458,10 +4537,14 @@ impl BettingInteractionHandler {
             return false;
         };
         let now = unix_seconds().unwrap_or_default();
-        let result = self.neon.lock().ok().and_then(|mut neon| {
-            neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-            neon.on_degen_milestone(discord_id, Some(guild_id), score)
-        });
+        let result = self
+            .run_neon(move |neon| {
+                neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+                neon.on_degen_milestone(discord_id, Some(guild_id), score)
+            })
+            .await
+            .ok()
+            .flatten();
         let fired = result.is_some();
         if let Some(result) = result {
             self.emit_neon_result(channel_id, result).await;
@@ -4494,10 +4577,7 @@ impl BettingInteractionHandler {
         let database_guild_id = i64::try_from(guild_id).unwrap_or_default();
         let now = unix_seconds().unwrap_or_default();
         let (result, first_leverage_fired) = self
-            .neon
-            .lock()
-            .ok()
-            .map(|mut neon| {
+            .run_neon(move |neon| {
                 neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
                 let mut first_leverage_fired = false;
                 let result = counter.and_then(|receipt| {
@@ -4544,6 +4624,7 @@ impl BettingInteractionHandler {
                 });
                 (result, first_leverage_fired)
             })
+            .await
             .unwrap_or((None, false));
         if first_leverage_fired {
             let path = self.database_path.clone();
@@ -4575,10 +4656,14 @@ impl BettingInteractionHandler {
             return;
         };
         let now = unix_seconds().unwrap_or_default();
-        let result = self.neon.lock().ok().and_then(|mut neon| {
-            neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-            neon.on_balance_check(discord_id, Some(guild_id), balance)
-        });
+        let result = self
+            .run_neon(move |neon| {
+                neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+                neon.on_balance_check(discord_id, Some(guild_id), balance)
+            })
+            .await
+            .ok()
+            .flatten();
         if let Some(result) = result {
             self.emit_neon_result(channel_id, result).await;
         }
@@ -4600,11 +4685,16 @@ impl BettingInteractionHandler {
         ) else {
             return false;
         };
+        let scope = scope.to_owned();
         let now = unix_seconds().unwrap_or_default();
-        let result = self.neon.lock().ok().and_then(|mut neon| {
-            neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-            neon.on_cooldown_hit(discord_id, Some(guild_id), scope)
-        });
+        let result = self
+            .run_neon(move |neon| {
+                neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+                neon.on_cooldown_hit(discord_id, Some(guild_id), &scope)
+            })
+            .await
+            .ok()
+            .flatten();
         let fired = result.is_some();
         if let Some(result) = result {
             self.emit_neon_result(channel_id, result).await;
@@ -4630,18 +4720,23 @@ impl BettingInteractionHandler {
         else {
             return;
         };
+        let (sender_name, recipient_name) = (sender_name.to_owned(), recipient_name.to_owned());
         let now = unix_seconds().unwrap_or_default();
-        let result = self.neon.lock().ok().and_then(|mut neon| {
-            neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-            neon.on_tip(
-                discord_id,
-                Some(guild_id),
-                sender_name,
-                recipient_name,
-                amount,
-                fee,
-            )
-        });
+        let result = self
+            .run_neon(move |neon| {
+                neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+                neon.on_tip(
+                    discord_id,
+                    Some(guild_id),
+                    &sender_name,
+                    &recipient_name,
+                    amount,
+                    fee,
+                )
+            })
+            .await
+            .ok()
+            .flatten();
         if let Some(result) = result {
             self.emit_neon_result(channel_id, result).await;
         }
@@ -4666,10 +4761,14 @@ impl BettingInteractionHandler {
             return;
         };
         let now = unix_seconds().unwrap_or_default();
-        let result = self.neon.lock().ok().and_then(|mut neon| {
-            neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-            neon.on_loan(discord_id, Some(guild_id), amount, total_owed, is_negative)
-        });
+        let result = self
+            .run_neon(move |neon| {
+                neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+                neon.on_loan(discord_id, Some(guild_id), amount, total_owed, is_negative)
+            })
+            .await
+            .ok()
+            .flatten();
         if let Some(result) = result {
             self.emit_neon_result(channel_id, result).await;
         }
@@ -4694,17 +4793,22 @@ impl BettingInteractionHandler {
         ) else {
             return false;
         };
+        let user_display_name = user_display_name.to_owned();
         let now = unix_seconds().unwrap_or_default();
-        let result = self.neon.lock().ok().and_then(|mut neon| {
-            neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-            neon.on_bankruptcy_named(
-                discord_id,
-                Some(guild_id),
-                user_display_name,
-                debt_cleared,
-                filing_number,
-            )
-        });
+        let result = self
+            .run_neon(move |neon| {
+                neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+                neon.on_bankruptcy_named(
+                    discord_id,
+                    Some(guild_id),
+                    &user_display_name,
+                    debt_cleared,
+                    filing_number,
+                )
+            })
+            .await
+            .ok()
+            .flatten();
         let fired = result.is_some();
         if let Some(result) = result {
             self.emit_neon_result(channel_id, result).await;
@@ -4759,10 +4863,14 @@ impl BettingInteractionHandler {
                     (u64::try_from(user_id), u64::try_from(guild_id))
             {
                 let now = unix_seconds().unwrap_or_default();
-                let result = self.neon.lock().ok().and_then(|mut neon| {
-                    neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-                    neon.on_cooldown_hit(discord_id, Some(guild_id), "gamba")
-                });
+                let result = self
+                    .run_neon(move |neon| {
+                        neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+                        neon.on_cooldown_hit(discord_id, Some(guild_id), "gamba")
+                    })
+                    .await
+                    .ok()
+                    .flatten();
                 if let Some(result) = result
                     && let Some(channel_id) = channel_id
                 {
@@ -7535,26 +7643,15 @@ async fn deliver_gamba_response(
 }
 
 /// Apply Python's wrong-channel penance through the same immediate transaction
-/// as every other reserve transfer.  A missing player is deliberately ignored
-/// by the caller: the Discord-facing rejection is still the canonical copy,
-/// while registered players get the exact one-JC debit and reserve credit.
+/// as every other reserve transfer, shared with every gamba-channel command.
+/// A missing player is a silent no-op: the Discord-facing rejection is still
+/// the canonical copy, while registered players get the exact one-JC debit and
+/// reserve credit.
 async fn charge_wrong_channel(path: &Path, user_id: i64, guild_id: i64) -> Result<(), String> {
     let path = path.to_path_buf();
     sqlite("gamba wrong-channel penance", move || {
         LoanRepository::new(path)
-            .transfer_balance_to_nonprofit_atomic(
-                user_id,
-                Some(guild_id),
-                1,
-                &LedgerContext {
-                    source: Some("gamba".to_owned()),
-                    actor_id: Some(user_id),
-                    related_type: Some("wrong_channel_penalty".to_owned()),
-                    related_id: Some(user_id.to_string()),
-                    reason: Some("gamba wrong-channel penance".to_owned()),
-                    metadata: Some(r#"{"amount":1}"#.to_owned()),
-                },
-            )
+            .charge_gamba_channel_penalty_atomic(user_id, Some(guild_id))
             .map(|_| ())
             .map_err(|error| error.to_string())
     })
@@ -7919,15 +8016,16 @@ fn credit_wheel_income(
 /// Apply the post-outcome Blood Pact step from Python's wheel processor.
 ///
 /// The wheel can settle several independent transfers before it reaches this
-/// boundary, so the earning base is the actual positive balance delta rather
-/// than the landed wedge value.  The hostile-loss event key makes a retry
-/// after a process stop return the already-settled transfer without consuming
-/// another portion of the pact cap.
+/// boundary, so `earning` is the net the outcome's own receipts moved into the
+/// spinner's balance rather than the landed wedge value. A live balance
+/// difference would also skim tips or bet payouts that landed meanwhile. The
+/// hostile-loss event key makes a retry after a process stop return the
+/// already-settled transfer without consuming another portion of the pact cap.
 fn apply_wheel_blood_pact_skim(
     path: &Path,
     guild_id: i64,
     user_id: i64,
-    balance_before: i64,
+    earning: i64,
     event_id: &str,
     now: i64,
     minigame_scale: f64,
@@ -7937,8 +8035,7 @@ fn apply_wheel_blood_pact_skim(
         .get_by_id(user_id, Some(guild_id))
         .map_err(|error| error.to_string())?
         .map(|player| player.jopacoin_balance)
-        .unwrap_or(balance_before);
-    let earning = current.saturating_sub(balance_before);
+        .unwrap_or_default();
     if earning <= 0 {
         return Ok((0, current));
     }
@@ -8000,6 +8097,31 @@ fn apply_hostile_wheel_loss(
     if requested <= 0 {
         return Err("wheel hostile amount must be positive".to_owned());
     }
+    let request = DbHostileLossRequest {
+        victim_id,
+        guild_id,
+        requested,
+        kind: kind.to_owned(),
+        actor_id: Some(actor_id),
+        event_key: event_id.to_owned(),
+        destination,
+        recipient_id,
+        clamp_to_balance,
+        min_balance,
+        protect_self,
+        metadata: json!({"outcome": kind}),
+        occurred_at: now,
+        mana_date: wheel_mana_date(now)?,
+    };
+    ShopRuntimeRepository::new(path)
+        .apply_hostile_losses_once(std::slice::from_ref(&request))
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "wheel hostile loss returned no settlement".to_owned())?
+}
+
+fn wheel_mana_date(now: i64) -> Result<String, String> {
     let offset = pacific_offset_seconds(now)?;
     let local = DateTime::<Utc>::from_timestamp(now, 0)
         .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())?
@@ -8007,24 +8129,92 @@ fn apply_hostile_wheel_loss(
             &FixedOffset::east_opt(offset)
                 .ok_or_else(|| "invalid Pacific time-zone offset".to_owned())?,
         );
-    ShopRuntimeRepository::new(path)
-        .apply_hostile_loss(&DbHostileLossRequest {
-            victim_id,
+    Ok(mana_day_label(local))
+}
+
+/// One victim a wheel outcome charges.
+#[derive(Clone, Copy, Debug)]
+struct PlannedWheelLoss {
+    victim_id: i64,
+    requested: i64,
+    destination: DbHostileDestination,
+    recipient_id: Option<i64>,
+    clamp: bool,
+}
+
+/// Settle every victim of one wheel outcome in a single transaction, keyed by
+/// `{event_id}:{victim_id}`.
+///
+/// Either the whole outcome commits or none of it does, and a retried
+/// settlement reuses each recorded loss instead of re-deriving it from
+/// balances the first attempt already moved. Non-positive amounts are not
+/// charged, and a victim the repository rejects is skipped with a warning
+/// rather than failing the spin.
+#[allow(clippy::too_many_arguments)]
+fn settle_wheel_losses(
+    path: &Path,
+    guild_id: i64,
+    actor_id: i64,
+    kind: &str,
+    event_id: &str,
+    plan: &[PlannedWheelLoss],
+    min_balance: Option<i64>,
+    now: i64,
+) -> Result<
+    Vec<(
+        PlannedWheelLoss,
+        cama_db::shop_runtime::HostileLossSettlement,
+    )>,
+    String,
+> {
+    let plan = plan
+        .iter()
+        .filter(|planned| planned.requested > 0)
+        .copied()
+        .collect::<Vec<_>>();
+    if plan.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mana_date = wheel_mana_date(now)?;
+    let requests = plan
+        .iter()
+        .map(|planned| DbHostileLossRequest {
+            victim_id: planned.victim_id,
             guild_id,
-            requested,
+            requested: planned.requested,
             kind: kind.to_owned(),
             actor_id: Some(actor_id),
-            event_key: event_id.to_owned(),
-            destination,
-            recipient_id,
-            clamp_to_balance,
+            event_key: format!("{event_id}:{}", planned.victim_id),
+            destination: planned.destination,
+            recipient_id: planned.recipient_id,
+            clamp_to_balance: planned.clamp,
             min_balance,
-            protect_self,
+            protect_self: false,
             metadata: json!({"outcome": kind}),
             occurred_at: now,
-            mana_date: mana_day_label(local),
+            mana_date: mana_date.clone(),
         })
-        .map_err(|error| error.to_string())
+        .collect::<Vec<_>>();
+    let results = ShopRuntimeRepository::new(path)
+        .apply_hostile_losses_once(&requests)
+        .map_err(|error| error.to_string())?;
+    Ok(plan
+        .into_iter()
+        .zip(results)
+        .filter_map(|(planned, result)| match result {
+            Ok(settlement) => Some((planned, settlement)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    guild_id,
+                    victim_id = planned.victim_id,
+                    kind,
+                    "skipped an invalid wheel hostile-loss victim"
+                );
+                None
+            }
+        })
+        .collect())
 }
 
 fn apply_swamp_siphon(
@@ -8156,6 +8346,10 @@ struct WheelResolution {
     /// that side effect beside the policy result avoids reconstructing it
     /// from a later, potentially changed leaderboard.
     neon_lightning: Option<(i64, usize)>,
+    /// Net JopaCoin the outcome's own receipts moved into the spinner's
+    /// balance. Blood Pact skims this, never a live balance difference that
+    /// would also include unrelated credits landing meanwhile.
+    earning: i64,
 }
 
 impl WheelResolution {
@@ -8173,7 +8367,13 @@ impl WheelResolution {
             extra_note,
             income: None,
             neon_lightning: None,
+            earning: 0,
         }
+    }
+
+    const fn with_earning(mut self, earning: i64) -> Self {
+        self.earning = earning;
+        self
     }
 
     fn with_lightning(mut self, total: i64, players: usize) -> Self {
@@ -8190,6 +8390,7 @@ impl WheelResolution {
         mut self,
         income: cama_db::match_recording_repository::IncomeAwardReceipt,
     ) -> Self {
+        self.earning = income.balance_delta;
         self.income = Some(income);
         self
     }
@@ -8214,6 +8415,7 @@ fn resolve_wheel_value(
     visible_positive_balance: Option<i64>,
     visible_member_ids: Option<&BTreeSet<i64>>,
     player_names: &dyn WheelPlayerNameSource,
+    rng_seed: u64,
 ) -> Result<WheelResolution, String> {
     let mechanic = match landed.value {
         WheelValue::Numeric(value) => {
@@ -8303,7 +8505,8 @@ fn resolve_wheel_value(
                     CooldownOutcome::Other,
                     shield_note,
                 )
-                .with_direct_loss_settled());
+                .with_direct_loss_settled()
+                .with_earning(-applied));
             }
             return Ok(WheelResolution::new(
                 WheelValue::Numeric(adjusted),
@@ -8497,7 +8700,8 @@ fn resolve_wheel_value(
                     recession.total,
                     JOPACOIN_EMOTE,
                 ),
-            ))
+            )
+            .with_earning(-recession.self_loss))
         }
         WheelMechanic::RedShell
         | WheelMechanic::BlueShell
@@ -8524,6 +8728,7 @@ fn resolve_wheel_value(
                 low_priority_taxable_ids,
                 event_win_multiplier,
                 visible_member_ids,
+                rng_seed,
             )?;
             let player_ids = hostile
                 .victim_id
@@ -8538,7 +8743,8 @@ fn resolve_wheel_value(
                 hostile.log_result,
                 CooldownOutcome::Other,
                 hostile_result_note(mechanic, &hostile, config, &rendered_names),
-            );
+            )
+            .with_earning(hostile.spinner_delta);
             if hostile.lightning_total > 0 {
                 Ok(resolution.with_lightning(hostile.lightning_total, hostile.lightning_count))
             } else {
@@ -8568,6 +8774,17 @@ fn resolve_wheel_value(
                     "No previous ordinary spin is available to copy.".to_owned(),
                 ));
             };
+            let copied_note = || {
+                let names = player_names.names_for(&[previous.discord_id]);
+                format!(
+                    "Copied {}'s previous **{}** {} outcome.",
+                    names
+                        .get(&previous.discord_id)
+                        .map_or(UNKNOWN_PLAYER, String::as_str),
+                    previous.result,
+                    JOPACOIN_EMOTE
+                )
+            };
             if previous.result > 0 {
                 let reward = minted_reward(previous.result);
                 let receipt = credit_wheel_income(
@@ -8586,15 +8803,14 @@ fn resolve_wheel_value(
                     WheelValue::Mechanic(mechanic),
                     0,
                     CooldownOutcome::Other,
-                    format!(
-                        "Copied <@{}>'s previous **{}** {} outcome.",
-                        previous.discord_id, previous.result, JOPACOIN_EMOTE
-                    ),
+                    copied_note(),
                 )
                 .with_income(receipt))
             } else if previous.result < 0 {
-                LoanRepository::new(path)
-                    .transfer_balance_to_nonprofit_atomic(
+                // The spin's event id is the transfer's exact-once identity,
+                // so a retried settlement cannot debit the copied loss twice.
+                let transfer = LoanRepository::new(path)
+                    .transfer_balance_to_nonprofit_once_atomic(
                         user_id,
                         Some(guild_id),
                         previous.result.saturating_abs(),
@@ -8614,11 +8830,9 @@ fn resolve_wheel_value(
                     WheelValue::Mechanic(mechanic),
                     0,
                     CooldownOutcome::Other,
-                    format!(
-                        "Copied <@{}>'s previous **{}** {} outcome.",
-                        previous.discord_id, previous.result, JOPACOIN_EMOTE
-                    ),
-                ))
+                    copied_note(),
+                )
+                .with_earning(-transfer.amount))
             } else {
                 Ok(WheelResolution::new(
                     WheelValue::Mechanic(mechanic),
@@ -8694,10 +8908,7 @@ fn resolve_recession(
             .map_err(|error| error.to_string())?,
         visible_member_ids,
     );
-    let now = unix_seconds()?.max(0);
-    let mut total = 0_i64;
-    let mut count = 0_usize;
-    let mut spinner_loss = 0_i64;
+    let mut plan = Vec::new();
     for (rank, player) in leaderboard.iter().enumerate() {
         if player.jopacoin_balance < cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE {
             continue;
@@ -8718,29 +8929,32 @@ fn resolve_recession(
         let Some(victim_id) = player.discord_id else {
             continue;
         };
-        if requested <= 0 {
-            continue;
-        }
-        let settled = apply_hostile_wheel_loss(
-            path,
-            guild_id,
+        plan.push(PlannedWheelLoss {
             victim_id,
-            spinner_id,
             requested,
-            WheelMechanic::Recession.code(),
-            &format!("{event_id}:{victim_id}"),
-            DbHostileDestination::Reserve,
-            None,
-            Some(cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE),
-            true,
-            false,
-            now,
-        )?;
+            destination: DbHostileDestination::Reserve,
+            recipient_id: None,
+            clamp: true,
+        });
+    }
+    let mut total = 0_i64;
+    let mut count = 0_usize;
+    let mut spinner_loss = 0_i64;
+    for (planned, settled) in settle_wheel_losses(
+        path,
+        guild_id,
+        spinner_id,
+        WheelMechanic::Recession.code(),
+        event_id,
+        &plan,
+        Some(cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE),
+        unix_seconds()?.max(0),
+    )? {
         total = total.saturating_add(settled.applied);
         if settled.applied > 0 {
             count = count.saturating_add(1);
         }
-        if victim_id == spinner_id {
+        if planned.victim_id == spinner_id {
             spinner_loss = spinner_loss.saturating_add(settled.applied);
         }
     }
@@ -8772,6 +8986,9 @@ struct HostileResolution {
     victims: Vec<(i64, i64)>,
     shield_absorbed_total: i64,
     shielded_count: usize,
+    /// Net JopaCoin this outcome moved into the spinner's balance: stolen
+    /// credits and any fallback credit, less what the spinner lost.
+    spinner_delta: i64,
 }
 
 /// Python parity: `scale_minigame_jc_delta(max(1, int(balance * roll)))` —
@@ -8802,6 +9019,7 @@ fn resolve_hostile_mechanic(
     low_priority_taxable_ids: &BTreeSet<i64>,
     event_win_multiplier: f64,
     visible_member_ids: Option<&BTreeSet<i64>>,
+    rng_seed: u64,
 ) -> Result<HostileResolution, String> {
     let players = PlayerRepository::new(path);
     // Python parity: every hostile victim pool (heist window, crash top-N,
@@ -8815,7 +9033,6 @@ fn resolve_hostile_mechanic(
             .map_err(|error| error.to_string())?,
         visible_member_ids,
     );
-    let now = unix_seconds()?;
     let eligible = leaderboard
         .iter()
         .filter(|row| {
@@ -8823,51 +9040,27 @@ fn resolve_hostile_mechanic(
                 && row.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
         })
         .collect::<Vec<_>>();
-    let total = Cell::new(0_i64);
-    let mut log_result = 0_i64;
-    let lightning_count = Cell::new(0_usize);
-    let applied_count = Cell::new(0_usize);
-    let shield_absorbed_total = Cell::new(0_i64);
-    let shielded_count = Cell::new(0_usize);
-    let settle = |victim_id: i64,
-                  requested: i64,
-                  destination: DbHostileDestination,
-                  recipient_id: Option<i64>,
-                  clamp: bool|
-     -> Result<(), String> {
-        let result = apply_hostile_wheel_loss(
-            path,
-            guild_id,
-            victim_id,
-            user_id,
-            requested,
-            mechanic.code(),
-            &format!("{event_id}:{victim_id}"),
-            destination,
-            recipient_id,
-            Some(50),
-            clamp,
-            false,
-            now,
-        )?;
-        total.set(total.get().saturating_add(result.applied));
-        if result.applied > 0 {
-            applied_count.set(applied_count.get().saturating_add(1));
-        }
-        if result.absorbed > 0 {
-            shield_absorbed_total.set(shield_absorbed_total.get().saturating_add(result.absorbed));
-            shielded_count.set(shielded_count.get().saturating_add(1));
-        }
-        if mechanic == WheelMechanic::LightningBolt && result.applied > 0 {
-            lightning_count.set(lightning_count.get().saturating_add(1));
-        }
-        Ok(())
+    // The seed is frozen with the pending interaction, so a retried
+    // settlement re-draws exactly what the first attempt drew.
+    let mut rng = fastrand::Rng::with_seed(rng_seed);
+    let steal = |victim_id: i64, requested: i64, clamp: bool| PlannedWheelLoss {
+        victim_id,
+        requested,
+        destination: DbHostileDestination::Player,
+        recipient_id: Some(user_id),
+        clamp,
     };
-    let mut primary_victim_id = None;
-    let mut victim_new_balance = None;
-    let mut victims = Vec::new();
-    let mut self_hit = false;
-    let mut missed = false;
+    let burn = |victim_id: i64, requested: i64| PlannedWheelLoss {
+        victim_id,
+        requested,
+        destination: DbHostileDestination::Burn,
+        recipient_id: None,
+        clamp: true,
+    };
+    let scale = config.minigame_jc_delta_scale;
+    // Plan every victim first, then settle the whole outcome in one
+    // transaction so a failure can never leave it half applied.
+    let mut plan = Vec::new();
     match mechanic {
         WheelMechanic::RedShell => {
             if let Some(victim) = players
@@ -8875,76 +9068,44 @@ fn resolve_hostile_mechanic(
                 .map_err(|error| error.to_string())?
                 && let Some(victim_id) = victim.discord_id
             {
-                let before = total.get();
-                settle(
+                let roll = LossRoll {
+                    percentage: 0.02 + rng.f64() * (0.0924 - 0.02),
+                    flat: rng.i64(2..14),
+                };
+                plan.push(steal(
                     victim_id,
-                    requested_percentage_or_flat(
-                        victim.jopacoin_balance,
-                        LossRoll {
-                            percentage: 0.02 + fastrand::f64() * (0.0924 - 0.02),
-                            flat: fastrand::i64(2..14),
-                        },
-                        config.minigame_jc_delta_scale,
-                    ),
-                    DbHostileDestination::Player,
-                    Some(user_id),
+                    requested_percentage_or_flat(victim.jopacoin_balance, roll, scale),
                     false,
-                )?;
-                log_result = total.get().saturating_sub(before);
-                if log_result > 0 {
-                    primary_victim_id = Some(victim_id);
-                    victim_new_balance = players
-                        .get_by_id(victim_id, Some(guild_id))
-                        .map_err(|error| error.to_string())?
-                        .map(|player| player.jopacoin_balance);
-                }
+                ));
             }
         }
         WheelMechanic::BlueShell => {
             if let Some(victim) = leaderboard.first()
                 && let Some(victim_id) = victim.discord_id
             {
-                let before = total.get();
-                settle(
-                    victim_id,
-                    requested_percentage_or_flat(
-                        victim.jopacoin_balance,
-                        LossRoll {
-                            percentage: if victim_id == user_id {
-                                0.02 + fastrand::f64() * (0.07 - 0.02)
-                            } else {
-                                0.02 + fastrand::f64() * (0.1016 - 0.02)
-                            },
-                            flat: if victim_id == user_id {
-                                fastrand::i64(4..21)
-                            } else {
-                                fastrand::i64(4..30)
-                            },
-                        },
-                        config.minigame_jc_delta_scale,
-                    ),
-                    if victim_id == user_id {
-                        DbHostileDestination::Reserve
-                    } else {
-                        DbHostileDestination::Player
-                    },
-                    (victim_id != user_id).then_some(user_id),
-                    false,
-                )?;
-                let applied = total.get().saturating_sub(before);
-                self_hit = victim_id == user_id;
-                log_result = if victim_id == user_id {
-                    -applied
+                let roll = if victim_id == user_id {
+                    LossRoll {
+                        percentage: 0.02 + rng.f64() * (0.07 - 0.02),
+                        flat: rng.i64(4..21),
+                    }
                 } else {
-                    applied
+                    LossRoll {
+                        percentage: 0.02 + rng.f64() * (0.1016 - 0.02),
+                        flat: rng.i64(4..30),
+                    }
                 };
-                if applied > 0 && !self_hit {
-                    primary_victim_id = Some(victim_id);
-                    victim_new_balance = players
-                        .get_by_id(victim_id, Some(guild_id))
-                        .map_err(|error| error.to_string())?
-                        .map(|player| player.jopacoin_balance);
-                }
+                let requested = requested_percentage_or_flat(victim.jopacoin_balance, roll, scale);
+                plan.push(if victim_id == user_id {
+                    PlannedWheelLoss {
+                        victim_id,
+                        requested,
+                        destination: DbHostileDestination::Reserve,
+                        recipient_id: None,
+                        clamp: false,
+                    }
+                } else {
+                    steal(victim_id, requested, false)
+                });
             }
         }
         WheelMechanic::BananaPeel => {
@@ -8954,75 +9115,53 @@ fn resolve_hostile_mechanic(
                 && let Some(victim_id) = victim.discord_id
             {
                 // Python: min(scale_minigame_jc_delta(randint(...)), balance).
-                settle(
+                plan.push(burn(
                     victim_id,
                     hostile_flat_loss(
-                        fastrand::i64(WHEEL_BANANA_PEEL_LOSS_MIN..WHEEL_BANANA_PEEL_LOSS_MAX + 1),
+                        rng.i64(WHEEL_BANANA_PEEL_LOSS_MIN..WHEEL_BANANA_PEEL_LOSS_MAX + 1),
                         victim.jopacoin_balance,
-                        config.minigame_jc_delta_scale,
+                        scale,
                     ),
-                    DbHostileDestination::Burn,
-                    None,
-                    true,
-                )?;
-                let applied = total.get();
-                if applied > 0 {
-                    primary_victim_id = Some(victim_id);
-                }
+                ));
             }
         }
         WheelMechanic::GreenShell => {
-            if let Some(victim) = eligible.get(fastrand::usize(..eligible.len().max(1)))
+            if let Some(victim) = eligible.get(rng.usize(..eligible.len().max(1)))
                 && let Some(victim_id) = victim.discord_id
             {
-                let before = total.get();
                 // Python: min(scale_minigame_jc_delta(randint(...)), balance).
-                settle(
+                plan.push(steal(
                     victim_id,
                     hostile_flat_loss(
-                        fastrand::i64(WHEEL_GREEN_SHELL_STEAL_MIN..WHEEL_GREEN_SHELL_STEAL_MAX + 1),
+                        rng.i64(WHEEL_GREEN_SHELL_STEAL_MIN..WHEEL_GREEN_SHELL_STEAL_MAX + 1),
                         victim.jopacoin_balance,
-                        config.minigame_jc_delta_scale,
+                        scale,
                     ),
-                    DbHostileDestination::Player,
-                    Some(user_id),
                     false,
-                )?;
-                log_result = total.get().saturating_sub(before);
-                if log_result > 0 {
-                    primary_victim_id = Some(victim_id);
-                }
+                ));
             }
         }
         WheelMechanic::BombOmb => {
             let mut sampled = eligible.clone();
-            fastrand::shuffle(&mut sampled);
+            rng.shuffle(&mut sampled);
             for victim in sampled.iter().take(WHEEL_BOMB_OMB_VICTIM_COUNT) {
                 if let Some(victim_id) = victim.discord_id {
-                    let before = total.get();
                     // Python: min(scale_minigame_jc_delta(randint(...)), balance).
-                    settle(
+                    plan.push(burn(
                         victim_id,
                         hostile_flat_loss(
-                            fastrand::i64(
+                            rng.i64(
                                 WHEEL_BOMB_OMB_VICTIM_LOSS_MIN..WHEEL_BOMB_OMB_VICTIM_LOSS_MAX + 1,
                             ),
                             victim.jopacoin_balance,
-                            config.minigame_jc_delta_scale,
+                            scale,
                         ),
-                        DbHostileDestination::Burn,
-                        None,
-                        true,
-                    )?;
-                    let applied = total.get().saturating_sub(before);
-                    if applied > 0 {
-                        victims.push((victim_id, applied));
-                    }
+                    ));
                 }
             }
         }
         WheelMechanic::LightningBolt => {
-            let tax_rate = 0.02 + fastrand::f64() * (0.0627 - 0.02);
+            let tax_rate = 0.02 + rng.f64() * (0.0627 - 0.02);
             // Lightning is the one server-wide tax that includes the
             // spinner. Python's leaderboard pass intentionally charges every
             // account at/above the hostile floor, including self.
@@ -9030,52 +9169,32 @@ fn resolve_hostile_mechanic(
                 player.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
             }) {
                 if let Some(victim_id) = victim.discord_id {
-                    let before = total.get();
-                    settle(
+                    plan.push(PlannedWheelLoss {
                         victim_id,
-                        hostile_percentage_loss(
+                        requested: hostile_percentage_loss(
                             victim.jopacoin_balance,
                             tax_rate,
-                            config.minigame_jc_delta_scale,
+                            scale,
                         ),
-                        DbHostileDestination::Reserve,
-                        None,
-                        true,
-                    )?;
-                    let applied = total.get().saturating_sub(before);
-                    if applied > 0 && victims.len() < 3 {
-                        victims.push((victim_id, applied));
-                    }
+                        destination: DbHostileDestination::Reserve,
+                        recipient_id: None,
+                        clamp: true,
+                    });
                 }
             }
         }
         WheelMechanic::Commune | WheelMechanic::TrickleDown => {
-            let tax_rate = 0.02 + fastrand::f64() * (0.05 - 0.02);
+            let tax_rate = 0.02 + rng.f64() * (0.05 - 0.02);
             for victim in &eligible {
                 if let Some(victim_id) = victim.discord_id {
-                    let before = total.get();
-                    settle(
-                        victim_id,
-                        if mechanic == WheelMechanic::Commune {
-                            1
-                        } else {
-                            hostile_percentage_loss(
-                                victim.jopacoin_balance,
-                                tax_rate,
-                                config.minigame_jc_delta_scale,
-                            )
-                        },
-                        DbHostileDestination::Player,
-                        Some(user_id),
-                        true,
-                    )?;
-                    let applied = total.get().saturating_sub(before);
-                    if applied > 0 && victims.len() < 3 {
-                        victims.push((victim_id, applied));
-                    }
+                    let requested = if mechanic == WheelMechanic::Commune {
+                        1
+                    } else {
+                        hostile_percentage_loss(victim.jopacoin_balance, tax_rate, scale)
+                    };
+                    plan.push(steal(victim_id, requested, true));
                 }
             }
-            log_result = total.get();
         }
         WheelMechanic::Heist => {
             // Python parity: the window is the poorest thirty accounts with
@@ -9096,52 +9215,19 @@ fn resolve_hostile_mechanic(
                 .collect::<Vec<_>>();
             for victim in heist_window {
                 if let Some(victim_id) = victim.discord_id {
-                    let before = total.get();
                     // Python truncates before scaling:
                     // scale(max(1, int(balance * uniform(0.05, 0.12)))).
-                    settle(
+                    plan.push(steal(
                         victim_id,
                         hostile_percentage_loss(
                             victim.jopacoin_balance,
-                            0.05 + fastrand::f64() * (0.12 - 0.05),
-                            config.minigame_jc_delta_scale,
+                            0.05 + rng.f64() * (0.12 - 0.05),
+                            scale,
                         ),
-                        DbHostileDestination::Player,
-                        Some(user_id),
                         false,
-                    )?;
-                    let applied = total.get().saturating_sub(before);
-                    if applied > 0 && victims.len() < 3 {
-                        victims.push((victim_id, applied));
-                    }
+                    ));
                 }
             }
-            if total.get() == 0 {
-                let reward = apply_gamba_event_multiplier(
-                    cama_domain::economy_scaling::scale_minigame_jc_delta(
-                        20.0,
-                        config.minigame_jc_delta_scale,
-                    ),
-                    event_win_multiplier,
-                    1.0,
-                );
-                total.set(
-                    credit_wheel_income(
-                        path,
-                        guild_id,
-                        user_id,
-                        balance_before,
-                        reward,
-                        config,
-                        event_id,
-                        "gamba heist fallback credit",
-                        vanity_taxable_ids,
-                        low_priority_taxable_ids,
-                    )?
-                    .net,
-                );
-            }
-            log_result = total.get();
         }
         WheelMechanic::MarketCrash => {
             for victim in leaderboard.iter().take(3) {
@@ -9149,127 +9235,47 @@ fn resolve_hostile_mechanic(
                     && victim_id != user_id
                     && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
                 {
-                    let before = total.get();
                     // Python truncates before scaling:
                     // scale(max(1, int(balance * uniform(0.08, 0.15)))).
-                    settle(
+                    plan.push(steal(
                         victim_id,
                         hostile_percentage_loss(
                             victim.jopacoin_balance,
-                            0.08 + fastrand::f64() * (0.15 - 0.08),
-                            config.minigame_jc_delta_scale,
+                            0.08 + rng.f64() * (0.15 - 0.08),
+                            scale,
                         ),
-                        DbHostileDestination::Player,
-                        Some(user_id),
                         false,
-                    )?;
-                    let applied = total.get().saturating_sub(before);
-                    if applied > 0 && victims.len() < 3 {
-                        victims.push((victim_id, applied));
-                    }
+                    ));
                 }
             }
-            if total.get() == 0 {
-                let reward = apply_gamba_event_multiplier(
-                    cama_domain::economy_scaling::scale_minigame_jc_delta(
-                        25.0,
-                        config.minigame_jc_delta_scale,
-                    ),
-                    event_win_multiplier,
-                    1.0,
-                );
-                total.set(
-                    credit_wheel_income(
-                        path,
-                        guild_id,
-                        user_id,
-                        balance_before,
-                        reward,
-                        config,
-                        event_id,
-                        "gamba market crash fallback credit",
-                        vanity_taxable_ids,
-                        low_priority_taxable_ids,
-                    )?
-                    .net,
-                );
-            }
-            log_result = total.get();
         }
         WheelMechanic::HostileTakeover => {
             if let Some(victim) = leaderboard.get(3)
                 && let Some(victim_id) = victim.discord_id
                 && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
             {
-                let before = total.get();
                 // Python truncates before scaling:
                 // scale(max(1, int(balance * uniform(0.08, 0.15)))).
-                settle(
+                plan.push(steal(
                     victim_id,
                     hostile_percentage_loss(
                         victim.jopacoin_balance,
-                        0.08 + fastrand::f64() * (0.15 - 0.08),
-                        config.minigame_jc_delta_scale,
+                        0.08 + rng.f64() * (0.15 - 0.08),
+                        scale,
                     ),
-                    DbHostileDestination::Player,
-                    Some(user_id),
                     false,
-                )?;
-                let applied = total.get().saturating_sub(before);
-                if applied > 0 {
-                    primary_victim_id = Some(victim_id);
-                    victim_new_balance = players
-                        .get_by_id(victim_id, Some(guild_id))
-                        .map_err(|error| error.to_string())?
-                        .map(|player| player.jopacoin_balance);
-                }
+                ));
             }
-            let takeover_missed = total.get() == 0;
-            missed = takeover_missed;
-            if takeover_missed {
-                let reward = apply_gamba_event_multiplier(
-                    cama_domain::economy_scaling::scale_minigame_jc_delta(
-                        40.0,
-                        config.minigame_jc_delta_scale,
-                    ),
-                    event_win_multiplier,
-                    1.0,
-                );
-                total.set(
-                    credit_wheel_income(
-                        path,
-                        guild_id,
-                        user_id,
-                        balance_before,
-                        reward,
-                        config,
-                        event_id,
-                        "gamba hostile takeover fallback credit",
-                        vanity_taxable_ids,
-                        low_priority_taxable_ids,
-                    )?
-                    .net,
-                );
-            }
-            // Python records a missed Takeover as zero even though the
-            // fallback consolation credit is still applied to the wallet.
-            log_result = if takeover_missed { 0 } else { total.get() };
         }
         WheelMechanic::Emergency => {
             for victim in &leaderboard {
                 if let Some(victim_id) = victim.discord_id
                     && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
                 {
-                    settle(
+                    plan.push(burn(
                         victim_id,
-                        cama_domain::economy_scaling::scale_minigame_jc_delta(
-                            20.0,
-                            config.minigame_jc_delta_scale,
-                        ),
-                        DbHostileDestination::Burn,
-                        None,
-                        true,
-                    )?;
+                        cama_domain::economy_scaling::scale_minigame_jc_delta(20.0, scale),
+                    ));
                 }
             }
         }
@@ -9279,22 +9285,147 @@ fn resolve_hostile_mechanic(
                     && victim_id != user_id
                     && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
                 {
-                    settle(
+                    plan.push(steal(
                         victim_id,
                         cama_domain::economy_scaling::scale_minigame_jc_delta(
                             if rank == 3 { 80.0 } else { 60.0 },
-                            config.minigame_jc_delta_scale,
+                            scale,
                         ),
-                        DbHostileDestination::Player,
-                        Some(user_id),
                         true,
-                    )?;
+                    ));
                 }
             }
         }
         _ => {}
     }
-    let total_value = total.get();
+    let settled = settle_wheel_losses(
+        path,
+        guild_id,
+        user_id,
+        mechanic.code(),
+        event_id,
+        &plan,
+        Some(50),
+        unix_seconds()?,
+    )?;
+
+    let mut total = 0_i64;
+    let mut applied_count = 0_usize;
+    let mut shield_absorbed_total = 0_i64;
+    let mut shielded_count = 0_usize;
+    let mut spinner_delta = 0_i64;
+    for (planned, settlement) in &settled {
+        total = total.saturating_add(settlement.applied);
+        if settlement.applied > 0 {
+            applied_count = applied_count.saturating_add(1);
+        }
+        if settlement.absorbed > 0 {
+            shield_absorbed_total = shield_absorbed_total.saturating_add(settlement.absorbed);
+            shielded_count = shielded_count.saturating_add(1);
+        }
+        if planned.recipient_id == Some(user_id) {
+            spinner_delta = spinner_delta.saturating_add(settlement.applied);
+        }
+        if planned.victim_id == user_id {
+            spinner_delta = spinner_delta.saturating_sub(settlement.applied);
+        }
+    }
+    let hit =
+        |(planned, settlement): &(
+            PlannedWheelLoss,
+            cama_db::shop_runtime::HostileLossSettlement,
+        )| { (settlement.applied > 0).then_some((planned.victim_id, settlement.applied)) };
+    let primary = settled
+        .first()
+        .filter(|(_, settlement)| settlement.applied > 0);
+    let mut log_result = 0_i64;
+    let mut primary_victim_id = None;
+    let mut victim_new_balance = None;
+    let mut victims = Vec::new();
+    let mut self_hit = false;
+    let mut missed = false;
+    // Heist, Market Crash, and a missed Takeover pay a consolation credit
+    // when nothing was stolen. It carries its own exact-once marker.
+    let mut fallback_credit = |base: f64, reason: &str| -> Result<i64, String> {
+        let reward = apply_gamba_event_multiplier(
+            cama_domain::economy_scaling::scale_minigame_jc_delta(base, scale),
+            event_win_multiplier,
+            1.0,
+        );
+        let receipt = credit_wheel_income(
+            path,
+            guild_id,
+            user_id,
+            balance_before,
+            reward,
+            config,
+            event_id,
+            reason,
+            vanity_taxable_ids,
+            low_priority_taxable_ids,
+        )?;
+        spinner_delta = spinner_delta.saturating_add(receipt.balance_delta);
+        Ok(receipt.net)
+    };
+    match mechanic {
+        WheelMechanic::RedShell | WheelMechanic::GreenShell => {
+            log_result = total;
+            if let Some((planned, settlement)) = primary {
+                primary_victim_id = Some(planned.victim_id);
+                if mechanic == WheelMechanic::RedShell {
+                    victim_new_balance = Some(settlement.victim_balance_after);
+                }
+            }
+        }
+        WheelMechanic::BlueShell => {
+            self_hit = plan
+                .first()
+                .is_some_and(|planned| planned.victim_id == user_id);
+            log_result = if self_hit { -total } else { total };
+            if !self_hit && let Some((planned, settlement)) = primary {
+                primary_victim_id = Some(planned.victim_id);
+                victim_new_balance = Some(settlement.victim_balance_after);
+            }
+        }
+        WheelMechanic::BananaPeel => {
+            primary_victim_id = primary.map(|(planned, _)| planned.victim_id);
+        }
+        WheelMechanic::BombOmb => {
+            victims = settled.iter().filter_map(hit).collect();
+        }
+        WheelMechanic::LightningBolt => {
+            victims = settled.iter().filter_map(hit).take(3).collect();
+        }
+        WheelMechanic::Commune | WheelMechanic::TrickleDown => {
+            victims = settled.iter().filter_map(hit).take(3).collect();
+            log_result = total;
+        }
+        WheelMechanic::Heist | WheelMechanic::MarketCrash => {
+            victims = settled.iter().filter_map(hit).take(3).collect();
+            if total == 0 {
+                total = if mechanic == WheelMechanic::Heist {
+                    fallback_credit(20.0, "gamba heist fallback credit")?
+                } else {
+                    fallback_credit(25.0, "gamba market crash fallback credit")?
+                };
+            }
+            log_result = total;
+        }
+        WheelMechanic::HostileTakeover => {
+            if let Some((planned, settlement)) = primary {
+                primary_victim_id = Some(planned.victim_id);
+                victim_new_balance = Some(settlement.victim_balance_after);
+            }
+            missed = total == 0;
+            if missed {
+                total = fallback_credit(40.0, "gamba hostile takeover fallback credit")?;
+            }
+            // Python records a missed Takeover as zero even though the
+            // fallback consolation credit is still applied to the wallet.
+            log_result = if missed { 0 } else { total };
+        }
+        _ => {}
+    }
     if matches!(
         mechanic,
         WheelMechanic::RedShell
@@ -9302,28 +9433,34 @@ fn resolve_hostile_mechanic(
             | WheelMechanic::BananaPeel
             | WheelMechanic::GreenShell
             | WheelMechanic::BombOmb
-    ) && total_value == 0
+    ) && total == 0
     {
         missed = true;
     }
     victims.sort_by(|left, right| right.1.cmp(&left.1));
+    let lightning_count = if mechanic == WheelMechanic::LightningBolt {
+        applied_count
+    } else {
+        0
+    };
     Ok(HostileResolution {
         log_result,
         lightning_total: if mechanic == WheelMechanic::LightningBolt {
-            total_value
+            total
         } else {
             0
         },
-        lightning_count: lightning_count.get(),
-        total: total_value,
-        count: applied_count.get(),
+        lightning_count,
+        total,
+        count: applied_count,
         missed,
         self_hit,
         victim_id: primary_victim_id,
         victim_new_balance,
         victims,
-        shield_absorbed_total: shield_absorbed_total.get(),
-        shielded_count: shielded_count.get(),
+        shield_absorbed_total,
+        shielded_count,
+        spinner_delta,
     })
 }
 
@@ -9656,7 +9793,7 @@ fn spin_once(
             path,
             guild_id,
             user_id,
-            player.jopacoin_balance,
+            receipt.balance_delta,
             &event_id,
             now,
             config.minigame_jc_delta_scale,
@@ -9820,6 +9957,7 @@ fn spin_once(
         extra_note,
         income,
         neon_lightning,
+        earning,
     } = resolve_wheel_value(
         path,
         guild_id,
@@ -9838,6 +9976,7 @@ fn spin_once(
         visible_positive_balance,
         visible_member_ids,
         player_names,
+        fastrand::u64(..),
     )?;
     let next = cooldown_after_resolution(now, bonus_spin, last_regular_spin, cooldown_outcome);
     if let Some(replacement) = next.replacement_last_spin {
@@ -9854,7 +9993,7 @@ fn spin_once(
         path,
         guild_id,
         user_id,
-        player.jopacoin_balance,
+        earning,
         &event_id,
         now,
         config.minigame_jc_delta_scale,
@@ -10729,6 +10868,7 @@ fn pending_wheel_interaction(
             bonus_spin,
             last_regular_spin,
             original_responder: None,
+            attempt: Arc::default(),
         },
     ))
 }
@@ -10843,13 +10983,17 @@ fn resolve_pending_wheel(
     low_priority_taxable_ids: &BTreeSet<i64>,
     visible_member_ids: Option<&BTreeSet<i64>>,
     player_names: &dyn WheelPlayerNameSource,
+    attempt: &Mutex<WheelAttemptMemo>,
 ) -> Result<PendingWheelResolution, String> {
-    if use_reroll
-        && !ManaRepository::new(path)
+    let recorded = lock_wheel_attempt(attempt).clone();
+    if use_reroll && !recorded.reroll_claimed {
+        if !ManaRepository::new(path)
             .claim_bankrupt_buff_atomic(user_id, Some(guild_id), BankruptBuff::Reroll)
             .map_err(|error| error.to_string())?
-    {
-        return Err("Your Red mana re-roll has already been used today.".to_owned());
+        {
+            return Err("Your Red mana re-roll has already been used today.".to_owned());
+        }
+        lock_wheel_attempt(attempt).reroll_claimed = true;
     }
     let landed = cama_app::wheel::WheelWedge {
         label: option.label.clone(),
@@ -10857,11 +11001,44 @@ fn resolve_pending_wheel(
         color: option.color,
     };
     let players = PlayerRepository::new(path);
-    let outcome_balance_before = players
-        .get_by_id(user_id, Some(guild_id))
-        .map_err(|error| error.to_string())?
-        .map(|row| row.jopacoin_balance)
-        .unwrap_or(balance_before);
+    // A retry after a later step failed reuses the committed outcome rather
+    // than re-running effects that are not keyed to this spin.
+    let (outcome_balance_before, resolution) = match recorded.outcome {
+        Some(outcome) => outcome,
+        None => {
+            let rng_seed = *lock_wheel_attempt(attempt)
+                .rng_seed
+                .get_or_insert_with(|| fastrand::u64(..));
+            let outcome_balance_before = players
+                .get_by_id(user_id, Some(guild_id))
+                .map_err(|error| error.to_string())?
+                .map(|row| row.jopacoin_balance)
+                .unwrap_or(balance_before);
+            let resolution = resolve_wheel_value(
+                path,
+                guild_id,
+                user_id,
+                outcome_balance_before,
+                &landed,
+                kind,
+                effects,
+                config,
+                event_id,
+                vanity_taxable_ids,
+                low_priority_taxable_ids,
+                event_win_multiplier,
+                event_loss_multiplier,
+                bonus_spin,
+                None,
+                visible_member_ids,
+                player_names,
+                rng_seed,
+            )?;
+            lock_wheel_attempt(attempt).outcome =
+                Some((outcome_balance_before, resolution.clone()));
+            (outcome_balance_before, resolution)
+        }
+    };
     let WheelResolution {
         resolved,
         logged,
@@ -10870,25 +11047,8 @@ fn resolve_pending_wheel(
         extra_note,
         income,
         neon_lightning,
-    } = resolve_wheel_value(
-        path,
-        guild_id,
-        user_id,
-        outcome_balance_before,
-        &landed,
-        kind,
-        effects,
-        config,
-        event_id,
-        vanity_taxable_ids,
-        low_priority_taxable_ids,
-        event_win_multiplier,
-        event_loss_multiplier,
-        bonus_spin,
-        None,
-        visible_member_ids,
-        player_names,
-    )?;
+        earning,
+    } = resolution;
     let next = cooldown_after_resolution(now, bonus_spin, last_regular_spin, cooldown_outcome);
     if let Some(replacement) = next.replacement_last_spin {
         players
@@ -10904,7 +11064,7 @@ fn resolve_pending_wheel(
         path,
         guild_id,
         user_id,
-        outcome_balance_before,
+        earning,
         event_id,
         now,
         config.minigame_jc_delta_scale,

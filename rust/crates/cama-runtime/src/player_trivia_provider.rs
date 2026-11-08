@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
 use cama_app::player_trivia_service as app;
 use cama_app::service_container::PersistentVanityTaxService;
+use cama_db::loan_repository::LoanRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::player_trivia as db;
-use cama_db::predictions_repository::PredictionRepository;
 use cama_domain::economy_scaling::scale_minigame_jc_delta;
 use cama_domain::pet_evolution::PetActivity;
 use tokio::task::JoinHandle;
@@ -97,7 +97,7 @@ impl PlayerTriviaRegistrationProvider {
                     player_names: Arc::new(DiscordIdPlayerNameResolver),
                     repository,
                     service,
-                    penalties: PredictionRepository::new(database_path.as_ref()),
+                    penalties: LoanRepository::new(database_path.as_ref()),
                     pets: PetEvolutionRepository::new(database_path.as_ref()),
                     economy_events: Arc::new(SqliteEconomyEventService::new(
                         database_path.as_ref(),
@@ -177,7 +177,7 @@ struct PlayerTriviaRuntimeState {
     player_names: Arc<dyn GuildPlayerNameResolver>,
     repository: RuntimePlayerTriviaRepository,
     service: Arc<app::PlayerTriviaService<RuntimePlayerTriviaRepository>>,
-    penalties: PredictionRepository,
+    penalties: LoanRepository,
     pets: PetEvolutionRepository,
     economy_events: Arc<SqliteEconomyEventService>,
     discord: Arc<dyn PlayerTriviaDiscordPort>,
@@ -756,7 +756,7 @@ impl PlayerTriviaRuntimeState {
         let penalties = self.penalties.clone();
         tokio::task::spawn_blocking(move || {
             penalties
-                .debit_gamba_channel_penalty(user_id, Some(guild_id))
+                .charge_gamba_channel_penalty_atomic(user_id, Some(guild_id))
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         })

@@ -1390,12 +1390,12 @@ fn test_correction_never_withholds_more_than_the_bet_profit() {
             BetCorrectionOptions::pool(0.90, &taxable, 0.90, &taxable),
         )
         .unwrap();
-    // 100 profit, 90 of it to the vanity tax, and the low-priority share
-    // clamped to the 10 that remains rather than the 90 its rate asks for.
+    // The shared split caps each tax rate at 50%, so the 100 profit is split
+    // evenly between the two taxes and never exceeded.
     assert_eq!(fixture.balance(dire_bettor), 200);
     assert_eq!(
         fixture.settlement_taxes(seeded.match_id),
-        vec![(dire_bettor, 90, 10)]
+        vec![(dire_bettor, 50, 50)]
     );
 }
 
@@ -1489,8 +1489,8 @@ fn test_correction_clamps_low_priority_share_after_bankruptcy_and_vanity() {
         Some(200),
     );
     fixture.bet(seeded.match_id, dire_bettor, MatchSide::Dire, 100, None);
-    // 20 games left at 5% each withhold the full profit, so vanity still
-    // takes its 10 and the low-priority share is clamped to nothing.
+    // 20 games left at 5% each withhold the full profit, so both the vanity
+    // and low-priority shares are trimmed to nothing and the stake survives.
     fixture.set_penalty_games(dire_bettor, 20);
     let taxable = BTreeSet::from([dire_bettor]);
     fixture
@@ -1502,11 +1502,65 @@ fn test_correction_clamps_low_priority_share_after_bankruptcy_and_vanity() {
             correction_deductions(&taxable, &taxable),
         )
         .unwrap();
-    assert_eq!(fixture.balance(dire_bettor), 190);
+    assert_eq!(fixture.balance(dire_bettor), 200);
     assert_eq!(
         fixture.settlement_withholdings(seeded.match_id),
-        vec![(dire_bettor, 100, 10, 0)]
+        vec![(dire_bettor, 100, 0, 0)]
     );
+}
+
+#[test]
+fn test_correction_reuses_the_rates_the_original_settlement_froze() {
+    let fixture = Fixture::new();
+    let seeded = fixture.seed_match(3_750);
+    let radiant_bettor = 3_848;
+    let dire_bettor = 3_849;
+    fixture.add_spectator(radiant_bettor, 300);
+    fixture.add_spectator(dire_bettor, 100);
+    fixture.bet(
+        seeded.match_id,
+        radiant_bettor,
+        MatchSide::Radiant,
+        100,
+        Some(200),
+    );
+    fixture.bet(seeded.match_id, dire_bettor, MatchSide::Dire, 100, None);
+    // At settlement the dire bettor had two penalty games (10%) and was on
+    // neither tax roster.
+    cama_db_core::profit_deductions::record_bet_settlement_rates(
+        &fixture.connection(),
+        GUILD,
+        seeded.match_id,
+        &BTreeMap::from([
+            (
+                dire_bettor,
+                cama_db_core::profit_deductions::ProfitDeductionRates {
+                    bankruptcy: 0.10,
+                    ..Default::default()
+                },
+            ),
+            (radiant_bettor, Default::default()),
+        ]),
+    )
+    .unwrap();
+    // By correction time the penalty grew and the bettor joined both rosters;
+    // neither may change what the corrected settlement withholds.
+    fixture.set_penalty_games(dire_bettor, 12);
+    let taxable = BTreeSet::from([dire_bettor]);
+    fixture
+        .repository
+        .settle_bet_correction_atomic(
+            seeded.match_id,
+            Some(GUILD),
+            MatchSide::Dire,
+            correction_deductions(&taxable, &taxable),
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.settlement_withholdings(seeded.match_id),
+        vec![(dire_bettor, 10, 0, 0)]
+    );
+    assert_eq!(fixture.balance(dire_bettor), 290);
 }
 
 #[test]
@@ -2972,6 +3026,12 @@ CREATE TABLE low_priority_state (
     guild_id INTEGER NOT NULL,
     active INTEGER NOT NULL,
     PRIMARY KEY(discord_id,guild_id)
+);
+CREATE TABLE app_kv (
+    guild_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (guild_id, key)
 );
 "#;
 

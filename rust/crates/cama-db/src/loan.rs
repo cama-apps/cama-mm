@@ -23,6 +23,8 @@ use crate::open_runtime_connection;
 mod white_stipend;
 
 const SQLITE_ID_CHUNK: usize = 900;
+/// JopaCoin debited for using a gamba command outside a gamba channel.
+pub const GAMBA_CHANNEL_PENALTY: i64 = 1;
 
 /// One persisted row from Python's guild-scoped `loan_state` table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -442,33 +444,109 @@ impl LoanRepository {
         amount: i64,
         context: &LedgerContext,
     ) -> Result<i64, LoanRepositoryError> {
+        if amount <= 0 {
+            return Err(LoanRepositoryError::InvalidFundAmount);
+        }
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let balance = player_balance(&transaction, discord_id, guild_id)?
-            .ok_or(LoanRepositoryError::PlayerNotFound)?;
-        let new_balance = balance
-            .checked_sub(amount)
-            .ok_or(LoanRepositoryError::AmountOverflow)?;
-        let current_fund = nonprofit_total(&transaction, guild_id)?;
-        let new_fund = current_fund
-            .checked_add(amount)
-            .ok_or(LoanRepositoryError::AmountOverflow)?;
-
-        with_ledger_context(&transaction, context, || {
-            let changed = transaction.execute(
-                "UPDATE players
-                 SET jopacoin_balance = ?1, updated_at = CURRENT_TIMESTAMP
-                 WHERE discord_id = ?2 AND guild_id = ?3",
-                params![new_balance, discord_id, guild_id],
-            )?;
-            if changed != 1 {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
-            }
-            set_nonprofit_total(&transaction, guild_id, new_fund)
-        })?;
+        let new_fund =
+            transfer_balance_to_nonprofit_in(&transaction, discord_id, guild_id, amount, context)?;
         transaction.commit()?;
         Ok(new_fund)
+    }
+
+    /// Debit a player into the reserve once for a stable ledger identity.
+    ///
+    /// The reserve-side ledger row carries `context`'s source, related type,
+    /// and related id; a retry that finds it returns the recorded transfer
+    /// instead of debiting the player again.
+    pub fn transfer_balance_to_nonprofit_once_atomic(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        amount: i64,
+        context: &LedgerContext,
+    ) -> Result<NonprofitCreditReceipt, LoanRepositoryError> {
+        if amount <= 0 {
+            return Err(LoanRepositoryError::InvalidFundAmount);
+        }
+        let (Some(source), Some(related_type), Some(related_id)) = (
+            context.source.as_deref(),
+            context.related_type.as_deref(),
+            context.related_id.as_deref(),
+        ) else {
+            return Err(LoanRepositoryError::MissingIdempotencyContext);
+        };
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((recorded_amount, recorded_total)) = transaction
+            .query_row(
+                "SELECT delta,balance_after FROM economy_ledger_entries
+                 WHERE guild_id=?1 AND account_type='nonprofit'
+                   AND source=?2 AND related_type=?3 AND related_id=?4
+                 ORDER BY ledger_id ASC LIMIT 1",
+                params![guild_id, source, related_type, related_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+        {
+            transaction.commit()?;
+            return Ok(NonprofitCreditReceipt {
+                amount: recorded_amount,
+                total: recorded_total,
+                applied: false,
+            });
+        }
+        let total =
+            transfer_balance_to_nonprofit_in(&transaction, discord_id, guild_id, amount, context)?;
+        transaction.commit()?;
+        Ok(NonprofitCreditReceipt {
+            amount,
+            total,
+            applied: true,
+        })
+    }
+
+    /// Charge the one-JC wrong-channel penance shared by every gamba-channel
+    /// command: the debit moves into the reserve with one attributed ledger
+    /// row and lowers the player's historical low-water mark. A missing player
+    /// is a silent no-op and returns `false`.
+    pub fn charge_gamba_channel_penalty_atomic(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<bool, LoanRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if player_balance(&transaction, discord_id, guild_id)?.is_none() {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        transfer_balance_to_nonprofit_in(
+            &transaction,
+            discord_id,
+            guild_id,
+            GAMBA_CHANNEL_PENALTY,
+            &LedgerContext {
+                source: Some("gamba".to_owned()),
+                actor_id: Some(discord_id),
+                related_type: Some("wrong_channel_penalty".to_owned()),
+                related_id: Some(discord_id.to_string()),
+                reason: Some("gamba wrong-channel penance".to_owned()),
+                metadata: Some(format!(r#"{{"amount":{GAMBA_CHANNEL_PENALTY}}}"#)),
+            },
+        )?;
+        transaction.execute(
+            "UPDATE players SET lowest_balance_ever=jopacoin_balance
+             WHERE discord_id=?1 AND guild_id=?2
+               AND (lowest_balance_ever IS NULL OR jopacoin_balance<lowest_balance_ever)",
+            params![discord_id, guild_id],
+        )?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     /// Atomically transfer existing balance to a player with a negative
@@ -876,6 +954,39 @@ fn loan_state_in_transaction(
             },
         )
         .optional()
+}
+
+/// Debit a player and credit the reserve inside the caller's transaction.
+fn transfer_balance_to_nonprofit_in(
+    transaction: &Transaction<'_>,
+    discord_id: i64,
+    guild_id: i64,
+    amount: i64,
+    context: &LedgerContext,
+) -> Result<i64, LoanRepositoryError> {
+    let balance = player_balance(transaction, discord_id, guild_id)?
+        .ok_or(LoanRepositoryError::PlayerNotFound)?;
+    let new_balance = balance
+        .checked_sub(amount)
+        .ok_or(LoanRepositoryError::AmountOverflow)?;
+    let current_fund = nonprofit_total(transaction, guild_id)?;
+    let new_fund = current_fund
+        .checked_add(amount)
+        .ok_or(LoanRepositoryError::AmountOverflow)?;
+
+    with_ledger_context(transaction, context, || {
+        let changed = transaction.execute(
+            "UPDATE players
+             SET jopacoin_balance = ?1, updated_at = CURRENT_TIMESTAMP
+             WHERE discord_id = ?2 AND guild_id = ?3",
+            params![new_balance, discord_id, guild_id],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        set_nonprofit_total(transaction, guild_id, new_fund)
+    })?;
+    Ok(new_fund)
 }
 
 fn player_balance(

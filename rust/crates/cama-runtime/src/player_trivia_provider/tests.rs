@@ -468,6 +468,13 @@ async fn wrong_channel_charges_one_jc_and_returns_exact_gamba_copy() {
     assert!(captured.defers.is_empty());
     drop(captured);
     assert_eq!(fixture.balance(USER), 2);
+    assert_eq!(
+        crate::test_support::penance_ledger::gamba_channel_penance_ledger(
+            fixture.database.path(),
+            GUILD
+        ),
+        crate::test_support::penance_ledger::GAMBA_CHANNEL_PENANCE_LEDGER
+    );
     assert!(
         fixture
             .repository()

@@ -6,7 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
-use cama_db_core::profit_deductions::penalty_games_remaining;
+use cama_db_core::profit_deductions::{
+    ProfitDeductions, penalty_games_remaining, split_profit_deductions,
+};
 use cama_domain::role_derivation::{LaneStats, derive_positions};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value as JsonValue;
@@ -383,46 +385,27 @@ impl MatchRecordingRepository {
             };
             let net_before_penalty = gross.saturating_sub(garnished);
             let penalty_games = penalty_games_remaining(&transaction, guild_id, award.discord_id)?;
-            let bankruptcy_penalty =
-                if award.apply_bankruptcy_penalty && penalty_games > 0 && net_before_penalty > 0 {
-                    truncated_rate(
-                        net_before_penalty,
-                        cama_domain::bankruptcy::withheld_rate(
-                            normalized_rate(award.bankruptcy_penalty_rate_per_game, 1.0),
-                            penalty_games,
-                        ),
-                    )
-                } else {
-                    0
-                };
-            let vanity_tax = if net_before_penalty > 0 {
-                truncated_rate(
-                    net_before_penalty,
-                    normalized_rate(award.vanity_tax_rate, 0.5),
+            // The bankruptcy share and both taxes read the same
+            // post-garnishment basis. The shared split trims each later share
+            // to what the earlier ones left, so together they never exceed it.
+            let bankruptcy_rate = if award.apply_bankruptcy_penalty {
+                cama_domain::bankruptcy::withheld_rate(
+                    award.bankruptcy_penalty_rate_per_game,
+                    penalty_games,
                 )
             } else {
-                0
+                0.0
             };
-            // Low priority taxes the same profit basis as vanity, never the
-            // post-vanity remainder, so the two rates stay additive.
-            let low_priority_tax = if net_before_penalty > 0 {
-                truncated_rate(
-                    net_before_penalty,
-                    normalized_rate(award.low_priority_tax_rate, 0.5),
-                )
-            } else {
-                0
-            };
-            // The bankruptcy withholding and both taxes are independent
-            // fractions of one basis, so their sum can exceed the profit they
-            // are withheld from. Clamp the combined withholding to
-            // `net_before_penalty` by trimming the low-priority share, which
-            // keeps already-reported bankruptcy and vanity totals exact.
-            let low_priority_tax = low_priority_tax.min(
-                net_before_penalty
-                    .saturating_sub(bankruptcy_penalty)
-                    .saturating_sub(vanity_tax)
-                    .max(0),
+            let ProfitDeductions {
+                bankruptcy_penalty,
+                vanity_tax,
+                low_priority_tax,
+                ..
+            } = split_profit_deductions(
+                net_before_penalty,
+                bankruptcy_rate,
+                award.vanity_tax_rate,
+                award.low_priority_tax_rate,
             );
             // Recorded so a compensating rollback can hand the consumed penalty
             // game back before the award is retried.

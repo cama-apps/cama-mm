@@ -1652,6 +1652,7 @@ async fn expired_wheel_sqlite_failure_keeps_claim_for_retry() {
                 bonus_spin: false,
                 last_regular_spin: None,
                 original_responder: None,
+                attempt: Arc::default(),
             },
         );
     Connection::open(database.path())
@@ -1705,6 +1706,312 @@ async fn expired_wheel_sqlite_failure_keeps_claim_for_retry() {
 }
 
 #[tokio::test]
+async fn neon_hooks_run_on_the_blocking_pool() {
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("Neon configuration");
+    let provider = BettingRegistrationProvider::new(
+        "/tmp/cama-mm-betting-neon-blocking.sqlite",
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    let async_thread = std::thread::current().id();
+    let hook_thread = provider
+        .handler
+        .run_neon(|_| std::thread::current().id())
+        .await
+        .expect("Neon hook");
+    assert_ne!(hook_thread, async_thread);
+}
+
+/// Balances of the spinner (7), two other players (8, 9), and the reserve.
+fn retry_economy_snapshot(path: &Path) -> [i64; 4] {
+    let players = PlayerRepository::new(path);
+    let balance = |discord_id| {
+        players
+            .get_by_id(discord_id, Some(42))
+            .expect("retry player lookup")
+            .expect("retry player")
+            .jopacoin_balance
+    };
+    [
+        balance(7),
+        balance(8),
+        balance(9),
+        LoanRepository::new(path)
+            .get_nonprofit_fund(Some(42))
+            .expect("retry reserve"),
+    ]
+}
+
+/// Settle one expired interactive spin whose first wheel-history write fails,
+/// then retry it. Returns the database and the economy after each attempt.
+async fn retry_wheel_after_failed_history_write(
+    spin_kind: WheelKind,
+    option: WheelOption,
+    seed: impl FnOnce(&Path),
+) -> (NamedTempFile, [i64; 4], [i64; 4]) {
+    let database = NamedTempFile::new().expect("temporary retry database");
+    initialize_or_migrate(database.path()).expect("retry schema");
+    let players = PlayerRepository::new(database.path());
+    for (discord_id, balance) in [(7, 100), (8, 1_000), (9, 500)] {
+        players
+            .add(&NewPlayer::new(discord_id, "retry-player", Some(42)))
+            .expect("retry player");
+        players
+            .update_balance(discord_id, Some(42), balance)
+            .expect("retry balance");
+    }
+    seed(database.path());
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("retry configuration");
+    let provider = BettingRegistrationProvider::new(
+        database.path(),
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    provider
+        .handler
+        .wheel_interactions
+        .lock()
+        .expect("retry interaction lock")
+        .insert(
+            "disc_effect_retry".to_owned(),
+            PendingWheelInteraction {
+                kind: WheelInteractionKind::Discover,
+                user_id: 7,
+                guild_id: 42,
+                created_at: Instant::now() - Duration::from_secs(120),
+                options: vec![option],
+                wheel_wedges: Vec::new(),
+                golden: false,
+                display_name: None,
+                initial_attachment: None,
+                votes: BTreeMap::new(),
+                spin_kind,
+                balance_before: 100,
+                effects: ManaEffects::default(),
+                event_id: "effect-retry-event".to_owned(),
+                config: BettingRuntimeConfig::from_application_config(&config),
+                event_win_multiplier: 1.0,
+                event_loss_multiplier: 1.0,
+                bonus_spin: false,
+                last_regular_spin: None,
+                original_responder: None,
+                attempt: Arc::default(),
+            },
+        );
+    Connection::open(database.path())
+        .expect("open retry database")
+        .execute_batch(
+            "CREATE TRIGGER fail_first_wheel_log
+             BEFORE INSERT ON wheel_spins
+             BEGIN SELECT RAISE(ABORT, 'transient wheel failure'); END;",
+        )
+        .expect("install transient wheel failure");
+    assert!(
+        provider.expire_pending_views().await.is_err(),
+        "the first settlement attempt fails at the history write"
+    );
+    let after_failure = retry_economy_snapshot(database.path());
+    Connection::open(database.path())
+        .expect("reopen retry database")
+        .execute("DROP TRIGGER fail_first_wheel_log", [])
+        .expect("remove transient failure");
+    assert_eq!(
+        provider
+            .expire_pending_views()
+            .await
+            .expect("the retried settlement completes"),
+        1
+    );
+    assert!(
+        provider
+            .handler
+            .wheel_interactions
+            .lock()
+            .expect("settled interaction lock")
+            .is_empty()
+    );
+    let spin_count: i64 = Connection::open(database.path())
+        .expect("open retry result")
+        .query_row(
+            "SELECT COUNT(*) FROM wheel_spins WHERE event_id='effect-retry-event'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("retry spin count");
+    assert_eq!(spin_count, 1);
+    let after_retry = retry_economy_snapshot(database.path());
+    (database, after_failure, after_retry)
+}
+
+fn mechanic_option(mechanic: WheelMechanic) -> WheelOption {
+    WheelOption {
+        label: mechanic.code().to_owned(),
+        value: WheelValue::Mechanic(mechanic),
+        color: "#000000",
+    }
+}
+
+#[tokio::test]
+async fn retried_chain_reaction_copies_a_loss_exactly_once() {
+    let (_database, after_failure, after_retry) = retry_wheel_after_failed_history_write(
+        WheelKind::Bankrupt,
+        mechanic_option(WheelMechanic::ChainReaction),
+        |path| {
+            WheelSpinRepository::new(path)
+                .log_wheel_spin(&NewWheelSpin {
+                    event_id: Some("copied-spin".to_owned()),
+                    ..NewWheelSpin::legacy(8, Some(42), -30, 1_000)
+                })
+                .expect("seed copied losing spin");
+        },
+    )
+    .await;
+    assert_eq!(after_failure, [70, 1_000, 500, 30]);
+    assert_eq!(after_retry, after_failure);
+}
+
+#[tokio::test]
+async fn retried_recession_charges_each_victim_exactly_once() {
+    let (database, after_failure, after_retry) = retry_wheel_after_failed_history_write(
+        WheelKind::Regular,
+        mechanic_option(WheelMechanic::Recession),
+        |_| {},
+    )
+    .await;
+    assert!(after_failure[1] < 1_000 && after_failure[2] < 500);
+    assert_eq!(after_retry, after_failure);
+    let events: i64 = Connection::open(database.path())
+        .expect("open recession events")
+        .query_row(
+            "SELECT COUNT(*) FROM hostile_loss_events
+             WHERE event_key GLOB 'effect-retry-event:*'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count recession events");
+    assert_eq!(events, 3);
+}
+
+#[tokio::test]
+async fn retried_market_crash_keeps_its_random_amounts() {
+    let (_database, after_failure, after_retry) = retry_wheel_after_failed_history_write(
+        WheelKind::Regular,
+        mechanic_option(WheelMechanic::MarketCrash),
+        |_| {},
+    )
+    .await;
+    assert!(
+        after_failure[0] > 100,
+        "the spinner stole from the top players"
+    );
+    assert_eq!(after_retry, after_failure);
+}
+
+#[tokio::test]
+async fn retried_bankrupt_pardon_forgives_the_loss_exactly_once() {
+    let (database, after_failure, after_retry) = retry_wheel_after_failed_history_write(
+        WheelKind::Bankrupt,
+        WheelOption {
+            label: "BANKRUPT".to_owned(),
+            value: WheelValue::Numeric(-20),
+            color: "#1a1a1a",
+        },
+        |path| {
+            PlayerRepository::new(path)
+                .set_wheel_pardon(7, Some(42), true)
+                .expect("arm pardon");
+        },
+    )
+    .await;
+    assert_eq!(after_failure, [100, 1_000, 500, 0]);
+    assert_eq!(after_retry, after_failure);
+    assert!(
+        !PlayerRepository::new(database.path())
+            .get_wheel_pardon(7, Some(42))
+            .expect("read pardon")
+    );
+    let logged: i64 = Connection::open(database.path())
+        .expect("open pardon history")
+        .query_row(
+            "SELECT result FROM wheel_spins WHERE event_id='effect-retry-event'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pardoned spin");
+    assert_eq!(logged, 0);
+}
+
+#[tokio::test]
+async fn retried_extend_adds_its_penalty_game_exactly_once() {
+    let (database, _, _) = retry_wheel_after_failed_history_write(
+        WheelKind::Bankrupt,
+        mechanic_option(WheelMechanic::ExtendOne),
+        |path| {
+            BankruptcyRepository::new(path)
+                .adjust_penalty_games_atomic(7, Some(42), 2)
+                .expect("seed penalty");
+        },
+    )
+    .await;
+    assert_eq!(
+        BankruptcyRepository::new(database.path())
+            .get_penalty_games(7, Some(42))
+            .expect("read penalty"),
+        3
+    );
+}
+
+#[test]
+fn a_retried_selection_keeps_the_first_attempts_option_and_reroll() {
+    let first = mechanic_option(WheelMechanic::Recession);
+    let pending = PendingWheelInteraction {
+        kind: WheelInteractionKind::Reroll,
+        user_id: 7,
+        guild_id: 42,
+        created_at: Instant::now(),
+        options: vec![first.clone(), mechanic_option(WheelMechanic::Jailbreak)],
+        wheel_wedges: Vec::new(),
+        golden: false,
+        display_name: None,
+        initial_attachment: None,
+        votes: BTreeMap::new(),
+        spin_kind: WheelKind::Bankrupt,
+        balance_before: 0,
+        effects: ManaEffects::default(),
+        event_id: "pinned".to_owned(),
+        config: BettingRuntimeConfig::from_application_config(
+            &ApplicationConfig::from_lookup(|name| {
+                (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+            })
+            .expect("configuration"),
+        ),
+        event_win_multiplier: 1.0,
+        event_loss_multiplier: 1.0,
+        bonus_spin: false,
+        last_regular_spin: None,
+        original_responder: None,
+        attempt: Arc::default(),
+    };
+    let (pinned, reroll) = pin_wheel_selection(&pending, first.clone(), true);
+    assert_eq!((pinned.label.as_str(), reroll), ("RECESSION", true));
+    // A later click on the other option, or the timeout default, cannot
+    // change what the first attempt began settling.
+    let clone = pending.clone();
+    let (pinned, reroll) =
+        pin_wheel_selection(&clone, mechanic_option(WheelMechanic::Jailbreak), false);
+    assert_eq!(
+        (pinned.label.as_str(), reroll),
+        (first.label.as_str(), true)
+    );
+}
+
+#[tokio::test]
 async fn wheel_click_and_timeout_race_settles_exactly_once() {
     let database = NamedTempFile::new().expect("temporary race database");
     initialize_or_migrate(database.path()).expect("race schema");
@@ -1752,6 +2059,7 @@ async fn wheel_click_and_timeout_race_settles_exactly_once() {
                 bonus_spin: false,
                 last_regular_spin: None,
                 original_responder: None,
+                attempt: Arc::default(),
             },
         );
     let responder = Arc::new(RecordingResponder::default());
@@ -1992,8 +2300,15 @@ async fn lobby_bonus_does_not_inflate_bettor_previews() {
                     .find(|field| field.name == "Current Odds")
                     .expect("odds field")
                     .value;
-                assert!(!odds.contains("1000"));
-                assert!(!odds.contains("600"));
+                // The field ends with the wall-clock lock time as a Discord
+                // timestamp, whose digits can themselves contain "600" or
+                // "1000"; only the amounts above that line are under test.
+                let (amounts, lock_line) = odds
+                    .split_once("\nBetting closes <t:")
+                    .expect("open betting shows its lock time");
+                assert!(lock_line.ends_with(":R>"));
+                assert!(!amounts.contains("1000"));
+                assert!(!amounts.contains("600"));
                 assert!(odds.contains(if mode == "pool" {
                     "Seed: Radiant 200 "
                 } else {
@@ -3072,6 +3387,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         None,
         None,
         &BTreeMap::new(),
+        0,
     )
     .expect("resolve no-op extension");
     assert_eq!(
@@ -3102,6 +3418,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         None,
         None,
         &BTreeMap::new(),
+        0,
     )
     .expect("resolve active extension");
     assert_eq!(
@@ -3168,6 +3485,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             None,
             None,
             &BTreeMap::new(),
+            0,
         )
         .expect("resolve bankrupt loss");
 
@@ -3218,6 +3536,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             None,
             None,
             &BTreeMap::new(),
+            0,
         )
         .expect("retry bankrupt loss");
         assert_eq!(retry.logged, -expected_applied);
@@ -3302,6 +3621,7 @@ fn fully_shielded_numeric_wheel_losses_keep_their_landed_presentation_and_histor
             &BTreeSet::new(),
             None,
             &BTreeMap::new(),
+            &Mutex::default(),
         )
         .expect("resolve pending numeric loss");
         assert!(
@@ -3421,6 +3741,7 @@ fn wheel_interaction_timeout_policy_matches_python_views() {
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: None,
+        attempt: Arc::default(),
     };
     assert_eq!(timeout_wheel_option(&base()).label, "BAD");
     let mut trial = base();
@@ -3473,6 +3794,7 @@ fn wheel_choice_and_blue_preview_embeds_match_python_presentation() {
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: None,
+        attempt: Arc::default(),
     };
 
     let scrying = wheel_interaction_prompt_embed(&pending);
@@ -3852,6 +4174,10 @@ async fn wrong_channel_penalty_debits_one_and_credits_reserve() {
             .expect("reserve"),
         1
     );
+    assert_eq!(
+        crate::test_support::penance_ledger::gamba_channel_penance_ledger(database.path(), 42),
+        crate::test_support::penance_ledger::GAMBA_CHANNEL_PENANCE_LEDGER
+    );
 }
 
 #[test]
@@ -4025,7 +4351,7 @@ fn wheel_positive_delta_applies_blood_pact_once_through_protection_gateway() {
         database.path(),
         42,
         7,
-        0,
+        credit.balance_delta,
         "wheel-blood-pact",
         1_700_000_001,
         runtime.minigame_jc_delta_scale,
@@ -4049,7 +4375,7 @@ fn wheel_positive_delta_applies_blood_pact_once_through_protection_gateway() {
         database.path(),
         42,
         7,
-        0,
+        credit.balance_delta,
         "wheel-blood-pact",
         1_700_000_002,
         runtime.minigame_jc_delta_scale,
@@ -4064,6 +4390,67 @@ fn wheel_positive_delta_applies_blood_pact_once_through_protection_gateway() {
             .data
             .skimmed_total,
         Some(expected_skim)
+    );
+}
+
+#[test]
+fn wheel_blood_pact_skims_only_the_wheel_receipts_not_a_concurrent_credit() {
+    let database = NamedTempFile::new().expect("temporary database");
+    initialize_or_migrate(database.path()).expect("schema");
+    let players = PlayerRepository::new(database.path());
+    players
+        .add(&NewPlayer::new(7, "target", Some(42)))
+        .expect("target");
+    players
+        .add(&NewPlayer::new(9, "skimmer", Some(42)))
+        .expect("skimmer");
+    BuffService::new(ManashopRepository::new(database.path()), 1_700_000_000)
+        .grant_blood_pact(9, 42, 7)
+        .expect("grant Blood Pact");
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("configuration");
+    let runtime = BettingRuntimeConfig::from_application_config(&config);
+    let credit = credit_wheel_income(
+        database.path(),
+        42,
+        7,
+        0,
+        100,
+        &runtime,
+        "wheel-concurrent-credit",
+        "test wheel reward",
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    )
+    .expect("credit wheel reward");
+    // A tip or bet payout lands between the wheel's resolution and its skim.
+    let current = players
+        .get_by_id(7, Some(42))
+        .expect("target lookup")
+        .expect("target")
+        .jopacoin_balance;
+    players
+        .update_balance(7, Some(42), current + 1_000)
+        .expect("concurrent credit");
+
+    let (skimmed, _) = apply_wheel_blood_pact_skim(
+        database.path(),
+        42,
+        7,
+        credit.balance_delta,
+        "wheel-concurrent-credit",
+        1_700_000_001,
+        runtime.minigame_jc_delta_scale,
+    )
+    .expect("Blood Pact skim");
+    assert_eq!(
+        skimmed,
+        cama_domain::economy_scaling::scale_minigame_jc_delta(
+            25.0,
+            runtime.minigame_jc_delta_scale
+        )
     );
 }
 
@@ -4143,6 +4530,7 @@ async fn wheel_choice_rejects_non_owner_but_town_vote_is_public() {
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: None,
+        attempt: Arc::default(),
     };
     provider
         .handler
@@ -4216,6 +4604,7 @@ async fn wheel_component_edits_public_prompt_after_resolution() {
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: Some(Arc::new(responder.clone())),
+        attempt: Arc::default(),
     };
     provider
         .handler
@@ -4317,6 +4706,7 @@ async fn blue_mana_sixty_jc_choice_is_acknowledged_before_render_and_settles_at_
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: Some(Arc::new(responder.clone())),
+        attempt: Arc::default(),
     };
     let provider = BettingRegistrationProvider::new(
         database.path(),
@@ -4435,6 +4825,7 @@ async fn wheel_component_reroll_replaces_public_gif_attachment() {
         bonus_spin: false,
         last_regular_spin: None,
         original_responder: Some(Arc::new(responder.clone())),
+        attempt: Arc::default(),
     };
     let provider = BettingRegistrationProvider::new(
         database.path(),
@@ -4576,6 +4967,7 @@ fn hostile_mechanics_only_target_visible_guild_members() {
         &BTreeSet::new(),
         1.0,
         Some(&visible),
+        0,
     )
     .expect("resolve heist");
 
