@@ -91,6 +91,7 @@ struct MockDiscord {
     sent: Mutex<Vec<SentMessage>>,
     edits: Mutex<Vec<(i64, i64, DiscordMessage)>>,
     fail_challenges: Mutex<BTreeSet<i64>>,
+    names: Mutex<BTreeMap<u64, String>>,
 }
 
 impl MockDiscord {
@@ -195,6 +196,16 @@ impl DuelDiscordPort for MockDiscord {
             .expect("edit lock")
             .push((channel_id, message_id, message));
         Ok(())
+    }
+
+    async fn player_names(
+        &self,
+        _guild_id: i64,
+        _discord_ids: &[i64],
+    ) -> crate::discord_transport::GuildPlayerNameDirectory {
+        crate::discord_transport::GuildPlayerNameDirectory::new(Some(
+            self.names.lock().expect("names lock").clone(),
+        ))
     }
 }
 
@@ -477,6 +488,87 @@ async fn migrated_sqlite_expiry_is_atomic_and_confirmed_after_discord_send() {
         edits[0].2.content_mode,
         crate::discord_transport::DiscordMessageContentMode::Preserve
     );
+}
+
+#[tokio::test]
+async fn expired_challenge_edit_shows_readable_escaped_names_without_mentions() {
+    let fixture = Fixture::migrated();
+    fixture.pending_challenge(NOW, NOW);
+    let discord = MockDiscord::with_channels(vec![
+        MockDiscord::text_channel(MAIN_CHANNEL, MAIN_CHANNEL_NAME),
+        MockDiscord::text_channel(ORIGIN_CHANNEL, "gamba"),
+    ]);
+    discord.names.lock().expect("names lock").extend([
+        (CHALLENGER as u64, "Bold_Challenger".to_owned()),
+        (RECIPIENT as u64, "Quiet*Recipient".to_owned()),
+    ]);
+    let worker = test_worker(
+        &fixture.path,
+        None,
+        Arc::clone(&discord),
+        Arc::new(AtomicUsize::new(0)),
+        DUEL_CHALLENGES_WAKE_INTERVAL,
+    );
+
+    let (_shutdown_sender, mut context) = worker_context();
+    worker
+        .wake_once(&mut context)
+        .await
+        .expect("expiry catch-up wake");
+
+    let edits = discord.edits.lock().expect("edit lock");
+    assert_eq!(edits.len(), 1);
+    let embed = &edits[0].2.response.embeds[0];
+    let field = |name: &str| {
+        embed
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| field.value.clone())
+            .expect("embed field")
+    };
+    assert_eq!(field("Status"), "Expired");
+    assert_eq!(field("Challenger"), "Bold\\_Challenger");
+    assert_eq!(field("Recipient"), "Quiet\\*Recipient");
+    assert!(
+        embed.fields.iter().all(|field| !field.value.contains("<@")),
+        "expired duel embed must not render mention markup"
+    );
+}
+
+#[tokio::test]
+async fn expired_challenge_edit_without_names_shows_unknown_player() {
+    let fixture = Fixture::migrated();
+    fixture.pending_challenge(NOW, NOW);
+    let discord = MockDiscord::with_channels(vec![
+        MockDiscord::text_channel(MAIN_CHANNEL, MAIN_CHANNEL_NAME),
+        MockDiscord::text_channel(ORIGIN_CHANNEL, "gamba"),
+    ]);
+    let worker = test_worker(
+        &fixture.path,
+        None,
+        Arc::clone(&discord),
+        Arc::new(AtomicUsize::new(0)),
+        DUEL_CHALLENGES_WAKE_INTERVAL,
+    );
+
+    let (_shutdown_sender, mut context) = worker_context();
+    worker
+        .wake_once(&mut context)
+        .await
+        .expect("expiry catch-up wake");
+
+    let edits = discord.edits.lock().expect("edit lock");
+    let embed = &edits[0].2.response.embeds[0];
+    for name in ["Challenger", "Recipient"] {
+        let value = &embed
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .expect("duelist field")
+            .value;
+        assert_eq!(value, "Unknown player");
+    }
 }
 
 #[tokio::test]
