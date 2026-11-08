@@ -4925,6 +4925,38 @@ async fn boss_encounter_modal_and_durable_duel_execute_live_policy() {
         "authored or native boss art"
     );
 
+    const INTRUDER: u64 = USER + 2;
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(
+            INTRUDER as i64,
+            "provider-intruder",
+            Some(GUILD as i64),
+        ))
+        .expect("intruder player");
+    for (action, refusal) in [
+        ("scout", "Only the tunnel owner can scout."),
+        ("retreat", "Only the tunnel owner can retreat."),
+    ] {
+        let intruder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                component_request_as(
+                    INTRUDER,
+                    "Other Miner",
+                    format!("dig:boss:{action}:{USER}:{GUILD}"),
+                    Vec::new(),
+                ),
+                intruder.clone(),
+            )
+            .await
+            .expect("non-owner boss action is refused");
+        let responses = intruder.responses.lock().expect("non-owner responses");
+        assert_eq!(responses[0].content, refusal);
+        assert!(responses[0].ephemeral);
+        assert!(intruder.defers.lock().expect("non-owner defers").is_empty());
+    }
+
     let scout = Arc::new(TestResponder::default());
     provider
         .handler
@@ -5012,6 +5044,7 @@ async fn boss_encounter_modal_and_durable_duel_execute_live_policy() {
             .collect::<Vec<_>>(),
         vec![("wager", "Wager Amount (max 1,000 JC)")]
     );
+    assert_eq!(modal.inputs[0].placeholder.as_deref(), Some("0-1000"));
 
     let submitted = Arc::new(TestResponder::default());
     provider

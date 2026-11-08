@@ -6,14 +6,7 @@
 
 use std::fmt;
 
-use crate::interaction_safety::{
-    DeferPort, EditFailureScope, EditableMessage, SendPort, SendRequest, TransportError,
-    edit_message_with_fallback, safe_defer,
-};
-
-pub const BOSS_WAGER_MAX_JC: i64 = 1_000;
-pub const BOSS_WAGER_LABEL: &str = "Wager Amount (max 1,000 JC)";
-pub const BOSS_WAGER_PLACEHOLDER: &str = "0-1000";
+use crate::interaction_safety::{DeferPort, TransportError, safe_defer};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RiskTier {
@@ -236,14 +229,6 @@ pub enum ModalKind {
     RiskOnly,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ResponseEvent {
-    Initial { content: String, ephemeral: bool },
-    Modal(ModalKind),
-    Deferred { ephemeral: bool, thinking: bool },
-    Followup { content: String, ephemeral: bool },
-}
-
 pub trait BossResponsePort: DeferPort {
     fn send_initial(&mut self, content: &str, ephemeral: bool);
     fn send_modal(&mut self, modal: ModalKind) -> Result<(), TransportError>;
@@ -267,13 +252,6 @@ pub enum FightEntry {
     CarriedResolution,
     TransportRejected,
     ServiceFailed,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NonFightAction {
-    Retreat,
-    Scout,
-    Cheer,
 }
 
 pub struct BossEncounterView {
@@ -397,24 +375,6 @@ impl BossEncounterView {
         if self.state == ViewState::ModalOpen {
             self.state = ViewState::Stopped;
         }
-    }
-
-    pub fn nonfight<T: BossResponsePort>(
-        &mut self,
-        actor_id: i64,
-        action: NonFightAction,
-        transport: &mut T,
-    ) -> bool {
-        let owner_only = matches!(action, NonFightAction::Retreat | NonFightAction::Scout);
-        if owner_only && actor_id != self.user_id {
-            transport.send_initial("Only the tunnel owner can do that.", true);
-            return false;
-        }
-        let _ = safe_defer(transport, false, false);
-        if action == NonFightAction::Retreat {
-            self.state = ViewState::Stopped;
-        }
-        true
     }
 }
 
@@ -569,32 +529,6 @@ pub trait ResolutionPort {
     fn notify_resolved(&mut self, user_id: i64, guild_id: Option<i64>) -> Result<(), String>;
     fn render(&mut self, plan: RenderPlan);
     fn warn(&mut self, message: String);
-}
-
-/// Convert a resolution into durable message content and apply the shared
-/// edit/fallback policy. A failed or expired interaction edit is retried in
-/// the channel without copying an interactive view onto a new message.
-pub fn edit_render_with_fallback(
-    message: Option<&mut dyn EditableMessage>,
-    channel: Option<&mut dyn SendPort>,
-    plan: &RenderPlan,
-) -> Result<bool, TransportError> {
-    let mut request = match plan {
-        RenderPlan::Error(content) => SendRequest {
-            content: Some(content.clone()),
-            ..SendRequest::default()
-        },
-        RenderPlan::Prompt { prompt, .. } => SendRequest {
-            embed: Some(format!("{}\n{}", prompt.title, prompt.description)),
-            view: true,
-            ..SendRequest::default()
-        },
-        RenderPlan::PhaseCleared { embed, .. } | RenderPlan::Final(embed) => SendRequest {
-            embed: Some(format!("{}\n{}", embed.title, embed.description)),
-            ..SendRequest::default()
-        },
-    };
-    edit_message_with_fallback(message, channel, &mut request, EditFailureScope::Any)
 }
 
 pub fn route_resolution<T: ResolutionPort>(
@@ -854,19 +788,6 @@ fn add_pet_assist(embed: &mut EmbedModel, result: &BossResult, include_outcome: 
 }
 
 #[must_use]
-pub fn build_duel_prompt_embed(result: &BossResult) -> EmbedModel {
-    let prompt = result.pending_prompt.as_ref();
-    let mut embed = EmbedModel {
-        title: prompt.map_or_else(|| "Choose".to_owned(), |value| value.title.clone()),
-        description: prompt.map_or_else(String::new, |value| value.description.clone()),
-        ..EmbedModel::default()
-    };
-    add_gear_broken(&mut embed, result);
-    add_pet_assist(&mut embed, result, false);
-    embed
-}
-
-#[must_use]
 pub fn build_boss_result_embed(result: &BossResult) -> EmbedModel {
     let description = if result.won {
         format!(
@@ -973,111 +894,6 @@ pub fn resolve_encounter_presentation(
         name: secret.title.clone(),
         dialogue,
         secret: true,
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ArtRequest {
-    pub boss_id: String,
-    pub phase: u8,
-    pub layer_name: String,
-    pub secret: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PhaseTransitionPlan {
-    pub transition: EmbedModel,
-    pub encounter: EmbedModel,
-    pub encounter_info: BossInfo,
-    pub art: Option<ArtRequest>,
-    pub callback_attached: bool,
-}
-
-#[must_use]
-pub fn build_phase_transition(
-    result: &BossResult,
-    next_info: BossInfo,
-    presentation: EncounterPresentation,
-    layer_name: &str,
-    callback_attached: bool,
-) -> PhaseTransitionPlan {
-    let next_title = result
-        .next_phase_title
-        .clone()
-        .or_else(|| result.phase2_name.clone())
-        .unwrap_or_else(|| "???".to_owned());
-    let transition_title = result
-        .phase2_title
-        .clone()
-        .or_else(|| result.next_phase_title.clone())
-        .unwrap_or_else(|| next_title.clone());
-    let dialogue = result.dialogue.as_deref().unwrap_or("...");
-    let mut transition = EmbedModel {
-        title: format!("{transition_title} Emerges!"),
-        description: format!(
-            "**{}** is transforming!\n\n**{next_title}**\n*{dialogue}*",
-            result.boss_name
-        ),
-        ..EmbedModel::default()
-    };
-    if result.wager > 0 {
-        transition.add_field(
-            "\u{200b}",
-            format!(
-                "Your **{}** JC wager rides on the next phase.",
-                result.wager
-            ),
-        );
-    }
-    add_gear_broken(&mut transition, result);
-    add_pet_assist(&mut transition, result, true);
-    if result.is_pinnacle {
-        let event = [
-            result
-                .phase_event_flavor
-                .as_deref()
-                .map(|value| format!("*{value}*")),
-            result.phase_event_description.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("\n");
-        if !event.is_empty() {
-            transition.add_field("Phase shift", event);
-        }
-    }
-
-    let mut encounter = EmbedModel {
-        title: format!("Boss Encountered: {}!", presentation.name),
-        description: presentation.dialogue,
-        ..EmbedModel::default()
-    };
-    if let Some(amount) = next_info.carried_wager.filter(|amount| *amount > 0) {
-        encounter.add_field(
-            "Carried Wager",
-            format!(
-                "**{}** JC is already riding on this phase.",
-                cama_domain::formatting::format_grouped(amount)
-            ),
-        );
-    }
-    let phase = if result.phase3_incoming { 3 } else { 2 };
-    let art = next_info.is_pinnacle.then(|| ArtRequest {
-        boss_id: next_info.boss_id.clone(),
-        phase,
-        layer_name: layer_name.to_owned(),
-        secret: presentation.secret,
-    });
-    if let Some(art) = &art {
-        encounter.image = Some(format!("attachment://pinnacle_phase_{}.png", art.phase));
-    }
-    PhaseTransitionPlan {
-        transition,
-        encounter,
-        encounter_info: next_info,
-        art,
-        callback_attached,
     }
 }
 
