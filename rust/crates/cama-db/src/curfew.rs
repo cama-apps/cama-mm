@@ -50,13 +50,13 @@ impl CurfewRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
     /// Create a named window, or overwrite it if that name already exists for this player.
     pub fn add_or_replace(&self, window: &CurfewWindow) -> Result<(), rusqlite::Error> {
-        upsert_window(&self.connection()?, window)
+        upsert_window(&*self.connection()?, window)
     }
 
     /// Delete a named window. Returns `true` if a row was actually removed.

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{
-    Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
+    OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
 };
 use thiserror::Error;
 
@@ -137,7 +137,7 @@ impl SoftAvoidRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

@@ -297,11 +297,11 @@ impl SurveyRepository {
         (self.clock)()
     }
 
-    fn connection(&self) -> Result<Connection, SurveyRepositoryError> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, SurveyRepositoryError> {
         Ok(open_runtime_connection(&self.path)?)
     }
 
-    fn immediate(&self) -> Result<(Connection, i64), SurveyRepositoryError> {
+    fn immediate(&self) -> Result<(crate::RuntimeConnection, i64), SurveyRepositoryError> {
         Ok((self.connection()?, self.now()))
     }
 
@@ -406,7 +406,7 @@ impl SurveyRepository {
         guild_id: i64,
         survey_id: i64,
     ) -> Result<Option<Survey>, SurveyRepositoryError> {
-        query_survey(&self.connection()?, guild_id, survey_id)
+        query_survey(&*self.connection()?, guild_id, survey_id)
     }
 
     pub fn delete_survey(

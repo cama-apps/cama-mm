@@ -433,11 +433,6 @@ where
     }
 
     #[must_use]
-    pub const fn tab_count(&self) -> usize {
-        LeaderboardTab::ALL.len()
-    }
-
-    #[must_use]
     pub fn button_style(&self, tab: LeaderboardTab) -> ButtonStyle {
         if tab == self.current_tab {
             ButtonStyle::Primary

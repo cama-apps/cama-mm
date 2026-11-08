@@ -184,12 +184,12 @@ impl DeadlockBettingRepository {
             path: path.as_ref().to_path_buf(),
         }
     }
-    fn connection(&self) -> Result<Connection> {
+    fn connection(&self) -> Result<crate::RuntimeConnection> {
         Ok(open_runtime_connection(&self.path)?)
     }
 
     pub fn market(&self, guild_id: i64, match_id: i64) -> Result<Option<DeadlockMarket>> {
-        market(&self.connection()?, guild_id, match_id)
+        market(&*self.connection()?, guild_id, match_id)
     }
     pub fn wagers(&self, guild_id: i64, match_id: i64) -> Result<Vec<DeadlockWager>> {
         let connection = self.connection()?;

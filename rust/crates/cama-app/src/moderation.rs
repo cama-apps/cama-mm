@@ -160,19 +160,6 @@ pub struct RecordKick<'a> {
     pub now: i64,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct RecordLowPriorityEvent<'a> {
-    pub discord_id: i64,
-    pub guild_id: Option<i64>,
-    pub event_type: ModerationEventType,
-    pub wins_required: i64,
-    pub wins_remaining: i64,
-    pub actor_id: Option<i64>,
-    pub reason: Option<&'a str>,
-    pub match_id: Option<i64>,
-    pub now: i64,
-}
-
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ModerationPolicyError {
     #[error("Duration is required (for example: 30m, 2h, 3d, or 1w)")]
@@ -397,42 +384,6 @@ impl<P: ModerationPort> ModerationService<P> {
             })
             .map_err(ModerationServiceError::Port)
     }
-
-    pub fn record_low_priority_event(
-        &self,
-        request: RecordLowPriorityEvent<'_>,
-    ) -> Result<ModerationEvent, ModerationServiceError<P::Error>> {
-        validate_low_priority_event(
-            request.event_type,
-            request.wins_required,
-            request.wins_remaining,
-        )
-        .map_err(ModerationServiceError::Policy)?;
-        self.port
-            .record_event(RecordModerationEventRequest {
-                discord_id: request.discord_id,
-                guild_id: request.guild_id,
-                event_type: request.event_type,
-                source: if request.event_type == ModerationEventType::LowprioComplete {
-                    ModerationSource::System
-                } else {
-                    ModerationSource::Admin
-                },
-                actor_id: request.actor_id,
-                reason: request.reason,
-                scope: None,
-                completion: None,
-                expires_at: None,
-                matches_required: None,
-                matches_remaining: None,
-                pending_match_watermark: None,
-                wins_required: Some(request.wins_required),
-                wins_remaining: Some(request.wins_remaining),
-                match_id: request.match_id,
-                now: request.now,
-            })
-            .map_err(ModerationServiceError::Port)
-    }
 }
 
 /// Policy every low-priority moderation event must satisfy before it is
@@ -519,39 +470,6 @@ pub fn parse_duration_seconds(value: &str) -> Result<i64, ModerationPolicyError>
 pub fn parse_expiry(value: &str, now: i64) -> Result<i64, ModerationPolicyError> {
     now.checked_add(parse_duration_seconds(value)?)
         .ok_or(ModerationPolicyError::DurationOutOfBounds)
-}
-
-pub fn schema_contract_complete(contract: &ModerationSchemaContract) -> bool {
-    let suspension = [
-        "scope",
-        "completion",
-        "expires_at",
-        "matches_required",
-        "matches_remaining",
-        "pending_match_watermark",
-        "revision",
-        "active",
-    ];
-    let events = [
-        "matches_remaining",
-        "wins_required",
-        "wins_remaining",
-        "match_id",
-    ];
-    contract.has_lobby_suspensions
-        && contract.has_moderation_events
-        && contract.matches_has_lobby_kind
-        && suspension
-            .iter()
-            .all(|column| contract.suspension_columns.contains(*column))
-        && events
-            .iter()
-            .all(|column| contract.event_columns.contains(*column))
-        && ["wins_required", "start_pending_match_id"]
-            .iter()
-            .all(|column| contract.low_priority_columns.contains(*column))
-        && contract.append_only_update_trigger
-        && contract.append_only_delete_trigger
 }
 
 fn validate_create(request: CreateSuspension<'_>) -> Result<(), ModerationPolicyError> {

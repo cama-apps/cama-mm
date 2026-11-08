@@ -392,7 +392,7 @@ impl PlayerTriviaRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, PlayerTriviaRepositoryError> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, PlayerTriviaRepositoryError> {
         Ok(open_runtime_connection(&self.path)?)
     }
 

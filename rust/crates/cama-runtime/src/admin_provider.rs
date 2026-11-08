@@ -344,16 +344,6 @@ impl AdminRegistrationProvider {
             }),
         }
     }
-
-    /// Low-level constructor used by the production composition constructor
-    /// and deterministic provider tests.
-    #[must_use]
-    pub fn from_handler(handler: Arc<dyn InteractionHandler>, admin_rating_max: f64) -> Self {
-        Self {
-            handler,
-            admin_rating_max,
-        }
-    }
 }
 
 struct AdminHandler {

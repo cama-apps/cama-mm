@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use cama_domain::rating::CamaRatingSystem;
 use rusqlite::{Connection, OpenFlags};
 use thiserror::Error;
 
@@ -264,131 +263,12 @@ impl SchemaManagerAudit {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MigrationLedgerSnapshot {
-    pub applied_count: usize,
-    pub distinct_count: usize,
-    pub names: BTreeSet<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EconomyLedgerRow {
-    pub account_type: String,
-    pub account_id: i64,
-    pub delta: i64,
-    pub balance_before: i64,
-    pub balance_after: i64,
-    pub source: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct WrappedEnrichmentFact {
-    pub discord_id: i64,
-    pub actions_per_min: Option<f64>,
-    pub courier_kills: Option<i64>,
-    pub pings: Option<i64>,
-    pub rapier_count: i64,
-    pub lane_role: Option<i64>,
-    pub comeback: Option<f64>,
-    pub throw: Option<f64>,
-}
-
 /// Audit a database already initialized by Python without taking write access.
 pub fn audit_existing_schema(
     path: impl AsRef<Path>,
 ) -> Result<SchemaManagerAudit, SchemaManagerContractError> {
     let connection = open_read_only(path.as_ref())?;
     audit_connection(&connection).map_err(Into::into)
-}
-
-/// Read the Python migration ledger without changing it.
-pub fn migration_ledger_snapshot(
-    path: impl AsRef<Path>,
-) -> Result<MigrationLedgerSnapshot, SchemaManagerContractError> {
-    let connection = open_read_only(path.as_ref())?;
-    let names = query_string_set(&connection, "SELECT name FROM schema_migrations")?;
-    let applied_count =
-        connection.query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
-            row.get::<_, i64>(0)
-        })?;
-    Ok(MigrationLedgerSnapshot {
-        applied_count: usize::try_from(applied_count).unwrap_or_default(),
-        distinct_count: names.len(),
-        names,
-    })
-}
-
-/// Read economy-ledger rows in durable insertion order.
-pub fn load_economy_ledger(
-    path: impl AsRef<Path>,
-) -> Result<Vec<EconomyLedgerRow>, SchemaManagerContractError> {
-    let connection = open_read_only(path.as_ref())?;
-    connection
-        .prepare(
-            "SELECT account_type, account_id, delta, balance_before, balance_after, source
-             FROM economy_ledger_entries ORDER BY ledger_id",
-        )?
-        .query_map([], |row| {
-            Ok(EconomyLedgerRow {
-                account_type: row.get(0)?,
-                account_id: row.get(1)?,
-                delta: row.get(2)?,
-                balance_before: row.get(3)?,
-                balance_after: row.get(4)?,
-                source: row.get(5)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-/// Read the compact Wrapped projection produced by Python's migration.
-pub fn load_wrapped_enrichment_facts(
-    path: impl AsRef<Path>,
-    guild_id: i64,
-    match_id: i64,
-) -> Result<Vec<WrappedEnrichmentFact>, SchemaManagerContractError> {
-    let connection = open_read_only(path.as_ref())?;
-    connection
-        .prepare(
-            "SELECT discord_id, actions_per_min, courier_kills, pings,
-                    rapier_count, lane_role, comeback, throw
-             FROM wrapped_enrichment_facts
-             WHERE guild_id=?1 AND match_id=?2 ORDER BY discord_id",
-        )?
-        .query_map([guild_id, match_id], |row| {
-            Ok(WrappedEnrichmentFact {
-                discord_id: row.get(0)?,
-                actions_per_min: row.get(1)?,
-                courier_kills: row.get(2)?,
-                pings: row.get(3)?,
-                rapier_count: row.get(4)?,
-                lane_role: row.get(5)?,
-                comeback: row.get(6)?,
-                throw: row.get(7)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-/// Reproduce the side-symmetric historical prediction values consumed by Rust.
-#[must_use]
-pub fn symmetric_prediction_probabilities(
-    radiant_rating: f64,
-    radiant_rd: f64,
-    dire_rating: f64,
-    dire_rd: f64,
-) -> (f64, f64) {
-    let radiant =
-        CamaRatingSystem::predict_win_probability(radiant_rating, radiant_rd, dire_rating, dire_rd);
-    (radiant, 1.0 - radiant)
-}
-
-/// Opening balance required when an account already has partial ledger history.
-#[must_use]
-pub fn ledger_opening_balance(current_balance: i64, recorded_deltas: i64) -> i64 {
-    current_balance - recorded_deltas
 }
 
 fn open_read_only(path: &Path) -> Result<Connection, SchemaManagerContractError> {

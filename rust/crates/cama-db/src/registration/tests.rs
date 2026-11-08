@@ -28,6 +28,29 @@ impl Fixture {
         Connection::open(self.database.path()).expect("open fixture")
     }
 
+    fn roles(&self, discord_id: i64) -> Option<Vec<String>> {
+        self.connection()
+            .query_row(
+                "SELECT preferred_roles FROM players WHERE discord_id = ?1 AND guild_id = ?2",
+                params![discord_id, GUILD],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .expect("read roles")
+            .map(|raw| raw.map_or_else(Vec::new, |raw| decode_roles(&raw)))
+    }
+
+    fn primary_steam_id(&self, discord_id: i64) -> Option<i64> {
+        self.connection()
+            .query_row(
+                "SELECT steam_id FROM player_steam_ids WHERE discord_id = ?1 AND is_primary = 1",
+                [discord_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("read primary Steam ID")
+    }
+
     fn add_player(&self, discord_id: i64, roles: Option<&str>) {
         self.connection()
             .execute(
@@ -76,13 +99,7 @@ fn test_set_roles_persists_to_database() {
             .expect("set roles"),
         SetRolesOutcome::Updated(desired.clone())
     );
-    assert_eq!(
-        fixture
-            .repository
-            .get_roles(12_346, Some(GUILD))
-            .expect("read roles"),
-        Some(desired)
-    );
+    assert_eq!(fixture.roles(12_346), Some(desired));
 }
 
 #[test]
@@ -94,13 +111,7 @@ fn test_set_roles_updates_existing_roles() {
         .repository
         .set_roles_atomic(12_347, Some(GUILD), &desired)
         .expect("update roles");
-    assert_eq!(
-        fixture
-            .repository
-            .get_roles(12_347, Some(GUILD))
-            .expect("read roles"),
-        Some(desired)
-    );
+    assert_eq!(fixture.roles(12_347), Some(desired));
 }
 
 #[test]
@@ -179,10 +190,7 @@ fn test_register_populates_junction_table() {
         .repository
         .register_player_atomic(&request(7, 222_333))
         .expect("register");
-    assert_eq!(
-        fixture.repository.primary_steam_id(7).expect("primary"),
-        Some(222_333)
-    );
+    assert_eq!(fixture.primary_steam_id(7), Some(222_333));
     let legacy: i64 = fixture
         .connection()
         .query_row(
@@ -310,10 +318,7 @@ fn test_high_uint32_account_id_accepted() {
         .register_player_atomic(&request(9, 3_000_000_000))
         .expect("valid high uint32 account ID");
     assert_eq!(registered.initial_mmr, 3_000);
-    assert_eq!(
-        fixture.repository.primary_steam_id(9).expect("primary"),
-        Some(3_000_000_000)
-    );
+    assert_eq!(fixture.primary_steam_id(9), Some(3_000_000_000));
 }
 
 #[test]
@@ -663,4 +668,44 @@ fn dota_signup_respects_orphaned_deadlock_ownership_across_guilds() {
         .register_player_atomic(&request(100, 12345))
         .unwrap();
     assert_eq!(fixture.repository.steam_owner(12345).unwrap(), Some(100));
+}
+
+#[test]
+fn corrupt_mmr_prompts_report_a_typed_decode_error() {
+    let fixture = Fixture::new();
+    fixture
+        .connection()
+        .execute_batch(
+            "CREATE TABLE app_kv (
+                guild_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+                PRIMARY KEY (guild_id, key)
+            );",
+        )
+        .unwrap();
+    let state = MmrPromptState {
+        nonce: 7,
+        discord_id: 100,
+        guild_id: GUILD,
+        steam_id: 12_345,
+        attempts: 1,
+        expires_at: 1_700_000_000,
+        completed: false,
+    };
+    fixture.repository.save_mmr_prompt(&state).unwrap();
+    assert_eq!(
+        fixture.repository.mmr_prompt(GUILD, 7).unwrap(),
+        Some(state)
+    );
+    fixture
+        .connection()
+        .execute(
+            "UPDATE app_kv SET value='100:not-a-steam-id:1:0:0' WHERE key='registration:mmr:7'",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture.repository.mmr_prompt(GUILD, 7),
+        Err(RegistrationRepositoryError::InvalidMmrPrompt { nonce: 7, ref value })
+            if value == "100:not-a-steam-id:1:0:0"
+    ));
 }
