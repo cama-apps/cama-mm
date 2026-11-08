@@ -247,22 +247,13 @@ type DailyQuotaMap = BTreeMap<DailyQuotaKey, Arc<DailyQuota>>;
 static SHARED_DAILY_QUOTAS: StdMutex<DailyQuotaMap> = StdMutex::new(BTreeMap::new());
 static OPENDOTA_EXECUTOR: OnceLock<Arc<Runtime>> = OnceLock::new();
 static OPENDOTA_EXECUTOR_INIT: StdMutex<()> = StdMutex::new(());
-static BUNDLED_HERO_NAMES: OnceLock<BTreeMap<i64, String>> = OnceLock::new();
 
 const MINUTE_WINDOW: Duration = Duration::from_secs(60);
 const DAY_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 const UTC_DAY_SECONDS: i64 = 24 * 60 * 60;
 
 fn bundled_hero_names() -> BTreeMap<i64, String> {
-    BUNDLED_HERO_NAMES
-        .get_or_init(|| {
-            serde_json::from_str::<BTreeMap<String, String>>(include_str!("../data/heroes.json"))
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|(id, name)| id.parse().ok().map(|id| (id, name)))
-                .collect()
-        })
-        .clone()
+    cama_domain::hero_catalog::hero_names().clone()
 }
 
 impl TokenBucket {

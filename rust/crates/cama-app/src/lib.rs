@@ -13,7 +13,7 @@ pub use cama_app_dig::{
 pub use cama_app_gameplay::{
     duel, mafia_service, mana_effects_service, mana_service, manashop_rework, pet, pet_assets,
     pet_brawl, pet_commands, pet_eating, pet_evolution_app, pet_flavor, pet_keepsake_commands,
-    pet_sqlite, shop_commands,
+    pet_sqlite, png_encoder, shop_commands,
 };
 pub use cama_app_match::{
     disburse_service, dota_info, draft, economy_actions, loan, match_recording,

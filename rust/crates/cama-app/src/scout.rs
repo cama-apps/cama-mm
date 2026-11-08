@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cama_db::scout_repository::ScoutDataPort;
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 
 use crate::embeds::LobbyKind;
 
@@ -322,17 +323,24 @@ pub struct PlayerProfile {
     pub name: String,
 }
 
+/// One line per player: registered players (`name_map`) with their Dotabuff
+/// links, anyone else by their `display_names` entry, or `Unknown player`.
 #[must_use]
 pub fn build_link_lines(
     discord_ids: &[i64],
     name_map: &BTreeMap<i64, String>,
+    display_names: &BTreeMap<i64, String>,
     steam_map: &BTreeMap<i64, Vec<i64>>,
 ) -> Vec<String> {
     discord_ids
         .iter()
         .map(|discord_id| {
             let Some(name) = name_map.get(discord_id) else {
-                return format!("<@{discord_id}> — not registered in this server");
+                let name = display_names
+                    .get(discord_id)
+                    .and_then(|name| readable_player_name(name))
+                    .unwrap_or(UNKNOWN_PLAYER);
+                return format!("**{name}** — not registered in this server");
             };
             let Some(steam_ids) = steam_map.get(discord_id).filter(|ids| !ids.is_empty()) else {
                 return format!("**{name}** — no linked Steam account");
@@ -498,6 +506,9 @@ pub struct LinksRequest<'a> {
     pub explicit_lobby: Option<LobbyKind>,
     pub profiles: &'a [PlayerProfile],
     pub steam_ids: &'a BTreeMap<i64, Vec<i64>>,
+    /// Readable display names for listed players, used for anyone without a
+    /// profile here (not registered in this server).
+    pub display_names: &'a BTreeMap<i64, String>,
 }
 
 #[must_use]
@@ -570,18 +581,23 @@ pub fn plan_links(request: &LinksRequest<'_>) -> LinksOutcome {
         add_player_fields(
             &mut embed,
             "Radiant",
-            &build_link_lines(&radiant, &name_map, request.steam_ids),
+            &build_link_lines(
+                &radiant,
+                &name_map,
+                request.display_names,
+                request.steam_ids,
+            ),
         );
         add_player_fields(
             &mut embed,
             "Dire",
-            &build_link_lines(&dire, &name_map, request.steam_ids),
+            &build_link_lines(&dire, &name_map, request.display_names, request.steam_ids),
         );
     } else {
         add_player_fields(
             &mut embed,
             "Players",
-            &build_link_lines(&flat, &name_map, request.steam_ids),
+            &build_link_lines(&flat, &name_map, request.display_names, request.steam_ids),
         );
     }
     LinksOutcome::Embed(embed)
@@ -1082,6 +1098,7 @@ mod tests {
             build_link_lines(
                 &[100],
                 &BTreeMap::from([(100, "Alice".to_owned())]),
+                &BTreeMap::new(),
                 &BTreeMap::from([(100, vec![111])]),
             ),
             ["**Alice** — [Dotabuff](https://www.dotabuff.com/players/111)"]
@@ -1094,6 +1111,7 @@ mod tests {
             build_link_lines(
                 &[200],
                 &BTreeMap::from([(200, "Bob".to_owned())]),
+                &BTreeMap::new(),
                 &BTreeMap::from([(200, vec![222, 333])]),
             ),
             [
@@ -1108,6 +1126,7 @@ mod tests {
             build_link_lines(
                 &[300],
                 &BTreeMap::from([(300, "Carol".to_owned())]),
+                &BTreeMap::new(),
                 &BTreeMap::from([(300, Vec::new())]),
             ),
             ["**Carol** — no linked Steam account"]
@@ -1117,11 +1136,19 @@ mod tests {
     #[test]
     fn test_unregistered_player_is_listed_without_a_link() {
         let lines = build_link_lines(
-            &[400],
+            &[400, 401, 402],
             &BTreeMap::new(),
+            &BTreeMap::from([(400, "Dana".to_owned()), (402, "<@402>".to_owned())]),
             &BTreeMap::from([(400, vec![444])]),
         );
-        assert_eq!(lines, ["<@400> — not registered in this server"]);
+        assert_eq!(
+            lines,
+            [
+                "**Dana** — not registered in this server",
+                "**Unknown player** — not registered in this server",
+                "**Unknown player** — not registered in this server",
+            ]
+        );
         assert!(!lines[0].to_lowercase().contains("dotabuff"));
     }
 
@@ -1172,6 +1199,7 @@ mod tests {
             explicit_lobby: None,
             profiles: &[],
             steam_ids: &BTreeMap::new(),
+            display_names: &BTreeMap::new(),
         });
         let LinksOutcome::Message(message) = outcome else {
             panic!("expected message");
@@ -1201,6 +1229,7 @@ mod tests {
             explicit_lobby: None,
             profiles: &profiles,
             steam_ids: &steam_ids,
+            display_names: &BTreeMap::new(),
         }));
         assert_eq!(
             embed
@@ -1227,6 +1256,7 @@ mod tests {
             explicit_lobby: None,
             profiles: &profiles,
             steam_ids: &steam_ids,
+            display_names: &BTreeMap::new(),
         }));
         assert_eq!(
             embed
@@ -1255,6 +1285,7 @@ mod tests {
             explicit_lobby: None,
             profiles: &profiles,
             steam_ids: &steam_ids,
+            display_names: &BTreeMap::new(),
         }));
         assert_eq!(
             embed
@@ -1303,6 +1334,7 @@ mod tests {
             explicit_lobby: None,
             profiles: &dual_lobby_profiles(),
             steam_ids: &dual_lobby_steam(),
+            display_names: &BTreeMap::new(),
         }));
         let value = &embed.fields[0].value;
         assert!(value.contains("players/77") && value.contains("players/88"));
@@ -1321,6 +1353,7 @@ mod tests {
                 explicit_lobby: None,
                 profiles: &dual_lobby_profiles(),
                 steam_ids: &dual_lobby_steam(),
+                display_names: &BTreeMap::new(),
             }),
             LinksOutcome::Message(AMBIGUOUS_LOBBY_MESSAGE.to_owned())
         );
@@ -1337,6 +1370,7 @@ mod tests {
             explicit_lobby: Some(LobbyKind::Open),
             profiles: &dual_lobby_profiles(),
             steam_ids: &dual_lobby_steam(),
+            display_names: &BTreeMap::new(),
         }));
         let value = &embed.fields[0].value;
         assert!(value.contains("players/11") && value.contains("players/22"));
@@ -1357,6 +1391,7 @@ mod tests {
             explicit_lobby: None,
             profiles: &dual_lobby_profiles(),
             steam_ids: &dual_lobby_steam(),
+            display_names: &BTreeMap::new(),
         }));
         assert_eq!(
             embed
@@ -1391,6 +1426,7 @@ mod tests {
             explicit_lobby: None,
             profiles: &profiles,
             steam_ids: &steam_ids,
+            display_names: &BTreeMap::new(),
         }));
         assert_eq!(
             embed

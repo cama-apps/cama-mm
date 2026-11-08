@@ -412,7 +412,15 @@ async fn migrated_sqlite_comparison_delivers_native_semantic_png() {
         &followups[0].attachments[0].bytes[..8],
         b"\x89PNG\r\n\x1a\n"
     );
-    assert!(followups[0].attachments[0].bytes.len() > 1_000_000);
+    let chart = cama_app::pet_assets::decode_png_raster(&followups[0].attachments[0].bytes)
+        .expect("comparison chart decodes");
+    assert_eq!(
+        (chart.width, chart.height),
+        (
+            cama_app::rating_analysis_media::COMPARISON_WIDTH,
+            cama_app::rating_analysis_media::COMPARISON_HEIGHT
+        )
+    );
 }
 
 #[tokio::test]

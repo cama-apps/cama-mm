@@ -327,7 +327,11 @@ fn flow_catalog(cache_root: &Path) -> TriviaCatalog {
     {
         let path = cache_root.join(relative);
         std::fs::create_dir_all(path.parent().expect("cache parent")).expect("create cache path");
-        std::fs::write(path, [0x89, b'P', b'N', b'G']).expect("seed cached image");
+        // The cache only serves complete images, so seed a real (1x1) PNG.
+        let png =
+            cama_app::pet_assets::RasterImage::new(1, 1, cama_app::pet_assets::Rgba(0, 0, 0, 255))
+                .encode_png();
+        std::fs::write(path, png).expect("seed cached image");
     }
     TriviaCatalog {
         heroes,

@@ -41,7 +41,7 @@ fn test_set_timezone_persists() {
     insert_player(&dir, 1);
 
     service
-        .set_timezone(1, Some(GUILD), "Asia/Tokyo")
+        .set_timezone(1, Some(GUILD), "Asia/Tokyo", chrono::Utc::now())
         .expect("set timezone");
 
     assert_eq!(
@@ -56,7 +56,7 @@ fn test_set_timezone_rejects_unknown_timezone() {
     insert_player(&dir, 2);
 
     let error = service
-        .set_timezone(2, Some(GUILD), "Not/AZone")
+        .set_timezone(2, Some(GUILD), "Not/AZone", chrono::Utc::now())
         .unwrap_err();
     assert!(matches!(error, TimezoneServiceError::InvalidTimezone(_)));
 }
@@ -66,7 +66,7 @@ fn test_set_timezone_unregistered_player_raises() {
     let (_dir, service, _repository) = fixture();
 
     let error = service
-        .set_timezone(999, Some(GUILD), "Asia/Tokyo")
+        .set_timezone(999, Some(GUILD), "Asia/Tokyo", chrono::Utc::now())
         .unwrap_err();
     assert!(matches!(error, TimezoneServiceError::PlayerNotRegistered));
 }
@@ -83,7 +83,9 @@ fn test_get_timezone_info_before_any_set() {
 fn test_get_timezone_info_after_set() {
     let (dir, service, _repository) = fixture();
     insert_player(&dir, 4);
-    service.set_timezone(4, Some(GUILD), "Asia/Tokyo").unwrap();
+    service
+        .set_timezone(4, Some(GUILD), "Asia/Tokyo", chrono::Utc::now())
+        .unwrap();
 
     assert_eq!(
         service.timezone_info(4, Some(GUILD)).unwrap(),

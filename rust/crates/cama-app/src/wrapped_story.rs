@@ -400,7 +400,8 @@ pub fn hero_spotlight(
         .iter()
         .take(3)
         .map(|hero| HeroSpotlightEntry {
-            name: hero_name(hero.hero_id).unwrap_or_else(|| format!("Hero #{}", hero.hero_id)),
+            name: hero_name(hero.hero_id)
+                .unwrap_or_else(|| cama_domain::hero_catalog::hero_name(hero.hero_id)),
             picks: hero.picks,
             wins: hero.wins,
             win_rate: if hero.picks > 0 {
@@ -412,7 +413,8 @@ pub fn hero_spotlight(
         })
         .collect();
     Some(HeroSpotlightWrapped {
-        top_hero_name: hero_name(top.hero_id).unwrap_or_else(|| format!("Hero #{}", top.hero_id)),
+        top_hero_name: hero_name(top.hero_id)
+            .unwrap_or_else(|| cama_domain::hero_catalog::hero_name(top.hero_id)),
         top_hero_picks: top.picks,
         top_hero_wins: top.wins,
         top_hero_win_rate: if top.picks > 0 {
