@@ -20,10 +20,11 @@ use cama_app::boss_multi_tier::{BossServiceError, EntropyPort, PausedBossDuel, R
 use cama_app::dig_abandon_runtime::DigAbandonRuntimeService;
 use cama_app::dig_assets::{BossIdentity, BossScene};
 use cama_app::dig_boss_runtime::{
-    DigBossBrokenGear, DigBossEncounterInfo, DigBossGearDrop, DigBossLowPriorityTaxPort,
-    DigBossPrestigeRelicDrop, DigBossResolvedOutcome, DigBossRetreatOutcome, DigBossRuntimeConfig,
-    DigBossRuntimeError, DigBossRuntimeRequest, DigBossRuntimeResult as DigBossCallResult,
-    DigBossRuntimeService, DigBossScoutOutcome, DigBossStartOutcome, DigPinnacleResolved,
+    BOSS_DUEL_PROMPT_TIMEOUT_SECONDS, DigBossBrokenGear, DigBossEncounterInfo, DigBossGearDrop,
+    DigBossLowPriorityTaxPort, DigBossPrestigeRelicDrop, DigBossResolvedOutcome,
+    DigBossRetreatOutcome, DigBossRuntimeConfig, DigBossRuntimeError, DigBossRuntimeRequest,
+    DigBossRuntimeResult as DigBossCallResult, DigBossRuntimeService, DigBossScoutOutcome,
+    DigBossStartOutcome, DigPinnacleResolved,
 };
 use cama_app::dig_bosses::{
     PINNACLE_DEPTH, PINNACLE_SECRET_PHASE_CHANCE, luminosity_combat_penalty, pinnacle_by_id,
@@ -3616,7 +3617,8 @@ impl DigInteractionHandler {
                             .map_err(|error| error.to_string());
                     }
                 };
-                if boss_start_is_resolved(&result) {
+                let resolved = boss_start_is_resolved(&result);
+                if resolved {
                     self.reconcile_resolved_boss(user_id, guild_id, now).await;
                 }
                 let action_id = result.action_id;
@@ -3626,8 +3628,13 @@ impl DigInteractionHandler {
                 let response =
                     blocking(move || Ok(boss_start_response(&result, user_id, guild_id, &media)))
                         .await?;
-                self.send_boss_result(user_id, guild_id, boss_defeated, response, &responder)
-                    .await?;
+                if resolved {
+                    self.send_boss_result(user_id, guild_id, boss_defeated, response, &responder)
+                        .await?;
+                } else {
+                    self.send_boss_prompt(user_id, guild_id, response, &responder)
+                        .await?;
+                }
                 self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
                     .await;
                 return Ok(());
@@ -3937,7 +3944,8 @@ impl DigInteractionHandler {
                     .map_err(|error| error.to_string());
             }
         };
-        if boss_start_is_resolved(&result) {
+        let resolved = boss_start_is_resolved(&result);
+        if resolved {
             self.reconcile_resolved_boss(user_id, guild_id, now).await;
         }
         let action_id = result.action_id;
@@ -3947,8 +3955,13 @@ impl DigInteractionHandler {
         let media = Arc::clone(&self.state.media);
         let response =
             blocking(move || Ok(boss_start_response(&result, user_id, guild_id, &media))).await?;
-        self.send_boss_result(user_id, guild_id, boss_defeated, response, &responder)
-            .await?;
+        if resolved {
+            self.send_boss_result(user_id, guild_id, boss_defeated, response, &responder)
+                .await?;
+        } else {
+            self.send_boss_prompt(user_id, guild_id, response, &responder)
+                .await?;
+        }
         self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
             .await;
         if next_phase {
@@ -4628,6 +4641,180 @@ impl DigInteractionHandler {
             .map_err(|error| error.to_string())
         })
         .await
+    }
+
+    async fn resume_timed_out_boss(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        now: i64,
+    ) -> Result<Option<DigBossCallResult<DigBossResolvedOutcome>>, String> {
+        let path = self.state.database_path.clone();
+        let decay = self.state.pet_hunger_decay_per_day;
+        let vanity_tax = self.state.vanity_tax.clone();
+        let low_priority_tax_rate = self.state.low_priority_tax_rate;
+        let bankruptcy_policy = self.state.bankruptcy_policy;
+        let entropy = self.state.boss_entropy.clone();
+        blocking(move || {
+            configured_boss_runtime(
+                path,
+                decay,
+                vanity_tax,
+                low_priority_tax_rate,
+                bankruptcy_policy,
+            )
+            .resume_timed_out(
+                DigBossRuntimeRequest {
+                    discord_id: user_id,
+                    guild_id,
+                    now,
+                },
+                entropy,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Post a paused duel's prompt and arm Python's `BossDuelView` timeout.
+    async fn send_boss_prompt(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        response: InteractionResponse,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let receipt = responder
+            .followup_with_receipt(response)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.schedule_boss_duel_timeout(user_id, guild_id, Arc::clone(responder), receipt);
+        Ok(())
+    }
+
+    /// The timer is in memory, like every Discord view timeout. After a
+    /// restart the pause stays durable: its buttons still answer it, and the
+    /// next fight forfeits it as an abandoned duel.
+    fn schedule_boss_duel_timeout(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        responder: Arc<dyn InteractionResponder>,
+        receipt: Option<InteractionMessageReceipt>,
+    ) -> tokio::task::JoinHandle<()> {
+        let handler = Self {
+            state: Arc::clone(&self.state),
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(
+                u64::try_from(BOSS_DUEL_PROMPT_TIMEOUT_SECONDS).unwrap_or_default(),
+            ))
+            .await;
+            if let Err(error) = handler
+                .resolve_timed_out_duel(user_id, guild_id, &responder, receipt)
+                .await
+            {
+                warn!(%error, user_id, guild_id, "Dig boss duel timeout failed");
+            }
+        })
+    }
+
+    /// Python's `BossDuelView.on_timeout`: resolve the unanswered prompt with
+    /// its safe option and turn the prompt message into the fight's result.
+    async fn resolve_timed_out_duel(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        responder: &Arc<dyn InteractionResponder>,
+        receipt: Option<InteractionMessageReceipt>,
+    ) -> Result<(), String> {
+        let now = unix_now();
+        let Some(result) = self.resume_timed_out_boss(user_id, guild_id, now).await? else {
+            return Ok(());
+        };
+        if boss_resume_is_resolved(&result) {
+            self.reconcile_resolved_boss(user_id, guild_id, now).await;
+        }
+        let boss_defeated = boss_resume_neon_victory(&result).is_some();
+        let next_phase = boss_resume_has_next_phase(&result);
+        let media = Arc::clone(&self.state.media);
+        let response = blocking(move || Ok(boss_resume_response(&result, &media))).await?;
+        let edited = match receipt {
+            Some(receipt) => self
+                .edit_boss_prompt_into_result(
+                    user_id,
+                    guild_id,
+                    boss_defeated,
+                    response.clone(),
+                    responder,
+                    receipt,
+                )
+                .await
+                .map_err(
+                    |error| warn!(%error, user_id, guild_id, "Dig boss duel prompt edit failed"),
+                )
+                .is_ok(),
+            None => false,
+        };
+        // Like Python's channel fallback, a prompt that cannot be edited still
+        // gets its result.
+        if !edited {
+            self.send_boss_result(user_id, guild_id, boss_defeated, response, responder)
+                .await?;
+        }
+        if next_phase {
+            responder
+                .followup(
+                    self.render_boss_encounter(user_id, guild_id, unix_now())
+                        .await?,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Replace the prompt with the result, carrying the route junction a kill
+    /// opened the way [`Self::send_boss_result`] does for a new message.
+    async fn edit_boss_prompt_into_result(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        boss_defeated: bool,
+        response: InteractionResponse,
+        responder: &Arc<dyn InteractionResponder>,
+        receipt: InteractionMessageReceipt,
+    ) -> Result<(), String> {
+        let choice = if boss_defeated {
+            self.pending_route_choice(user_id, guild_id).await
+        } else {
+            None
+        };
+        let Some(choice) = choice else {
+            return responder
+                .edit_message(receipt, response)
+                .await
+                .map_err(|error| error.to_string());
+        };
+        let token = self.create_route_view(user_id, guild_id, choice.clone(), unix_now())?;
+        let response = boss_result_with_route_choice(
+            response,
+            &choice,
+            &self.state.view_nonce,
+            user_id,
+            guild_id,
+            &token,
+        );
+        match responder.edit_message(receipt, response).await {
+            Ok(()) => {
+                self.schedule_route_view_timeout(token, Arc::clone(responder), Some(receipt));
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.retire_route_view(&token);
+                Err(error.to_string())
+            }
+        }
     }
 
     /// Readable display text for one player, preferring a live name over the
@@ -8005,7 +8192,7 @@ fn boss_start_neon_victory(
                 gear_drop: result.gear_drop.is_some(),
                 // `prestige_relic_drop` is a separate Pinnacle/relic reward,
                 // not the Python trophy-relic boost signal.
-                trophy_relic_drop: false,
+                trophy_relic_drop: result.trophy_relic_drop.is_some(),
             })
         }
         DigBossStartOutcome::PinnacleResolved(resolved)
@@ -8039,7 +8226,7 @@ fn boss_resume_neon_victory(
                 layer_name: layer_at(i64::from(resolved.boundary)).name.to_owned(),
                 jc_delta: resolved.jc_delta,
                 gear_drop: result.gear_drop.is_some(),
-                trophy_relic_drop: false,
+                trophy_relic_drop: result.trophy_relic_drop.is_some(),
             })
         }
         DigBossResolvedOutcome::Pinnacle(resolved)
@@ -10727,10 +10914,19 @@ fn regular_boss_result_response(
     result: &ResolvedFight,
     gear_drop: Option<&DigBossGearDrop>,
     prestige_relic_drop: Option<&DigBossPrestigeRelicDrop>,
+    trophy_relic_drop: Option<&DigBossPrestigeRelicDrop>,
+    stat_point_awarded: bool,
     broken_gear: &[DigBossBrokenGear],
     media: &DigMediaRuntime,
 ) -> InteractionResponse {
-    let mut embed = regular_boss_result_embed(result, gear_drop, prestige_relic_drop, broken_gear);
+    let mut embed = regular_boss_result_embed(
+        result,
+        gear_drop,
+        prestige_relic_drop,
+        trophy_relic_drop,
+        stat_point_awarded,
+        broken_gear,
+    );
     let layer_name = layer_at(i64::from(result.boundary)).name;
     let art = media.boss_art(
         BossIdentity::Id(&result.boss_id),
@@ -10753,6 +10949,8 @@ fn regular_boss_result_embed(
     result: &ResolvedFight,
     gear_drop: Option<&DigBossGearDrop>,
     prestige_relic_drop: Option<&DigBossPrestigeRelicDrop>,
+    trophy_relic_drop: Option<&DigBossPrestigeRelicDrop>,
+    stat_point_awarded: bool,
     broken_gear: &[DigBossBrokenGear],
 ) -> InteractionEmbed {
     let boss_name = cama_app::dig_bosses::boss_by_id(&result.boss_id)
@@ -10762,8 +10960,13 @@ fn regular_boss_result_embed(
         format!("You broke **{boss_name}** — it staggers...")
     } else if result.won {
         format!(
-            "Victory! You defeated **{boss_name}** and won **{:+}** {JOPACOIN_EMOTE} profit!",
-            result.jc_delta
+            "Victory! You defeated **{boss_name}** and won **{:+}** {JOPACOIN_EMOTE} profit!{}",
+            result.jc_delta,
+            boss_profit_deduction_lines(
+                result.bankruptcy_penalty,
+                result.vanity_tax,
+                result.low_priority_tax,
+            )
         )
     } else {
         format!(
@@ -10833,6 +11036,13 @@ fn regular_boss_result_embed(
         );
     }
     if result.won {
+        if stat_point_awarded {
+            embed = embed.field(
+                "S Point Earned",
+                "First clear bonus: use `/dig miner build` to allocate it.",
+                false,
+            );
+        }
         if let Some(drop) = gear_drop {
             embed = embed.field(
                 "Boss Drop",
@@ -10842,6 +11052,9 @@ fn regular_boss_result_embed(
         }
         if let Some(drop) = prestige_relic_drop {
             embed = embed.field("Relic Found", format!("**{}**", drop.name), false);
+        }
+        if let Some(drop) = trophy_relic_drop {
+            embed = embed.field("Trophy Carved", format!("**{}**", drop.name), false);
         }
     }
     if !broken_gear.is_empty() {
@@ -10859,6 +11072,24 @@ fn regular_boss_result_embed(
     embed
 }
 
+/// Python's victory lines for the profit a boss win withheld, plus Rust's
+/// low-priority sink taken from the same profit.
+fn boss_profit_deduction_lines(
+    bankruptcy_penalty: i64,
+    vanity_tax: i64,
+    low_priority_tax: i64,
+) -> String {
+    [
+        (bankruptcy_penalty, "withheld while bankrupt"),
+        (vanity_tax, "vanity tax"),
+        (low_priority_tax, "low priority tax"),
+    ]
+    .into_iter()
+    .filter(|(amount, _)| *amount > 0)
+    .map(|(amount, label)| format!("\n−{amount} {JOPACOIN_EMOTE} {label}."))
+    .collect()
+}
+
 fn pinnacle_boss_result_response(
     result: &DigPinnacleResolved,
     media: &DigMediaRuntime,
@@ -10868,8 +11099,14 @@ fn pinnacle_boss_result_response(
         format!("You broke **{}** — it staggers...", result.boss_name)
     } else if result.won {
         format!(
-            "Victory! You defeated **{}** and won **{:+}** {JOPACOIN_EMOTE} profit!",
-            result.boss_name, result.jc_delta
+            "Victory! You defeated **{}** and won **{:+}** {JOPACOIN_EMOTE} profit!{}",
+            result.boss_name,
+            result.jc_delta,
+            boss_profit_deduction_lines(
+                result.bankruptcy_penalty,
+                result.vanity_tax,
+                result.low_priority_tax,
+            )
         )
     } else {
         format!(
@@ -10950,6 +11187,8 @@ fn boss_start_response(
             resolved,
             result.gear_drop.as_ref(),
             result.prestige_relic_drop.as_ref(),
+            result.trophy_relic_drop.as_ref(),
+            result.stat_point_awarded,
             &result.broken_gear,
             media,
         ),
@@ -10976,6 +11215,8 @@ fn boss_resume_response(
             resolved,
             result.gear_drop.as_ref(),
             result.prestige_relic_drop.as_ref(),
+            result.trophy_relic_drop.as_ref(),
+            result.stat_point_awarded,
             &result.broken_gear,
             media,
         ),

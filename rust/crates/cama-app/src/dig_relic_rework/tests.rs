@@ -163,6 +163,23 @@ fn test_deaths_door_renamed_off_the_second_wind_mutation() {
 #[test]
 fn test_deaths_door_is_the_nameless_depth_trophy() {
     assert!(TROPHY_RELIC_IDS.contains(&"deaths_door"));
+    assert_eq!(trophy_relic_for_boss("nameless_depth"), Some("deaths_door"));
+}
+
+/// Python's `BossDef.trophy_relic_id`: each signature trophy is carved by
+/// exactly one catalog boss, and no other boss carves one.
+#[test]
+fn test_every_trophy_is_carved_by_exactly_one_catalog_boss() {
+    let mut carved = crate::dig_bosses::BOSSES
+        .iter()
+        .filter_map(|boss| trophy_relic_for_boss(boss.boss_id))
+        .collect::<Vec<_>>();
+    carved.sort_unstable();
+    let mut expected = TROPHY_RELIC_IDS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(carved, expected);
+    assert_eq!(trophy_relic_for_boss("grothak"), None);
+    assert!((TROPHY_CARVE_RATE - 0.25).abs() < f64::EPSILON);
 }
 
 #[test]

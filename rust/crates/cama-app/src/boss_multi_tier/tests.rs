@@ -1797,7 +1797,7 @@ fn test_resume_after_leaving_the_boundary_neither_restores_depth_nor_pays() {
     service.repository.insert_tunnel(key(), reset);
     assert_eq!(
         service.resume_boss_duel(key(), paused.pending_prompt.safe_option_index),
-        Err(BossServiceError::NotAtBossBoundary)
+        Err(BossServiceError::FightResolvedElsewhere)
     );
     let after = service.repository.load_tunnel(key()).expect("tunnel");
     assert_eq!(after.depth, 0, "the depth is not restored");

@@ -71,7 +71,7 @@ use crate::dig_carry_wager::{
     MAX_NEW_BOSS_WAGER, active_pinnacle_carry, current_boss_boundary, pinnacle_wager_profit,
 };
 use crate::dig_relic_rework::{SHIFTING_IDOL_PLAYER_HIT_CEILING, ShiftingIdolBonus};
-use crate::dig_routes::{RouteEntropy, build_route_offer_state};
+use crate::dig_routes::{RouteEntropy, build_route_offer_state, route_status};
 use crate::dig_service::{BOSS_REST_PENDING_KEY, DIG_STARTING_STAT_POINTS};
 use crate::dig_tunnel_naming::DigTunnelNamingService;
 use crate::economy_event_service::EconomyEventConfig;
@@ -83,6 +83,10 @@ use crate::vanity_tax_service::VanityTaxService;
 /// Audit action for a paused duel's escrowed stake. It is not a boss fight,
 /// so fight statistics never count it.
 const BOSS_WAGER_ESCROW_ACTION: &str = "boss_wager_escrow";
+
+/// Python's `BossDuelView` timeout: how long a duel prompt waits for an
+/// answer before its safe option is chosen.
+pub const BOSS_DUEL_PROMPT_TIMEOUT_SECONDS: i64 = 120;
 
 #[derive(Clone, Debug)]
 struct LoadedBossSnapshot {
@@ -151,6 +155,10 @@ pub struct SqliteBossRepository {
     audits: Vec<BossAuditRecord>,
     last_error: RefCell<Option<String>>,
     last_action_id: Option<i64>,
+    stat_point_awarded: bool,
+    trophy_relic_drop: Option<DigBossPrestigeRelicDrop>,
+    /// Latest save time of a paused duel this adapter may claim.
+    claim_saved_by: i64,
 }
 
 impl SqliteBossRepository {
@@ -163,12 +171,26 @@ impl SqliteBossRepository {
             audits: Vec::new(),
             last_error: RefCell::new(None),
             last_action_id: None,
+            stat_point_awarded: false,
+            trophy_relic_drop: None,
+            claim_saved_by: i64::MAX,
         }
     }
 
     #[must_use]
     pub const fn last_action_id(&self) -> Option<i64> {
         self.last_action_id
+    }
+
+    /// Whether a committed victory granted its boundary's first-clear S point.
+    #[must_use]
+    pub const fn stat_point_awarded(&self) -> bool {
+        self.stat_point_awarded
+    }
+
+    /// The signature trophy a committed victory carved, if any.
+    pub fn take_trophy_relic_drop(&mut self) -> Option<DigBossPrestigeRelicDrop> {
+        self.trophy_relic_drop.take()
     }
 
     pub fn take_error(&self) -> Option<String> {
@@ -240,6 +262,7 @@ impl BossRepositoryPort for SqliteBossRepository {
         if commit.audit.is_some() {
             proposed.cheer_data_json = None;
         }
+        let mut stat_point_awarded = false;
         if let Some(audit) = commit.audit.as_ref()
             && audit.won
             && status_for_boundary(&commit.next_tunnel.boss_progress, audit.boundary)
@@ -249,8 +272,9 @@ impl BossRepositoryPort for SqliteBossRepository {
                 audit.boundary,
             ) != BossStatus::Defeated
         {
-            apply_first_clear_stat_award(&loaded.snapshot, &mut proposed, audit.boundary)
-                .map_err(|error| self.repository_error(error))?;
+            stat_point_awarded =
+                apply_first_clear_stat_award(&loaded.snapshot, &mut proposed, audit.boundary)
+                    .map_err(|error| self.repository_error(error))?;
             apply_route_offer(&loaded.snapshot, &mut proposed, audit.boundary)
                 .map_err(|error| self.repository_error(error))?;
         }
@@ -314,6 +338,14 @@ impl BossRepositoryPort for SqliteBossRepository {
             && !loaded.has_great_lantern)
             .then(|| loaded.lantern_ids.first().copied())
             .flatten();
+        let trophy = commit
+            .trophy_relic
+            .map(|artifact_id| DigBossRuntimeArtifactGrant {
+                artifact_id,
+                found_at: self.now,
+                is_relic: true,
+                only_if_unowned: true,
+            });
         let outcome = self
             .repository
             .commit(DigBossRuntimeCommit {
@@ -321,7 +353,7 @@ impl BossRepositoryPort for SqliteBossRepository {
                 proposed: &proposed,
                 audit,
                 echo,
-                artifact: None,
+                artifact: trophy,
                 bankruptcy_penalty: commit.bankruptcy_penalty,
                 vanity_tax: commit.vanity_tax,
                 low_priority_tax: commit.low_priority_tax,
@@ -340,6 +372,24 @@ impl BossRepositoryPort for SqliteBossRepository {
                 // Escrowing a stake settles nothing, so only a fight audit is
                 // reported as the resolution's action.
                 self.last_action_id = commit.audit.as_ref().and(receipt.action_id);
+                self.stat_point_awarded |= stat_point_awarded;
+                if let (Some(artifact_id), Some(database_id)) =
+                    (commit.trophy_relic, receipt.artifact_database_id)
+                {
+                    let definition = crate::dig_loot::artifact_catalog()
+                        .into_iter()
+                        .find(|artifact| artifact.id == artifact_id);
+                    self.trophy_relic_drop = Some(DigBossPrestigeRelicDrop {
+                        database_id,
+                        artifact_id: artifact_id.to_owned(),
+                        name: definition
+                            .map_or(artifact_id, |artifact| artifact.name)
+                            .to_owned(),
+                        rarity: definition
+                            .map_or("rare", |artifact| artifact.rarity.as_str())
+                            .to_owned(),
+                    });
+                }
                 if let Some(audit) = commit.audit {
                     self.audits.push(audit);
                 }
@@ -357,7 +407,7 @@ impl BossRepositoryPort for SqliteBossRepository {
         key: PlayerKey,
     ) -> Result<Option<PausedBossDuel>, RepositoryError> {
         self.repository
-            .claim_active_duel(database_key(key))
+            .claim_active_duel_saved_by(database_key(key), self.claim_saved_by)
             .map_err(|error| self.repository_error(error))?
             .map(|row| paused_duel_from_row(&row))
             .transpose()
@@ -1214,14 +1264,15 @@ fn merge_stinger_curse(raw: Option<&str>, state: &StingerCurseState) -> Option<S
     (!object.is_empty()).then(|| Value::Object(object).to_string())
 }
 
+/// Grant a boundary's first-clear S point, returning whether one was granted.
 fn apply_first_clear_stat_award(
     snapshot: &DigBossRuntimeSnapshot,
     proposed: &mut DigBossRuntimeState,
     boundary: i32,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let mut awards = stat_boss_awards(snapshot)?;
     if !awards.insert(boundary) {
-        return Ok(());
+        return Ok(false);
     }
     proposed.stat_points = snapshot
         .stat_points
@@ -1234,7 +1285,7 @@ fn apply_first_clear_stat_award(
         })
         .to_string(),
     );
-    Ok(())
+    Ok(true)
 }
 
 /// Route offers draw from the process RNG, like the module-level `random`
@@ -2095,6 +2146,10 @@ pub struct DigBossRuntimeResult<T> {
     pub abandoned_gear_wear: GearWearResult,
     pub gear_drop: Option<DigBossGearDrop>,
     pub prestige_relic_drop: Option<DigBossPrestigeRelicDrop>,
+    /// Signature trophy a full kill carved inside its guarded victory commit.
+    pub trophy_relic_drop: Option<DigBossPrestigeRelicDrop>,
+    /// Whether the victory commit granted the boundary's first-clear S point.
+    pub stat_point_awarded: bool,
     pub broken_gear: Vec<DigBossBrokenGear>,
     /// Fail-soft post-policy integrations (daily event, bankruptcy lookup, or
     /// post-resolution gear wear) are explicit instead of silently erased.
@@ -2112,6 +2167,8 @@ impl<T> DigBossRuntimeResult<T> {
             abandoned_gear_wear: self.abandoned_gear_wear,
             gear_drop: self.gear_drop,
             prestige_relic_drop: self.prestige_relic_drop,
+            trophy_relic_drop: self.trophy_relic_drop,
+            stat_point_awarded: self.stat_point_awarded,
             broken_gear: self.broken_gear,
             warnings: self.warnings,
             notices: self.notices,
@@ -2340,6 +2397,10 @@ pub enum DigBossRuntimeError {
     CheerCooldown { remaining_seconds: i64 },
     #[error("Boss already at full cheer boost (3/3).")]
     CheerFull,
+    /// Python's `_boss_resolution_conflict_result` when the fight that was
+    /// settled elsewhere left a route junction waiting.
+    #[error("This boss fight was already resolved. The saved route remains available.")]
+    FightResolvedRouteSaved,
     #[error("Dig boss infrastructure failed: {0}")]
     Infrastructure(String),
 }
@@ -2642,6 +2703,52 @@ impl DigBossRuntimeService {
         }
     }
 
+    /// Python's `BossDuelView.on_timeout`: a prompt left unanswered for
+    /// [`BOSS_DUEL_PROMPT_TIMEOUT_SECONDS`] resolves with its safe option
+    /// through the same guarded resume. Only a pause saved at least that long
+    /// before `request.now` is claimed, so a deadline never resolves the newer
+    /// pause an answer opened, and the claim settles the pause exactly once.
+    /// `None` means no pause was due; an encounter the tunnel already left is
+    /// left for the next start or answer to forfeit.
+    pub fn resume_timed_out<E: EntropyPort>(
+        &self,
+        request: DigBossRuntimeRequest,
+        entropy: E,
+    ) -> Result<Option<DigBossRuntimeResult<DigBossResolvedOutcome>>, DigBossRuntimeError> {
+        let saved_by = request.now.saturating_sub(BOSS_DUEL_PROMPT_TIMEOUT_SECONDS);
+        let Some(active) = DigBossRuntimeRepository::new(&self.config.database_path)
+            .active_duel(database_key(request.player_key()))
+            .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
+            .filter(|row| row.created_at <= saved_by)
+        else {
+            return Ok(None);
+        };
+        if !self.paused_encounter_is_live(request, &active)? {
+            return Ok(None);
+        }
+        let safe_option = paused_duel_from_row(&active)
+            .map_err(DigBossRuntimeError::Infrastructure)?
+            .pending_prompt
+            .safe_option_index;
+        let resolved = if active.boundary == i64::from(PINNACLE_DEPTH) {
+            self.resume_pinnacle_saved_by(request, safe_option, entropy, saved_by)
+                .map(|result| {
+                    result
+                        .map_outcome(|outcome| DigBossResolvedOutcome::Pinnacle(Box::new(outcome)))
+                })
+        } else {
+            self.resume_regular_saved_by(request, safe_option, entropy, saved_by)
+                .map(|result| {
+                    result.map_outcome(|outcome| DigBossResolvedOutcome::Regular(Box::new(outcome)))
+                })
+        };
+        match resolved {
+            // An answer claimed the pause first.
+            Err(DigBossRuntimeError::Policy(BossServiceError::NoActiveDuel)) => Ok(None),
+            resolved => resolved.map(Some),
+        }
+    }
+
     pub fn scout<E: EntropyPort>(
         &self,
         request: DigBossRuntimeRequest,
@@ -2793,6 +2900,8 @@ impl DigBossRuntimeService {
                         abandoned_gear_wear,
                         gear_drop: None,
                         prestige_relic_drop: None,
+                        trophy_relic_drop: None,
+                        stat_point_awarded: false,
                         broken_gear: Vec::new(),
                         warnings: Vec::new(),
                         notices: Vec::new(),
@@ -2895,7 +3004,8 @@ impl DigBossRuntimeService {
         let abandoned_gear_wear = self.settle_abandoned_gear(request, abandoned.as_ref())?;
         let mut service = self.compose(request.now, entropy);
         let outcome = service.start_boss_duel(request.player_key(), risk, wager);
-        let mut result = finish_composed(&mut service, outcome)?;
+        let mut result = finish_composed(&mut service, outcome)
+            .map_err(|error| self.resolution_conflict(request, error))?;
         if let StartBossDuelOutcome::Resolved(resolved) = &result.outcome {
             self.enrich_regular_resolution(
                 request,
@@ -3055,11 +3165,55 @@ impl DigBossRuntimeService {
         option_index: usize,
         entropy: E,
     ) -> Result<DigBossRuntimeResult<ResolvedFight>, DigBossRuntimeError> {
+        self.resume_regular_saved_by(request, option_index, entropy, i64::MAX)
+    }
+
+    /// Resume the regular duel saved at or before `saved_by`.
+    fn resume_regular_saved_by<E: EntropyPort>(
+        &self,
+        request: DigBossRuntimeRequest,
+        option_index: usize,
+        entropy: E,
+        saved_by: i64,
+    ) -> Result<DigBossRuntimeResult<ResolvedFight>, DigBossRuntimeError> {
         let mut service = self.compose(request.now, entropy);
+        service.repository.claim_saved_by = saved_by;
         let outcome = service.resume_boss_duel(request.player_key(), option_index);
-        let mut result = finish_composed(&mut service, outcome)?;
+        let mut result = finish_composed(&mut service, outcome)
+            .map_err(|error| self.resolution_conflict(request, error))?;
         self.enrich_regular_runtime_result(request, &mut result, &mut service.entropy);
         Ok(result)
+    }
+
+    /// Python's `_boss_resolution_conflict_result`: a regular fight whose
+    /// encounter was settled first reports that instead of a storage race,
+    /// and says the route junction a victory left waiting is still there.
+    fn resolution_conflict(
+        &self,
+        request: DigBossRuntimeRequest,
+        error: DigBossRuntimeError,
+    ) -> DigBossRuntimeError {
+        if !matches!(
+            error,
+            DigBossRuntimeError::Policy(
+                BossServiceError::FightResolvedElsewhere
+                    | BossServiceError::Repository(RepositoryError::Conflict)
+            )
+        ) {
+            return error;
+        }
+        let route_pending = DigBossRuntimeRepository::new(&self.config.database_path)
+            .snapshot(database_key(request.player_key()))
+            .ok()
+            .flatten()
+            .is_some_and(|snapshot| {
+                route_status(snapshot.route_state_json.as_deref()).choice_required
+            });
+        if route_pending {
+            DigBossRuntimeError::FightResolvedRouteSaved
+        } else {
+            BossServiceError::FightResolvedElsewhere.into()
+        }
     }
 
     pub fn scout_regular<E: EntropyPort>(
@@ -3101,13 +3255,24 @@ impl DigBossRuntimeService {
         requested_option_index: usize,
         entropy: E,
     ) -> Result<DigBossRuntimeResult<DigPinnacleResolved>, DigBossRuntimeError> {
+        self.resume_pinnacle_saved_by(request, requested_option_index, entropy, i64::MAX)
+    }
+
+    /// Resume the pinnacle duel saved at or before `saved_by`.
+    fn resume_pinnacle_saved_by<E: EntropyPort>(
+        &self,
+        request: DigBossRuntimeRequest,
+        requested_option_index: usize,
+        entropy: E,
+        saved_by: i64,
+    ) -> Result<DigBossRuntimeResult<DigPinnacleResolved>, DigBossRuntimeError> {
         let repository = DigBossRuntimeRepository::new(&self.config.database_path);
         // The claim commits on its own so a repeated click cannot resolve the
         // same pause twice. Nothing is settled until `settle_pinnacle` commits
         // (and nothing after that commit can fail), so any error puts the
         // paused duel back instead of dropping its wager with the row.
         let row = repository
-            .claim_active_duel(database_key(request.player_key()))
+            .claim_active_duel_saved_by(database_key(request.player_key()), saved_by)
             .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             .ok_or(BossServiceError::NoActiveDuel)?;
         let resolved =
@@ -3806,6 +3971,8 @@ impl DigBossRuntimeService {
                     abandoned_gear_wear: GearWearResult::default(),
                     gear_drop: None,
                     prestige_relic_drop: None,
+                    trophy_relic_drop: None,
+                    stat_point_awarded: false,
                     broken_gear: Vec::new(),
                     warnings: attempt.warnings,
                     notices: vec![BossNotice::PromptReady {
@@ -3858,6 +4025,8 @@ impl DigBossRuntimeService {
             abandoned_gear_wear: GearWearResult::default(),
             gear_drop: None,
             prestige_relic_drop: None,
+            trophy_relic_drop: None,
+            stat_point_awarded: false,
             broken_gear: Vec::new(),
             warnings: attempt
                 .warnings
@@ -4175,6 +4344,7 @@ impl DigBossRuntimeService {
                     artifact_id: &relic.artifact_id,
                     found_at: request.now,
                     is_relic: true,
+                    only_if_unowned: false,
                 });
             // Narrowed before the commit: once the settlement applies, nothing
             // may fail, because `resume_pinnacle` restores the claimed duel on
@@ -4257,6 +4427,8 @@ impl DigBossRuntimeService {
                         abandoned_gear_wear: GearWearResult::default(),
                         gear_drop: None,
                         prestige_relic_drop: None,
+                        trophy_relic_drop: None,
+                        stat_point_awarded: false,
                         broken_gear: Vec::new(),
                         warnings,
                         notices: vec![BossNotice::Resolved {
@@ -4498,6 +4670,8 @@ impl DigBossRuntimeService {
             abandoned_gear_wear: GearWearResult::default(),
             gear_drop: None,
             prestige_relic_drop: None,
+            trophy_relic_drop: None,
+            stat_point_awarded: false,
             broken_gear: Vec::new(),
             warnings,
             notices: Vec::new(),
@@ -5098,6 +5272,8 @@ fn finish_composed<E: EntropyPort, T>(
         abandoned_gear_wear: GearWearResult::default(),
         gear_drop: None,
         prestige_relic_drop: None,
+        trophy_relic_drop: service.repository.take_trophy_relic_drop(),
+        stat_point_awarded: service.repository.stat_point_awarded(),
         broken_gear: Vec::new(),
         warnings,
         notices: std::mem::take(&mut service.outcome_sink.notices),

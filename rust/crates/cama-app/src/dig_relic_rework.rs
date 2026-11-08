@@ -58,6 +58,25 @@ pub const TROPHY_RELIC_IDS: [&str; 6] = [
     "deaths_door",
 ];
 
+/// Python's `TROPHY_CARVE_RATE`: the per-kill chance a boss's signature trophy
+/// carves, rolled on every full kill until the player owns it.
+pub const TROPHY_CARVE_RATE: f64 = 0.25;
+
+/// Python's `BossDef.trophy_relic_id`: the signature trophy each trophy boss
+/// carves on a full kill. Trophies come from nowhere else.
+#[must_use]
+pub fn trophy_relic_for_boss(boss_id: &str) -> Option<&'static str> {
+    match boss_id {
+        "blightcoil" => Some("weeping_fang"),
+        "rimebound_king" => Some("runebitten_shard"),
+        "spineback" => Some("aching_spine"),
+        "xalatath" => Some("listening_shard"),
+        "lilith" => Some("hateborn_ember"),
+        "nameless_depth" => Some("deaths_door"),
+        _ => None,
+    }
+}
+
 /// The lazy Slow Drip settlement used at the beginning of a live Dig.
 /// `gross_jc` is the daily-cap amount consumed by the claim row; `credit_jc`
 /// is the amount that reaches the wallet after the guild economy multiplier

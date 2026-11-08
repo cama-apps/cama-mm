@@ -949,10 +949,15 @@ fn final_victory_atomically_awards_stat_point_and_keeps_run_scoped_ledger() {
                     boundary: 25,
                 },
                 paused_duel: None,
+                trophy_relic: None,
             },
         )
         .expect("victory");
     assert!(repository.last_action_id().is_some());
+    assert!(
+        repository.stat_point_awarded(),
+        "the result reports the first-clear S point"
+    );
 
     let connection = Connection::open(database.path()).expect("verify DB");
     let row = connection
@@ -1159,6 +1164,314 @@ fn live_boss_victory_gates_the_next_dig_until_a_route_is_chosen() {
         Some(chosen.as_str())
     );
     assert!(!runtime.dig(dig).expect("ungated dig").route_choice_required);
+}
+
+/// Park the tunnel before a one-HP Nameless Depth, the trophy boss every
+/// prestige meets at 275, with every earlier boss cleared.
+fn set_trophy_boss_encounter(database: &FastTestDatabase) {
+    Connection::open(database.path())
+        .expect("trophy boss DB")
+        .execute(
+            "UPDATE tunnels
+                SET depth=274,max_depth=274,boss_progress=?1,cheer_data=NULL,
+                    stat_survival=20
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![
+                r#"{"25":"defeated","50":"defeated","75":"defeated","100":"defeated","150":"defeated","200":"defeated","275":{"boss_id":"nameless_depth","status":"active","hp_remaining":1,"hp_max":1}}"#,
+                PLAYER,
+                GUILD,
+            ],
+        )
+        .expect("trophy boss encounter");
+}
+
+fn owned_artifact_count(database: &FastTestDatabase, artifact_id: &str) -> i64 {
+    Connection::open(database.path())
+        .expect("artifact DB")
+        .query_row(
+            "SELECT COUNT(*) FROM dig_artifacts
+              WHERE discord_id=?1 AND guild_id=?2 AND artifact_id=?3 AND is_relic=1",
+            params![PLAYER, GUILD, artifact_id],
+            |row| row.get(0),
+        )
+        .expect("artifact count")
+}
+
+/// Python's `_maybe_carve_trophy_relic`: a full kill of a trophy boss carves
+/// its signature trophy at the carve rate, inside the victory commit, and the
+/// result reports it beside the first-clear S point.
+#[test]
+fn trophy_boss_kill_carves_its_signature_trophy_in_the_victory_commit() {
+    let database = fixture();
+    set_trophy_boss_encounter(&database);
+    let victory = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("trophy boss victory");
+    assert!(victory.outcome.won);
+    assert!(victory.outcome.phase_transition.is_none());
+    assert!(victory.stat_point_awarded, "first clear of 275");
+    let trophy = victory.trophy_relic_drop.expect("carved trophy");
+    assert_eq!(trophy.artifact_id, "deaths_door");
+    assert_eq!(trophy.name, "Death's Door");
+    assert_eq!(trophy.rarity, "legendary");
+    let stored: (String, i64, i64, i64) = Connection::open(database.path())
+        .expect("trophy DB")
+        .query_row(
+            "SELECT artifact_id,is_relic,equipped,found_at FROM dig_artifacts WHERE id=?1",
+            [trophy.database_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("stored trophy");
+    assert_eq!(stored, ("deaths_door".to_owned(), 1, 0, 1_700_000_000));
+}
+
+#[test]
+fn trophy_carve_misses_at_the_rate_and_never_duplicates_an_owned_trophy() {
+    let database = fixture();
+    set_trophy_boss_encounter(&database);
+    let missed = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(crate::dig_relic_rework::TROPHY_CARVE_RATE),
+        )
+        .expect("victory at the carve rate");
+    assert!(missed.outcome.won);
+    assert_eq!(missed.trophy_relic_drop, None);
+    assert_eq!(owned_artifact_count(&database, "deaths_door"), 0);
+
+    let database = fixture();
+    set_trophy_boss_encounter(&database);
+    Connection::open(database.path())
+        .expect("owned trophy DB")
+        .execute(
+            "INSERT INTO dig_artifacts
+             (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+             VALUES (?1,?2,'deaths_door',1,1,0)",
+            params![PLAYER, GUILD],
+        )
+        .expect("owned trophy");
+    let owned = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("victory with the trophy owned");
+    assert!(owned.outcome.won);
+    assert!(owned.action_id.is_some(), "the victory still settles");
+    assert_eq!(owned.trophy_relic_drop, None);
+    assert_eq!(owned_artifact_count(&database, "deaths_door"), 1);
+}
+
+/// A boss without a signature trophy never carves one.
+#[test]
+fn non_trophy_boss_kill_carves_nothing() {
+    let database = fixture();
+    set_minimal_accuracy_encounter(&database, 20);
+    let victory = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("grothak victory");
+    assert!(victory.outcome.won);
+    assert_eq!(victory.trophy_relic_drop, None);
+    assert!(victory.stat_point_awarded);
+}
+
+/// Python's `_boss_resolution_conflict_result`: a duel answered after its
+/// encounter was settled elsewhere reports that, naming the waiting route
+/// junction when the settlement left one, and pays nothing.
+#[test]
+fn resume_after_the_encounter_settled_elsewhere_reports_the_conflict_copy() {
+    let database = fixture();
+    set_route_state(&database, SELECTED_DIRT_ROUTE);
+    SqliteBossRepository::new(database.path(), 1_700_000_000)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("paused duel");
+    // Another view kills the boss and opens the next layer's junction.
+    commit_grothak_outcome(&database, true, BossStatus::Defeated);
+    assert!(
+        crate::dig_routes::route_status(persisted_route_state(&database).as_deref())
+            .choice_required
+    );
+    let balance = player_balance(&database);
+    let error = pinnacle_runtime(&database)
+        .resume_regular(
+            pinnacle_request(1_700_000_010),
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect_err("the encounter was already settled");
+    assert!(matches!(
+        error,
+        DigBossRuntimeError::FightResolvedRouteSaved
+    ));
+    assert_eq!(
+        error.to_string(),
+        "This boss fight was already resolved. The saved route remains available."
+    );
+    assert_eq!(player_balance(&database), balance, "nothing is paid twice");
+
+    let database = fixture();
+    SqliteBossRepository::new(database.path(), 1_700_000_000)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("paused duel");
+    Connection::open(database.path())
+        .expect("reset DB")
+        .execute(
+            "UPDATE tunnels SET depth=0,boss_progress='{}'
+              WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+        )
+        .expect("tunnel left the encounter");
+    let error = pinnacle_runtime(&database)
+        .resume_regular(
+            pinnacle_request(1_700_000_010),
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect_err("the encounter was already settled");
+    assert_eq!(
+        error.to_string(),
+        "This boss fight was already resolved by another view."
+    );
+}
+
+fn boss_fight_audit_count(database: &FastTestDatabase) -> i64 {
+    Connection::open(database.path())
+        .expect("audit DB")
+        .query_row(
+            "SELECT COUNT(*) FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='boss_fight'",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("boss fight audits")
+}
+
+/// Python's `BossDuelView.on_timeout`: an unanswered prompt resolves with its
+/// safe option once the prompt deadline passes, and settles exactly once.
+#[test]
+fn timed_out_prompt_resolves_with_its_safe_option_exactly_once() {
+    let database = fixture();
+    let paused_at = 1_700_000_000;
+    SqliteBossRepository::new(database.path(), paused_at)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("paused duel");
+    let runtime = pinnacle_runtime(&database);
+
+    let early = runtime
+        .resume_timed_out(
+            pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS - 1),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("early deadline check");
+    assert!(early.is_none(), "the prompt still has time");
+    assert_eq!(paused_duel_rows(&database).len(), 1);
+
+    let resolved = runtime
+        .resume_timed_out(
+            pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("due prompt")
+        .expect("the timed-out prompt resolves");
+    let DigBossResolvedOutcome::Regular(fight) = resolved.outcome else {
+        panic!("expected the regular duel to resolve");
+    };
+    let chosen = fight
+        .round_log
+        .iter()
+        .find_map(|round| round.mechanic.as_ref())
+        .expect("the timed-out choice is logged");
+    assert_eq!(
+        chosen.option_index,
+        paused_duel().pending_prompt.safe_option_index
+    );
+    assert!(resolved.action_id.is_some());
+    assert!(paused_duel_rows(&database).is_empty());
+    assert_eq!(boss_fight_audit_count(&database), 1);
+
+    assert!(
+        runtime
+            .resume_timed_out(
+                pinnacle_request(paused_at + 2 * BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+                SequenceEntropy::constant(0.0),
+            )
+            .expect("repeat deadline")
+            .is_none(),
+        "a settled prompt never resolves twice"
+    );
+    assert_eq!(boss_fight_audit_count(&database), 1);
+}
+
+/// A prompt the player answered is never resolved by its old deadline, even
+/// when the answer opened a newer pause in the same duel.
+#[test]
+fn an_answered_prompt_deadline_never_resolves_the_newer_pause() {
+    let database = fixture();
+    let paused_at = 1_700_000_000;
+    let answered_at = paused_at + 60;
+    SqliteBossRepository::new(database.path(), answered_at)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("newer pause");
+    assert!(
+        pinnacle_runtime(&database)
+            .resume_timed_out(
+                pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+                SequenceEntropy::constant(0.0),
+            )
+            .expect("old deadline")
+            .is_none()
+    );
+    assert_eq!(paused_duel_rows(&database).len(), 1);
+    assert_eq!(boss_fight_audit_count(&database), 0);
+}
+
+#[test]
+fn timed_out_pinnacle_prompt_resolves_with_its_safe_option() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    let paused_at = 1_700_000_000;
+    let started = pinnacle_runtime(&database)
+        .start_pinnacle(
+            pinnacle_request(paused_at),
+            RiskTier::Reckless,
+            25,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("start pinnacle");
+    let DigPinnacleStartOutcome::Paused(paused) = started.outcome else {
+        panic!("expected durable pinnacle prompt")
+    };
+    let resolved = pinnacle_runtime(&database)
+        .resume_timed_out(
+            pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("due pinnacle prompt")
+        .expect("the timed-out pinnacle prompt resolves");
+    let DigBossResolvedOutcome::Pinnacle(fight) = resolved.outcome else {
+        panic!("expected the pinnacle duel to resolve");
+    };
+    let chosen = fight
+        .round_log
+        .iter()
+        .find_map(|round| round.mechanic.as_ref())
+        .expect("the timed-out choice is logged");
+    assert_eq!(chosen.option_index, paused.pending_prompt.safe_option_index);
+    assert!(paused_duel_rows(&database).is_empty());
 }
 
 fn paused_duel() -> PausedBossDuel {
