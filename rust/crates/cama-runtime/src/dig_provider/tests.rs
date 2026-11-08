@@ -8617,6 +8617,27 @@ fn dig_result_embed_shows_an_active_curse_on_a_later_dig() {
 }
 
 #[test]
+fn dig_result_embed_credits_pet_excavation_in_progress() {
+    let mut result = hook_outcome();
+    result.advance = 17;
+    result.pet_dig_bonus = 12;
+    result.pet_name = Some("Blep".to_owned());
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+    let progress = embed
+        .fields
+        .iter()
+        .find(|field| field.name == "Progress")
+        .expect("progress field");
+
+    assert!(
+        progress.value.contains("Blep excavated +12 blocks"),
+        "{}",
+        progress.value
+    );
+}
+
+#[test]
 fn dig_result_embed_omits_the_curse_field_when_uncursed() {
     let result = hook_outcome();
 

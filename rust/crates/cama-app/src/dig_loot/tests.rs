@@ -184,15 +184,6 @@ fn buy_and_queue(service: &mut TestService, item: &str) -> i64 {
     item_id
 }
 
-fn field<'a>(embed: &'a EmbedModel, name: &str) -> &'a str {
-    &embed
-        .fields
-        .iter()
-        .find(|field| field.name == name)
-        .expect("expected embed field")
-        .value
-}
-
 #[test]
 fn test_buy_item_deducts_jc() {
     let mut service = service(100);
@@ -451,10 +442,7 @@ fn test_autocomplete_value_gifts_successfully() {
         GUILD,
         ArtifactSelector::CatalogId(&choices[0].value),
     );
-    let reply = gift_command_reply(&result, "Receiver");
     assert!(result.success);
-    assert!(reply.content.contains("You gifted"));
-    assert!(!reply.ephemeral);
 }
 
 #[test]
@@ -469,20 +457,8 @@ fn test_failed_gift_reports_error_not_success() {
         GUILD,
         ArtifactSelector::CatalogId("Not An Owned Id"),
     );
-    let reply = gift_command_reply(&result, "Receiver");
     assert!(!result.success);
-    assert!(reply.ephemeral);
-    assert!(!reply.content.contains("You gifted"));
     assert_eq!(service.repository().artifacts(USER, GUILD).len(), 1);
-}
-
-#[test]
-fn test_failed_trap_reports_error() {
-    let result = LootActionResult::error("No trap placed.");
-    let reply = trap_command_reply(&result);
-    assert!(reply.ephemeral);
-    assert!(!reply.content.contains("Trap set"));
-    assert!(reply.content.contains("No trap placed."));
 }
 
 #[test]
@@ -710,67 +686,6 @@ fn test_resolve_event_boon_invalid_index() {
         &format!("boon_{}", event.boon_count + 10),
     );
     assert!(!result.success);
-}
-
-#[test]
-fn test_streak_charm_save_is_visible() {
-    let embed = build_dig_embed(&DigPresentation {
-        depth: 10,
-        advance: 1,
-        streak_charm_used: true,
-        ..DigPresentation::default()
-    });
-    assert!(field(&embed, "Streak Charm").contains("Saved your daily streak"));
-}
-
-#[test]
-fn test_pet_excavation_bonus_is_visible_in_progress() {
-    let embed = build_dig_embed(&DigPresentation {
-        depth: 17,
-        advance: 17,
-        pet_dig_bonus: 12,
-        pet_name: Some("Blep".to_owned()),
-        ..DigPresentation::default()
-    });
-    assert!(field(&embed, "Progress").contains("Blep excavated +12 blocks"));
-}
-
-#[test]
-fn test_auto_buy_outcomes_are_visible() {
-    let embed = build_dig_embed(&DigPresentation {
-        depth: 10,
-        advance: 1,
-        auto_purchases: vec![
-            AutoPurchasePresentation {
-                item: "Torch".to_owned(),
-                status: AutoBuyStatus::Purchased,
-                cost: 6,
-            },
-            AutoPurchasePresentation {
-                item: "Hard Hat".to_owned(),
-                status: AutoBuyStatus::SkippedInsufficientBalance,
-                cost: 8,
-            },
-        ],
-        ..DigPresentation::default()
-    });
-    let value = field(&embed, "Auto-Buy");
-    assert!(value.contains("Torch: bought"));
-    assert!(value.contains("Hard Hat: skipped (need 8 JC)"));
-}
-
-#[test]
-fn test_cave_in_broken_gear_renders_repair_notification() {
-    let embed = build_dig_embed(&DigPresentation {
-        depth: 180,
-        cave_in: true,
-        broken_gear: vec!["Ironclad Armor".to_owned()],
-        ..DigPresentation::default()
-    });
-    let value = field(&embed, "Gear Broken");
-    assert!(value.contains("Ironclad Armor"));
-    assert!(value.contains("effects disabled"));
-    assert!(value.contains("Repair All"));
 }
 
 #[test]

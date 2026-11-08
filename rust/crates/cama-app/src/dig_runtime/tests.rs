@@ -6407,6 +6407,26 @@ fn sqlite_reduced_injury_ticks_and_slower_cooldown_does_not_halve_advance() {
 }
 
 #[test]
+fn sqlite_unregistered_dig_is_blocked_with_a_register_prompt() {
+    let database = fast_migrated_database();
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: 60_501,
+            guild_id: 60_502,
+            now: 1_900_060_000,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("unregistered Dig resolves");
+    assert!(!outcome.success);
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("You need to register first. Use /player register.")
+    );
+    assert_eq!((outcome.depth_before, outcome.depth_after), (0, 0));
+}
+
+#[test]
 fn sqlite_first_dig_pet_work_respects_live_boss_boundary_cap() {
     let database = fast_migrated_database();
     let actor = 7;

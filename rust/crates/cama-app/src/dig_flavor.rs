@@ -17,7 +17,7 @@ use crate::ai_services::{
     ToolChoice as AiToolChoice, ToolDefinition as AiToolDefinition, ToolProperty as AiToolProperty,
     ToolPropertySchema as AiToolPropertySchema, ToolRequest, Value as AiValue,
 };
-use crate::dig_service::{BASE_DIG_JC_PAYOUT_CAP, DigOutcomeInput, TunnelState, apply_dig_outcome};
+use crate::dig_service::BASE_DIG_JC_PAYOUT_CAP;
 use cama_domain::formatting::truncate_utf8_bytes;
 use cama_domain::guild_config::GuildConfigStore;
 
@@ -150,11 +150,6 @@ pub const NPCS: &[DigNpc] = &[
 
 #[cfg(test)]
 pub const VALID_VOICES: [&str; 3] = ["cosmic_dread", "industrial_grim", "cryptic_folkloric"];
-
-#[must_use]
-pub fn npc_by_id(npc_id: &str) -> Option<DigNpc> {
-    NPCS.iter().copied().find(|npc| npc.npc_id() == npc_id)
-}
 
 /// Flatten the canon roster into the prompt-injection bullet representation.
 #[must_use]
@@ -384,26 +379,6 @@ pub struct FlavorResult {
     pub npc_appearance: Option<NpcAppearance>,
     pub flavor_bonus_pct: f64,
     pub memory_update: Option<String>,
-}
-
-#[must_use]
-pub fn classify_play_style(histogram: &BTreeMap<String, i64>) -> &'static str {
-    let total = histogram.values().sum::<i64>();
-    if total < 5 {
-        return "unknown";
-    }
-    let fraction = |key: &str| *histogram.get(key).unwrap_or(&0) as f64 / total as f64;
-    if fraction("help") > 0.3 {
-        "social_butterfly"
-    } else if fraction("safe") > 0.7 {
-        "cautious_grinder"
-    } else if fraction("desperate") > 0.15 {
-        "reckless_degen"
-    } else if fraction("risky") > 0.4 {
-        "calculated_risk_taker"
-    } else {
-        "balanced_explorer"
-    }
 }
 
 fn truncate_chars(value: &str, maximum: usize) -> String {
@@ -1020,11 +995,6 @@ pub struct DigAction {
     pub jc_delta: i64,
     pub detail: SocialActionDetail,
     pub created_at: i64,
-}
-
-#[must_use]
-pub fn build_multiplayer_context(actions: &[DigAction], names: &BTreeMap<i64, String>) -> String {
-    build_multiplayer_context_with_state(actions, &TunnelFlavorState::default(), 0, names)
 }
 
 #[must_use]
@@ -1731,12 +1701,6 @@ pub trait DigFlavorDataPort: Send + Sync {
         discord_id: i64,
         guild_id: i64,
     ) -> Result<Option<DigPersonality>, String>;
-    fn upsert_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        personality: DigPersonality,
-    ) -> Result<(), String>;
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1896,27 +1860,6 @@ impl DigFlavorDataPort for SqliteDigFlavorDataAdapter {
         self.repository
             .get_personality(discord_id, guild_id)
             .map(|personality| personality.map(map_db_personality))
-            .map_err(|error| error.to_string())
-    }
-
-    fn upsert_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        personality: DigPersonality,
-    ) -> Result<(), String> {
-        self.repository
-            .upsert_personality(
-                discord_id,
-                guild_id,
-                &cama_db::dig_flavor_repository::DigFlavorPersonality {
-                    play_style: personality.play_style,
-                    choice_histogram: personality.choice_histogram,
-                    notable_moments: personality.notable_moments,
-                    social_summary: personality.social_summary,
-                },
-                unix_now(),
-            )
             .map_err(|error| error.to_string())
     }
 }
@@ -2578,46 +2521,6 @@ impl DigFlavorService {
         }
         delta
     }
-
-    pub fn update_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        choice: Option<&str>,
-        details: Option<&BTreeMap<String, bool>>,
-    ) {
-        let Ok(existing) = self.data.get_personality(discord_id, guild_id) else {
-            return;
-        };
-        let mut personality = existing.unwrap_or_else(|| DigPersonality {
-            play_style: "unknown".to_owned(),
-            ..DigPersonality::default()
-        });
-        const VALID_CHOICES: [&str; 7] = [
-            "safe",
-            "risky",
-            "desperate",
-            "fight",
-            "retreat",
-            "scout",
-            "help",
-        ];
-        if let Some(choice) = choice.filter(|choice| VALID_CHOICES.contains(choice)) {
-            *personality
-                .choice_histogram
-                .entry(choice.to_owned())
-                .or_default() += 1;
-        }
-        if let Some(moment) = details.and_then(extract_notable_moment) {
-            personality.notable_moments.push(moment.to_owned());
-            let drain = personality.notable_moments.len().saturating_sub(10);
-            personality.notable_moments.drain(..drain);
-        }
-        personality.play_style = classify_play_style(&personality.choice_histogram).to_owned();
-        let _ignored = self
-            .data
-            .upsert_personality(discord_id, guild_id, personality);
-    }
 }
 
 fn python_round(value: f64) -> i64 {
@@ -2629,23 +2532,6 @@ fn python_round(value: f64) -> i64 {
     } else {
         value.round() as i64
     }
-}
-
-fn extract_notable_moment(details: &BTreeMap<String, bool>) -> Option<&'static str> {
-    [
-        ("first_boss_kill", "Slew their first boss"),
-        ("prestige", "Ascended to a new prestige level"),
-        ("artifact_found", "Discovered a rare artifact"),
-        ("cave_in_streak", "Suffered a devastating cave-in streak"),
-    ]
-    .into_iter()
-    .find_map(|(key, description)| {
-        details
-            .get(key)
-            .copied()
-            .unwrap_or(false)
-            .then_some(description)
-    })
 }
 
 #[cfg(test)]
@@ -2851,105 +2737,6 @@ impl DigFlavorDataPort for MemoryDigFlavorRepository {
         guild_id: i64,
     ) -> Result<Option<DigPersonality>, String> {
         Ok(self.personality(discord_id, guild_id))
-    }
-
-    fn upsert_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        personality: DigPersonality,
-    ) -> Result<(), String> {
-        self.write_personality(discord_id, guild_id, personality);
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DigTerminalFailure {
-    pub success: bool,
-    pub message: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DigPreconditions {
-    pub depth_before: i64,
-}
-
-#[must_use]
-pub fn dig_with_preconditions(
-    tunnel: Option<&TunnelState>,
-) -> (Option<DigTerminalFailure>, Option<DigPreconditions>) {
-    tunnel.map_or_else(
-        || {
-            (
-                Some(DigTerminalFailure {
-                    success: false,
-                    message: "You need to register first.".to_owned(),
-                }),
-                None,
-            )
-        },
-        |tunnel| {
-            (
-                None,
-                Some(DigPreconditions {
-                    depth_before: tunnel.depth,
-                }),
-            )
-        },
-    )
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AppliedDigFlavorOutcome {
-    pub success: bool,
-    pub advance: i64,
-    pub depth_after: i64,
-    pub cave_in: bool,
-    pub cave_in_detail: Option<CaveInFlavorDetail>,
-    pub llm_narrative: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ResolvedDigFlavorInput {
-    pub advance: i64,
-    pub jc_earned: i64,
-    pub cave_in: bool,
-    pub cave_in_block_loss: i64,
-    pub cave_in_type: String,
-}
-
-#[must_use]
-pub fn apply_resolved_dig_outcome(
-    tunnel: &mut TunnelState,
-    input: &ResolvedDigFlavorInput,
-    now: i64,
-) -> AppliedDigFlavorOutcome {
-    let resolved = apply_dig_outcome(
-        tunnel,
-        DigOutcomeInput {
-            advance: input.advance,
-            gross_jc: input.jc_earned,
-            cave_in_loss: if input.cave_in {
-                input.cave_in_block_loss
-            } else {
-                0
-            },
-            ..DigOutcomeInput::default()
-        },
-        now,
-    );
-    AppliedDigFlavorOutcome {
-        success: true,
-        advance: resolved.advance,
-        depth_after: resolved.depth_after,
-        cave_in: resolved.cave_in,
-        cave_in_detail: resolved.cave_in.then(|| CaveInFlavorDetail {
-            block_loss: input.cave_in_block_loss,
-            message: String::new(),
-            kind: input.cave_in_type.clone(),
-        }),
-        llm_narrative: None,
     }
 }
 
