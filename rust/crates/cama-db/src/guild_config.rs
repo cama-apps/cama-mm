@@ -9,6 +9,15 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::open_runtime_connection;
 
+/// Failure reading or writing guild configuration.
+#[derive(Debug, thiserror::Error)]
+pub enum GuildConfigRepositoryError {
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("invalid Dota hosting options: {0}")]
+    InvalidDotaHostingOptions(String),
+}
+
 /// Repository that reads and writes Python's existing `guild_config` table.
 #[derive(Clone, Debug)]
 pub struct GuildConfigRepository {
@@ -32,7 +41,7 @@ impl GuildConfigRepository {
     pub fn dota_hosting_options(
         &self,
         guild_id: i64,
-    ) -> Result<DotaHostingOptions, rusqlite::Error> {
+    ) -> Result<DotaHostingOptions, GuildConfigRepositoryError> {
         read_dota_hosting_options(&self.connection()?, guild_id)
     }
 
@@ -41,7 +50,7 @@ impl GuildConfigRepository {
         &self,
         guild_id: i64,
         patch: &DotaHostingOptions,
-    ) -> Result<DotaHostingOptions, rusqlite::Error> {
+    ) -> Result<DotaHostingOptions, GuildConfigRepositoryError> {
         patch.validate().map_err(invalid_options)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -50,7 +59,8 @@ impl GuildConfigRepository {
         let json =
             serde_json::to_string(&options).map_err(|error| invalid_options(error.to_string()))?;
         transaction.execute(
-            "INSERT INTO guild_config (guild_id, dota_hosting_options) VALUES (?1, ?2) \
+            "INSERT INTO guild_config (guild_id, dota_hosting_options, ai_features_enabled) \
+             VALUES (?1, ?2, NULL) \
              ON CONFLICT(guild_id) DO UPDATE SET dota_hosting_options = ?2, updated_at = CURRENT_TIMESTAMP",
             params![guild_id, json],
         )?;
@@ -58,7 +68,10 @@ impl GuildConfigRepository {
         Ok(options)
     }
 
-    pub fn reset_dota_hosting_options(&self, guild_id: i64) -> Result<(), rusqlite::Error> {
+    pub fn reset_dota_hosting_options(
+        &self,
+        guild_id: i64,
+    ) -> Result<(), GuildConfigRepositoryError> {
         self.connection()?.execute(
             "UPDATE guild_config SET dota_hosting_options = '{}', updated_at = CURRENT_TIMESTAMP \
              WHERE guild_id = ?1",
@@ -68,21 +81,14 @@ impl GuildConfigRepository {
     }
 }
 
-fn invalid_options(message: String) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        0,
-        rusqlite::types::Type::Text,
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            message,
-        )),
-    )
+const fn invalid_options(message: String) -> GuildConfigRepositoryError {
+    GuildConfigRepositoryError::InvalidDotaHostingOptions(message)
 }
 
 fn read_dota_hosting_options(
     connection: &Connection,
     guild_id: i64,
-) -> Result<DotaHostingOptions, rusqlite::Error> {
+) -> Result<DotaHostingOptions, GuildConfigRepositoryError> {
     let json: Option<String> = connection
         .query_row(
             "SELECT dota_hosting_options FROM guild_config WHERE guild_id = ?1",
@@ -99,7 +105,7 @@ fn read_dota_hosting_options(
 }
 
 impl GuildConfigStore for GuildConfigRepository {
-    type Error = rusqlite::Error;
+    type Error = GuildConfigRepositoryError;
 
     fn get_config(&self, guild_id: i64) -> Result<Option<GuildConfig>, Self::Error> {
         let connection = self.connection()?;
@@ -120,11 +126,13 @@ impl GuildConfigStore for GuildConfigRepository {
                 },
             )
             .optional()
+            .map_err(Into::into)
     }
 
     fn set_league_id(&self, guild_id: i64, league_id: i64) -> Result<(), Self::Error> {
         self.connection()?.execute(
-            "INSERT INTO guild_config (guild_id, league_id) VALUES (?1, ?2) \
+            "INSERT INTO guild_config (guild_id, league_id, ai_features_enabled) \
+             VALUES (?1, ?2, NULL) \
              ON CONFLICT(guild_id) DO UPDATE SET league_id = ?2, updated_at = CURRENT_TIMESTAMP",
             params![guild_id, league_id],
         )?;
@@ -140,12 +148,14 @@ impl GuildConfigStore for GuildConfigRepository {
             )
             .optional()
             .map(Option::flatten)
+            .map_err(Into::into)
     }
 
     fn set_auto_enrich(&self, guild_id: i64, enabled: bool) -> Result<(), Self::Error> {
         let enabled = i64::from(enabled);
         self.connection()?.execute(
-            "INSERT INTO guild_config (guild_id, auto_enrich_matches) VALUES (?1, ?2) \
+            "INSERT INTO guild_config (guild_id, auto_enrich_matches, ai_features_enabled) \
+             VALUES (?1, ?2, NULL) \
              ON CONFLICT(guild_id) DO UPDATE SET auto_enrich_matches = ?2, \
              updated_at = CURRENT_TIMESTAMP",
             params![guild_id, enabled],
@@ -202,7 +212,7 @@ fn sqlite_truthy(row: &Row<'_>, index: usize) -> Result<Option<bool>, rusqlite::
 
 #[cfg(test)]
 mod tests {
-    use super::GuildConfigRepository;
+    use super::{GuildConfigRepository, GuildConfigRepositoryError};
     use cama_domain::dota_hosting::{DotaHostingOptions, HostingMode};
     use cama_domain::guild_config::GuildConfigStore;
     use rusqlite::Connection;
@@ -281,7 +291,10 @@ mod tests {
             )
             .unwrap();
         let repository = GuildConfigRepository::new(file.path(), false);
-        assert!(repository.dota_hosting_options(1).is_err());
+        assert!(matches!(
+            repository.dota_hosting_options(1),
+            Err(GuildConfigRepositoryError::InvalidDotaHostingOptions(_))
+        ));
         assert!(
             repository
                 .update_dota_hosting_options(1, &DotaHostingOptions::default())
@@ -292,6 +305,45 @@ mod tests {
             repository.dota_hosting_options(1).unwrap(),
             DotaHostingOptions::default()
         );
+    }
+
+    #[test]
+    fn non_ai_writes_keep_the_global_ai_default_for_new_rows() {
+        let file = NamedTempFile::new().unwrap();
+        crate::schema_manager::initialize_or_migrate(file.path()).unwrap();
+        let repository = GuildConfigRepository::new(file.path(), true);
+        repository.set_league_id(1, 19144).unwrap();
+        repository.set_auto_enrich(2, false).unwrap();
+        repository
+            .update_dota_hosting_options(3, &DotaHostingOptions::default())
+            .unwrap();
+        for guild_id in 1..=3 {
+            assert!(repository.get_ai_enabled(guild_id).unwrap(), "{guild_id}");
+            assert_eq!(
+                repository
+                    .get_config(guild_id)
+                    .unwrap()
+                    .expect("config row")
+                    .ai_features_enabled,
+                None,
+                "{guild_id}"
+            );
+        }
+        // An explicit choice survives later non-AI writes.
+        repository.set_ai_enabled(1, false).unwrap();
+        repository.set_league_id(1, 7).unwrap();
+        repository.set_auto_enrich(1, true).unwrap();
+        assert!(!repository.get_ai_enabled(1).unwrap());
+        // Rows written before this change are not rewritten.
+        let connection = Connection::open(file.path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO guild_config(guild_id,league_id,ai_features_enabled) VALUES (4,1,0)",
+                [],
+            )
+            .unwrap();
+        repository.set_league_id(4, 2).unwrap();
+        assert!(!repository.get_ai_enabled(4).unwrap());
     }
 
     fn repository() -> (NamedTempFile, GuildConfigRepository) {

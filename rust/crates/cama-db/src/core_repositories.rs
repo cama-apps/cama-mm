@@ -10,7 +10,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, NaiveDateTime, Utc};
+
 use cama_db_core::profit_deductions::OwnedProfitDeductionPolicy;
+use cama_domain::openskill::{CamaOpenSkillSystem, OPENSKILL_ALGORITHM_VERSION};
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, Player};
 use cama_domain::rating::cap_glicko_rd;
 use cama_domain::role_derivation::{
@@ -31,8 +34,6 @@ use crate::referrals::{
 
 const BULK_CHUNK_SIZE: usize = 900;
 const NEW_PLAYER_EXCLUSION_BOOST: i64 = 4;
-const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
-const OPENSKILL_ALGORITHM_FINGERPRINT: &str = "2cbce22ae3a3ded5";
 const DEFAULT_STREAK_MULTIPLIER_PER_GAME: f64 = 0.36;
 const DEFAULT_STREAK_THRESHOLD: i64 = 3;
 
@@ -193,10 +194,11 @@ pub struct MatchRatingInput {
     pub first_calibrated_at: Value,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Reminder cooldown anchors as Unix seconds; unreadable legacy values are `None`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReminderTimestamps {
-    pub last_wheel_spin: Value,
-    pub last_trivia_session: Value,
+    pub last_wheel_spin: Option<i64>,
+    pub last_trivia_session: Option<i64>,
 }
 
 /// Result of the atomic regular-wheel cooldown claim.
@@ -210,19 +212,11 @@ pub enum WheelSpinClaim {
 /// Python tuple order: `(rating, rating_deviation, volatility)`.
 pub type GlickoRating = (f64, Option<f64>, Option<f64>);
 
-impl Default for ReminderTimestamps {
-    fn default() -> Self {
-        Self {
-            last_wheel_spin: Value::Null,
-            last_trivia_session: Value::Null,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShuffleInputs {
     pub players: Vec<Player>,
-    pub last_match_dates: OrderedMap<i64, Value>,
+    /// Last recorded match per player; `None` when absent or unparseable.
+    pub last_match_dates: OrderedMap<i64, Option<DateTime<Utc>>>,
     pub exclusion_counts: OrderedMap<i64, i64>,
 }
 
@@ -288,6 +282,7 @@ impl PlayerRepository {
             .filter(|roles| !roles.is_empty())
             .map(encode_string_array);
         let glicko_rd = player.glicko_rd.map(cap_glicko_rd);
+        let fingerprint = CamaOpenSkillSystem::default().algorithm_fingerprint();
         match connection.execute(
             "INSERT INTO players (
                 discord_id, guild_id, discord_username, dotabuff_url, steam_id,
@@ -314,7 +309,7 @@ impl PlayerRepository {
                 player.os_mu,
                 player.os_sigma,
                 OPENSKILL_ALGORITHM_VERSION,
-                OPENSKILL_ALGORITHM_FINGERPRINT,
+                fingerprint,
                 NEW_PLAYER_EXCLUSION_BOOST,
             ],
         ) {
@@ -675,8 +670,8 @@ impl PlayerRepository {
                 Ok((
                     row.get::<_, i64>(0)?,
                     ReminderTimestamps {
-                        last_wheel_spin: row.get(1)?,
-                        last_trivia_session: row.get(2)?,
+                        last_wheel_spin: sqlite_unix_seconds(row.get_ref(1)?),
+                        last_trivia_session: sqlite_unix_seconds(row.get_ref(2)?),
                     },
                 ))
             })?;
@@ -718,7 +713,12 @@ impl PlayerRepository {
                 Ok((
                     player.discord_id.unwrap_or_default(),
                     player,
-                    row.get::<_, Value>(23)?,
+                    match row.get_ref(23)? {
+                        ValueRef::Text(text) => {
+                            std::str::from_utf8(text).ok().and_then(parse_sql_datetime)
+                        }
+                        _ => None,
+                    },
                     row.get::<_, Option<i64>>(24)?.unwrap_or(0),
                 ))
             })?;
@@ -734,7 +734,7 @@ impl PlayerRepository {
         for discord_id in discord_ids {
             if let Some((player, last_match_date, exclusions)) = rows_by_id.get(discord_id) {
                 players.push(player.clone());
-                last_match_dates.insert(*discord_id, last_match_date.clone());
+                last_match_dates.insert(*discord_id, *last_match_date);
                 exclusion_counts.insert(*discord_id, *exclusions);
             }
         }
@@ -1544,6 +1544,30 @@ const PLAYER_SELECT: &str = "SELECT discord_username, current_mmr, initial_mmr, 
             solo_grinder_checked_at,
             last_match_date, exclusion_count
      FROM players";
+
+/// Parse a stored match timestamp: RFC 3339, or SQLite's naive UTC text.
+#[must_use]
+pub fn parse_sql_datetime(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|date| date.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+                .ok()
+                .map(|date| date.and_utc())
+        })
+}
+
+/// Coerce a dynamically typed reminder anchor to Unix seconds, as Python's
+/// `int()` did for integers, finite reals, and integral text.
+fn sqlite_unix_seconds(value: ValueRef<'_>) -> Option<i64> {
+    match value {
+        ValueRef::Integer(value) => Some(value),
+        ValueRef::Real(value) if value.is_finite() => Some(value as i64),
+        ValueRef::Text(value) => std::str::from_utf8(value).ok()?.parse().ok(),
+        ValueRef::Null | ValueRef::Blob(_) | ValueRef::Real(_) => None,
+    }
+}
 
 fn query_player_by_id(
     connection: &Connection,
@@ -2507,6 +2531,9 @@ pub struct CoreMatchRecord {
     pub streak_defaults: StreakInsertDefaults,
     pub glicko_updates: Vec<CoreGlickoUpdate>,
     pub openskill_updates: Vec<CoreOpenSkillUpdate>,
+    /// Fingerprint of the configured OpenSkill system that produced the
+    /// updates, stamped on player ratings, rating history, and the prediction.
+    pub openskill_algorithm_fingerprint: String,
     pub first_calibration_ids: Vec<i64>,
     pub first_calibration_unix: i64,
     pub exclusion_decay_ids: Vec<i64>,
@@ -2556,6 +2583,7 @@ impl CoreMatchRecord {
             streak_defaults: StreakInsertDefaults::default(),
             glicko_updates: Vec::new(),
             openskill_updates: Vec::new(),
+            openskill_algorithm_fingerprint: CamaOpenSkillSystem::default().algorithm_fingerprint(),
             first_calibration_ids: Vec::new(),
             first_calibration_unix: 0,
             exclusion_decay_ids: Vec::new(),
@@ -4310,7 +4338,7 @@ impl MatchRepository {
                     update.mu,
                     update.sigma,
                     OPENSKILL_ALGORITHM_VERSION,
-                    OPENSKILL_ALGORITHM_FINGERPRINT,
+                    core.openskill_algorithm_fingerprint,
                     update.discord_id,
                     guild_id
                 ],
@@ -4358,7 +4386,12 @@ impl MatchRepository {
             match_id,
             &core.winning_ids,
         )?;
-        upsert_match_prediction(&transaction, match_id, &core.match_prediction)?;
+        upsert_match_prediction(
+            &transaction,
+            match_id,
+            &core.match_prediction,
+            &core.openskill_algorithm_fingerprint,
+        )?;
         for history in &core.rating_history_rows {
             insert_rating_history(
                 &transaction,
@@ -4366,6 +4399,7 @@ impl MatchRepository {
                 history,
                 Some(match_id),
                 core.streak_defaults,
+                &core.openskill_algorithm_fingerprint,
             )?;
         }
         decrement_match_consumables(
@@ -4564,6 +4598,7 @@ fn insert_rating_history(
     entry: &NewCoreRatingHistory,
     match_id: Option<i64>,
     defaults: StreakInsertDefaults,
+    openskill_algorithm_fingerprint: &str,
 ) -> Result<(), rusqlite::Error> {
     connection.execute(
         "INSERT INTO rating_history (
@@ -4597,7 +4632,7 @@ fn insert_rating_history(
             entry.os_sigma_after,
             entry.fantasy_weight,
             OPENSKILL_ALGORITHM_VERSION,
-            OPENSKILL_ALGORITHM_FINGERPRINT,
+            openskill_algorithm_fingerprint,
             entry.streak_length,
             entry.streak_multiplier,
             entry
@@ -4652,7 +4687,7 @@ fn insert_sparse_rating_history(
             entry.os_sigma_after,
             entry.fantasy_weight,
             OPENSKILL_ALGORITHM_VERSION,
-            OPENSKILL_ALGORITHM_FINGERPRINT,
+            CamaOpenSkillSystem::default().algorithm_fingerprint(),
             entry.streak_length,
             entry.streak_multiplier,
         ],
@@ -4913,6 +4948,7 @@ fn upsert_match_prediction(
     transaction: &Transaction<'_>,
     match_id: i64,
     prediction: &MatchPredictionSnapshot,
+    openskill_algorithm_fingerprint: &str,
 ) -> Result<(), rusqlite::Error> {
     transaction.execute(
         "INSERT INTO match_predictions (
@@ -4942,7 +4978,7 @@ fn upsert_match_prediction(
             prediction.openskill_radiant_win_prob,
             prediction.openskill_raw_radiant_win_prob,
             OPENSKILL_ALGORITHM_VERSION,
-            OPENSKILL_ALGORITHM_FINGERPRINT,
+            openskill_algorithm_fingerprint,
         ],
     )?;
     Ok(())
@@ -5602,17 +5638,49 @@ mod tests {
             [12_349, 99_999, 12_348]
         );
         assert_eq!(
-            timestamps.get(&12_349).unwrap().last_wheel_spin,
-            Value::Text("three hundred".to_owned())
+            timestamps.get(&12_349).unwrap(),
+            &ReminderTimestamps::default(),
+            "non-numeric legacy text and NULL read as no timestamp"
         );
         assert_eq!(
             timestamps.get(&99_999),
             Some(&ReminderTimestamps::default())
         );
         assert_eq!(
-            timestamps.get(&12_348).unwrap().last_wheel_spin,
-            Value::Integer(100)
+            timestamps.get(&12_348),
+            Some(&ReminderTimestamps {
+                last_wheel_spin: Some(100),
+                last_trivia_session: Some(200),
+            })
         );
+    }
+
+    #[test]
+    fn reminder_timestamps_coerce_dynamic_sqlite_values() {
+        for (value, expected) in [
+            (Value::Integer(7), Some(7)),
+            (Value::Real(8.9), Some(8)),
+            (Value::Real(f64::NAN), None),
+            (Value::Text("9".to_owned()), Some(9)),
+            (Value::Text("9.5".to_owned()), None),
+            (Value::Blob(vec![1]), None),
+            (Value::Null, None),
+        ] {
+            assert_eq!(sqlite_unix_seconds((&value).into()), expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn stored_match_dates_parse_rfc3339_and_sqlite_text() {
+        assert_eq!(
+            parse_sql_datetime("2026-08-12T01:02:03+02:00").map(|date| date.to_rfc3339()),
+            Some("2026-08-11T23:02:03+00:00".to_owned())
+        );
+        assert_eq!(
+            parse_sql_datetime("2026-08-12 01:02:03.5").map(|date| date.to_rfc3339()),
+            Some("2026-08-12T01:02:03.500+00:00".to_owned())
+        );
+        assert_eq!(parse_sql_datetime("yesterday"), None);
     }
 
     #[test]
@@ -9604,6 +9672,60 @@ mod tests {
             assert!(player.glicko_rd.unwrap() < 350.0);
             assert_eq!((player.wins, player.losses), (0, 1));
         }
+    }
+
+    #[test]
+    fn match_recording_stamps_the_configured_openskill_fingerprint() {
+        let fixture = Fixture::new();
+        let player_ids = (93_101..93_111).collect::<Vec<_>>();
+        for discord_id in player_ids.iter().copied() {
+            add_rated_player(
+                &fixture,
+                discord_id,
+                format!("P{discord_id}"),
+                1_500.0,
+                None,
+            );
+        }
+        let configured =
+            CamaOpenSkillSystem::with_config(cama_domain::openskill::OpenSkillConfig {
+                performance_strength: 0.5,
+                ..cama_domain::openskill::OpenSkillConfig::default()
+            })
+            .unwrap()
+            .algorithm_fingerprint();
+        assert_ne!(
+            configured,
+            CamaOpenSkillSystem::default().algorithm_fingerprint()
+        );
+        let mut core = core_match(&player_ids[..5], &player_ids[5..], 1);
+        core.openskill_algorithm_fingerprint.clone_from(&configured);
+        core.openskill_updates.push(CoreOpenSkillUpdate {
+            discord_id: player_ids[0],
+            mu: 27.0,
+            sigma: 7.0,
+        });
+        core.rating_history_rows.push(NewCoreRatingHistory {
+            discord_id: player_ids[0],
+            rating: Some(1_510.0),
+            won: Some(true),
+            ..NewCoreRatingHistory::default()
+        });
+        let match_id = fixture.matches.record_match_core_atomic(&core).unwrap();
+        let connection = fixture.connection();
+        let stamps: (String, String, String) = connection
+            .query_row(
+                "SELECT p.os_algorithm_fingerprint, h.os_algorithm_fingerprint,
+                        m.openskill_algorithm_fingerprint
+                 FROM players p
+                 JOIN rating_history h ON h.discord_id=p.discord_id AND h.match_id=?2
+                 JOIN match_predictions m ON m.match_id=?2
+                 WHERE p.discord_id=?1 AND p.guild_id=?3",
+                params![player_ids[0], match_id, TEST_GUILD_ID],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stamps, (configured.clone(), configured.clone(), configured));
     }
 
     #[test]

@@ -11,12 +11,12 @@ use cama_db::registration_repository::{
     RegisterPlayerRequest, RegisteredPlayer, RegistrationRepository,
 };
 use cama_domain::openskill::CamaOpenSkillSystem;
+pub use cama_domain::openskill::OPENSKILL_ALGORITHM_VERSION;
 use cama_domain::rating::CamaRatingSystem;
 use thiserror::Error;
 
 pub const STEAM_ID64_OFFSET: i64 = 76_561_197_960_265_728;
 pub const STEAM_ACCOUNT_ID_UPPER_BOUND: i64 = 1_i64 << 32;
-pub const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
 
 /// A truthy OpenDota MMR scalar. OpenDota has historically returned both JSON
 /// numbers and numeric strings for these fields.

@@ -633,3 +633,43 @@ fn dota_signup_respects_orphaned_deadlock_ownership_across_guilds() {
         .unwrap();
     assert_eq!(fixture.repository.steam_owner(12345).unwrap(), Some(100));
 }
+
+#[test]
+fn corrupt_mmr_prompts_report_a_typed_decode_error() {
+    let fixture = Fixture::new();
+    fixture
+        .connection()
+        .execute_batch(
+            "CREATE TABLE app_kv (
+                guild_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+                PRIMARY KEY (guild_id, key)
+            );",
+        )
+        .unwrap();
+    let state = MmrPromptState {
+        nonce: 7,
+        discord_id: 100,
+        guild_id: GUILD,
+        steam_id: 12_345,
+        attempts: 1,
+        expires_at: 1_700_000_000,
+        completed: false,
+    };
+    fixture.repository.save_mmr_prompt(&state).unwrap();
+    assert_eq!(
+        fixture.repository.mmr_prompt(GUILD, 7).unwrap(),
+        Some(state)
+    );
+    fixture
+        .connection()
+        .execute(
+            "UPDATE app_kv SET value='100:not-a-steam-id:1:0:0' WHERE key='registration:mmr:7'",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture.repository.mmr_prompt(GUILD, 7),
+        Err(RegistrationRepositoryError::InvalidMmrPrompt { nonce: 7, ref value })
+            if value == "100:not-a-steam-id:1:0:0"
+    ));
+}

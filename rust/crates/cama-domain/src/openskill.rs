@@ -12,6 +12,10 @@ use std::fmt::Write as _;
 
 use crate::rating::low_mmr_win_multiplier;
 
+/// Version stamped beside every persisted OpenSkill rating. Bump it together
+/// with the replay migration that rewrites stored ratings for a new algorithm.
+pub const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
+
 /// A player's Gaussian OpenSkill belief.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rating {

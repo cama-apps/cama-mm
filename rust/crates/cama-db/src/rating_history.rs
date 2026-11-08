@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use cama_domain::openskill::CamaOpenSkillSystem;
+use cama_domain::openskill::{CamaOpenSkillSystem, OPENSKILL_ALGORITHM_VERSION};
 use cama_domain::rating::{MAX_GLICKO_RD, cap_glicko_rd};
 use chrono::Utc;
 use rusqlite::types::{Value, ValueRef};
@@ -20,8 +20,6 @@ use rusqlite::{
 use thiserror::Error;
 
 use crate::open_runtime_connection;
-
-const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
 
 /// The subset of a Python `rating_history` write used by the rating policy.
 ///

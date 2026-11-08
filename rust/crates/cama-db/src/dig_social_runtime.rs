@@ -1028,7 +1028,7 @@ impl DigSocialRuntimeRepository {
     }
 
     fn connection(&self) -> Result<Connection, rusqlite::Error> {
-        Connection::open(&self.path)
+        crate::open_runtime_connection(&self.path)
     }
 }
 

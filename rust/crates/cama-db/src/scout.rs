@@ -4,13 +4,13 @@
 //! opens the initialized database without SQLite's create flag and performs only
 //! the aggregate reads used by the live Scout command.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::params_from_iter;
 use thiserror::Error;
 
-use crate::open_runtime_connection;
+use crate::{open_runtime_connection, steam_identity};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeroStat {
@@ -218,66 +218,12 @@ impl ScoutRepository {
         if discord_ids.is_empty() {
             return Ok(BTreeMap::new());
         }
-
-        let unique_ids = discord_ids.iter().copied().collect::<BTreeSet<_>>();
-        let mut result = unique_ids
-            .iter()
-            .copied()
-            .map(|discord_id| (discord_id, Vec::new()))
-            .collect::<BTreeMap<_, _>>();
-        let mut junction_found = BTreeSet::new();
         let connection = open_runtime_connection(&self.path)?;
-        let unique_ids = unique_ids.into_iter().collect::<Vec<_>>();
-
-        for chunk in unique_ids.chunks(900) {
-            let placeholders = repeat_placeholders(chunk.len());
-            let sql = format!(
-                "SELECT discord_id, steam_id
-                   FROM player_steam_ids
-                  WHERE discord_id IN ({placeholders})
-                  ORDER BY discord_id, is_primary DESC, added_at ASC"
-            );
-            let mut statement = connection.prepare(&sql)?;
-            let rows = statement.query_map(params_from_iter(chunk.iter().copied()), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                let (discord_id, steam_id) = row?;
-                result.entry(discord_id).or_default().push(steam_id);
-                junction_found.insert(discord_id);
-            }
-        }
-
-        let missing = unique_ids
-            .into_iter()
-            .filter(|discord_id| !junction_found.contains(discord_id))
-            .collect::<Vec<_>>();
-        for chunk in missing.chunks(900) {
-            let placeholders = repeat_placeholders(chunk.len());
-            let guild_clause = guild_id.map_or("", |_| " AND guild_id = ?");
-            let sql = format!(
-                "SELECT discord_id, steam_id
-                   FROM players
-                  WHERE discord_id IN ({placeholders})
-                    AND steam_id IS NOT NULL{guild_clause}"
-            );
-            let mut parameters = chunk.to_vec();
-            if let Some(guild_id) = guild_id {
-                parameters.push(guild_id);
-            }
-            let mut statement = connection.prepare(&sql)?;
-            let rows = statement.query_map(params_from_iter(parameters), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                let (discord_id, steam_id) = row?;
-                let steam_ids = result.entry(discord_id).or_default();
-                if steam_ids.is_empty() {
-                    steam_ids.push(steam_id);
-                }
-            }
-        }
-        Ok(result)
+        Ok(
+            steam_identity::steam_ids_bulk(&connection, discord_ids, guild_id)?
+                .into_iter()
+                .collect(),
+        )
     }
 }
 

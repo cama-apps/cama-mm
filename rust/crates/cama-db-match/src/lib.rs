@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 pub(crate) use cama_db_core::schema_manager;
-pub(crate) use cama_db_core::{json_numeric, open_runtime_connection};
+pub(crate) use cama_db_core::{json_numeric, open_runtime_connection, steam_identity};
 
 #[path = "../../cama-db/src/core_repositories.rs"]
 pub mod core_repositories;

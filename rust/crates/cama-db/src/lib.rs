@@ -16,6 +16,7 @@ pub mod json_numeric;
 pub mod profit_deductions;
 pub mod schema_manager;
 pub mod schema_manager_contracts;
+pub mod steam_identity;
 #[cfg(test)]
 pub(crate) use cama_db_match::core_repositories;
 #[cfg(test)]

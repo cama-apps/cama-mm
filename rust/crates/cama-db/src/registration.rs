@@ -12,7 +12,7 @@ use cama_domain::rating::cap_glicko_rd;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
-use crate::open_runtime_connection;
+use crate::{open_runtime_connection, steam_identity};
 
 pub const STEAM_ACCOUNT_ID_UPPER_BOUND: i64 = 1_i64 << 32;
 
@@ -77,6 +77,8 @@ pub enum RegistrationRepositoryError {
     SteamAlreadyOwned { steam_id: i64, owner_id: i64 },
     #[error("invalid Steam32 account ID {0}")]
     InvalidSteamId(i64),
+    #[error("invalid persisted MMR prompt {nonce}: {value}")]
+    InvalidMmrPrompt { nonce: u64, value: String },
 }
 
 #[derive(Clone, Debug)]
@@ -170,7 +172,7 @@ impl RegistrationRepository {
                 guild_id,
             });
         }
-        if let Some(owner_id) = steam_owner(&transaction, request.steam_id)?
+        if let Some(owner_id) = steam_identity::steam_id_owner(&transaction, request.steam_id)?
             && owner_id != request.discord_id
         {
             return Err(RegistrationRepositoryError::SteamAlreadyOwned {
@@ -243,7 +245,7 @@ impl RegistrationRepository {
 
     pub fn steam_owner(&self, steam_id: i64) -> Result<Option<i64>, RegistrationRepositoryError> {
         let connection = self.connection()?;
-        steam_owner(&connection, steam_id).map_err(Into::into)
+        steam_identity::steam_id_owner(&connection, steam_id).map_err(Into::into)
     }
 
     pub fn primary_steam_id(
@@ -497,10 +499,9 @@ fn decode_mmr_prompt(
     guild_id: i64,
     value: &str,
 ) -> Result<MmrPromptState, RegistrationRepositoryError> {
-    let invalid = || {
-        rusqlite::Error::InvalidParameterName(format!(
-            "invalid persisted MMR prompt {nonce}: {value}"
-        ))
+    let invalid = || RegistrationRepositoryError::InvalidMmrPrompt {
+        nonce,
+        value: value.to_owned(),
     };
     let mut values = value.split(':');
     let discord_id = values
@@ -526,10 +527,10 @@ fn decode_mmr_prompt(
     let completed = match values.next() {
         Some("0") => false,
         Some("1") => true,
-        _ => return Err(invalid().into()),
+        _ => return Err(invalid()),
     };
     if values.next().is_some() {
-        return Err(invalid().into());
+        return Err(invalid());
     }
     Ok(MmrPromptState {
         nonce,
@@ -547,26 +548,6 @@ fn validate_steam_id(steam_id: i64) -> Result<(), RegistrationRepositoryError> {
         return Err(RegistrationRepositoryError::InvalidSteamId(steam_id));
     }
     Ok(())
-}
-
-fn steam_owner(connection: &Connection, steam_id: i64) -> Result<Option<i64>, rusqlite::Error> {
-    let junction = connection
-        .query_row(
-            "SELECT discord_id FROM player_steam_ids WHERE steam_id = ?1",
-            [steam_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if junction.is_some() {
-        return Ok(junction);
-    }
-    connection
-        .query_row(
-            "SELECT discord_id FROM players WHERE steam_id = ?1 UNION SELECT discord_id FROM deadlock_players WHERE steam_id = ?1 LIMIT 1",
-            [steam_id],
-            |row| row.get(0),
-        )
-        .optional()
 }
 
 // Python writes and reads this column with `json`, so both directions
