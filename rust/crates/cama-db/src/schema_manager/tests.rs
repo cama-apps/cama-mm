@@ -2969,3 +2969,94 @@ fn pending_dig_delivery_index_supports_fresh_upgrade_and_idempotent_retry() {
         );
     }
 }
+
+#[test]
+fn wrapped_item_facts_backfill_from_enrichment_data() {
+    let payload = serde_json::json!({
+        "players": [
+            {"account_id": 555, "buyback_count": 2, "purchase_log": [
+                {"key": "magic_wand"}, {"key": "magic_wand"}, {"key": "blink"},
+                {"key": "ward_observer"}, {"key": "rapier"}
+            ]},
+            {"account_id": 556, "purchase_log": [{"key": "ward_observer"}]},
+            {"account_id": 557}
+        ]
+    })
+    .to_string();
+    let read = |connection: &Connection, discord_id: i64| {
+        connection
+            .query_row(
+                "SELECT buybacks, item_counts FROM wrapped_enrichment_facts
+                  WHERE guild_id=10 AND match_id=1 AND discord_id=?1",
+                [discord_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    for upgrade in [false, true] {
+        let database = empty_database();
+        initialize_or_migrate(database.path()).unwrap();
+        let connection = open_runtime_connection(database.path()).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO players(discord_id,guild_id,discord_username,steam_id)
+                   VALUES(1,10,'a',555),(2,10,'b',556),(3,10,'c',557);
+                 INSERT INTO matches(match_id,guild_id,valve_match_id,team1_players,team2_players)
+                   VALUES(1,10,900,'[1,2,3]','[]');
+                 INSERT INTO match_participants(match_id,guild_id,discord_id,team_number,won,side)
+                   VALUES(1,10,1,1,1,'radiant'),(1,10,2,1,1,'radiant'),(1,10,3,1,1,'radiant');",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE matches SET enrichment_data=?1 WHERE match_id=1",
+                [&payload],
+            )
+            .unwrap();
+        if upgrade {
+            connection
+                .execute_batch(
+                    "ALTER TABLE wrapped_enrichment_facts DROP COLUMN buybacks;
+                     ALTER TABLE wrapped_enrichment_facts DROP COLUMN item_counts;
+                     DELETE FROM schema_migrations WHERE name='add_wrapped_item_facts';",
+                )
+                .unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        if upgrade {
+            assert!(
+                report
+                    .newly_applied
+                    .iter()
+                    .any(|name| name == "add_wrapped_item_facts")
+            );
+        } else {
+            connection
+                .execute(
+                    "DELETE FROM schema_migrations WHERE name='add_wrapped_item_facts'",
+                    [],
+                )
+                .unwrap();
+            initialize_or_migrate(database.path()).unwrap();
+        }
+        let expected = (
+            Some(2),
+            Some(r#"{"blink":1,"magic_wand":2,"rapier":1}"#.to_owned()),
+        );
+        assert_eq!(read(&connection, 1), expected);
+        assert_eq!(read(&connection, 2), (None, Some("{}".to_owned())));
+        assert_eq!(read(&connection, 3), (None, None));
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .newly_applied
+                .is_empty()
+        );
+        assert_eq!(read(&connection, 1), expected);
+    }
+}

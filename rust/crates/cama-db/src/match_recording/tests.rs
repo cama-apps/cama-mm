@@ -326,6 +326,8 @@ impl Fixture {
                      lane_role INTEGER,
                      comeback INTEGER,
                      throw INTEGER,
+                     buybacks INTEGER,
+                     item_counts TEXT,
                      PRIMARY KEY (guild_id, match_id, discord_id)
                  );
                  CREATE TABLE match_bans (
@@ -714,6 +716,8 @@ fn test_atomic_write_wipe_and_reenrich_keep_compact_facts_consistent() {
             lane_role: Some(2),
             comeback: Some(9_000),
             throw_amount: Some(4_000),
+            buybacks: Some(2),
+            item_counts: Some(BTreeMap::from([("blink".to_owned(), 1)])),
         },
         WrappedEnrichmentFactUpdate {
             discord_id: dire[0],
@@ -724,6 +728,8 @@ fn test_atomic_write_wipe_and_reenrich_keep_compact_facts_consistent() {
             lane_role: None,
             comeback: Some(9_000),
             throw_amount: Some(4_000),
+            buybacks: None,
+            item_counts: None,
         },
         WrappedEnrichmentFactUpdate {
             discord_id: 999_999,
@@ -734,6 +740,8 @@ fn test_atomic_write_wipe_and_reenrich_keep_compact_facts_consistent() {
             lane_role: None,
             comeback: None,
             throw_amount: None,
+            buybacks: None,
+            item_counts: None,
         },
     ];
     fixture
@@ -795,6 +803,8 @@ fn test_atomic_write_wipe_and_reenrich_keep_compact_facts_consistent() {
             lane_role: Some(2),
             comeback: Some(123),
             throw_amount: Some(456),
+            buybacks: None,
+            item_counts: None,
         },
         WrappedEnrichmentFactUpdate {
             discord_id: dire[0],
@@ -805,6 +815,8 @@ fn test_atomic_write_wipe_and_reenrich_keep_compact_facts_consistent() {
             lane_role: None,
             comeback: Some(123),
             throw_amount: Some(456),
+            buybacks: None,
+            item_counts: None,
         },
     ];
     fixture
@@ -2316,4 +2328,93 @@ fn compensating_a_win_bonus_restores_the_consumed_penalty_game() {
         )
         .expect("compensate participation");
     assert_eq!(remaining(), 1);
+}
+
+#[test]
+fn wrapped_item_facts_round_trip_buybacks_and_item_counts() {
+    let fixture = Fixture::new();
+    let (radiant, dire) = teams(39_001);
+    let participants = [radiant.clone(), dire.clone()].concat();
+    fixture.seed(&participants);
+    let match_id = insert_recorded_match(&fixture, &radiant, &dire);
+    let facts = [
+        WrappedEnrichmentFactUpdate {
+            discord_id: radiant[0],
+            actions_per_min: None,
+            courier_kills: None,
+            pings: None,
+            rapier_count: 0,
+            lane_role: None,
+            comeback: None,
+            throw_amount: None,
+            buybacks: Some(2),
+            item_counts: Some(BTreeMap::from([
+                ("blink".to_owned(), 1),
+                ("magic_wand".to_owned(), 2),
+            ])),
+        },
+        WrappedEnrichmentFactUpdate {
+            discord_id: radiant[1],
+            actions_per_min: None,
+            courier_kills: None,
+            pings: None,
+            rapier_count: 0,
+            lane_role: None,
+            comeback: None,
+            throw_amount: None,
+            buybacks: None,
+            item_counts: Some(BTreeMap::new()),
+        },
+        WrappedEnrichmentFactUpdate {
+            discord_id: dire[0],
+            actions_per_min: None,
+            courier_kills: None,
+            pings: None,
+            rapier_count: 0,
+            lane_role: None,
+            comeback: None,
+            throw_amount: None,
+            buybacks: None,
+            item_counts: None,
+        },
+    ];
+    fixture
+        .repository
+        .apply_enrichment_atomic(MatchEnrichmentRequest {
+            match_id,
+            guild_id: Some(GUILD),
+            valve_match_id: 8_000_000_003,
+            duration_seconds: 2_400,
+            radiant_score: 30,
+            dire_score: 20,
+            game_mode: 2,
+            enrichment_data: Some(r#"{"players":[]}"#),
+            enrichment_source: Some("manual"),
+            enrichment_confidence: None,
+            participant_updates: &[],
+            wrapped_facts: &facts,
+        })
+        .expect("write item facts");
+    let read = |discord_id: i64| {
+        fixture
+            .connection()
+            .query_row(
+                "SELECT buybacks, item_counts FROM wrapped_enrichment_facts
+                  WHERE match_id = ?1 AND discord_id = ?2",
+                params![match_id, discord_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        read(radiant[0]),
+        (Some(2), Some(r#"{"blink":1,"magic_wand":2}"#.to_owned()))
+    );
+    assert_eq!(read(radiant[1]), (None, Some("{}".to_owned())));
+    assert_eq!(read(dire[0]), (None, None));
 }

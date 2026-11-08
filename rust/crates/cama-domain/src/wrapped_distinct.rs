@@ -33,6 +33,18 @@ pub const TRACKED_ITEMS: [&str; 8] = [
     "radiance",
 ];
 
+/// Purchase counts per tracked item (plus rapiers) from OpenDota purchase-log
+/// keys. Untracked keys are ignored; an empty log yields an empty map.
+pub fn tracked_item_counts<'a>(keys: impl IntoIterator<Item = &'a str>) -> BTreeMap<String, i64> {
+    let mut counts = BTreeMap::new();
+    for key in keys {
+        if key == "rapier" || TRACKED_ITEMS.contains(&key) {
+            *counts.entry(key.to_owned()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
 /// Every metric key a story can carry. Item stories share the key `"item"`
 /// and name the item in `DistinctStory::item`.
 pub const METRIC_KEYS: &[&str] = &[

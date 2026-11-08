@@ -21,6 +21,7 @@ use cama_domain::rating::{
     CamaRatingSystem, LEGACY_STREAK_MULTIPLIER_PER_GAME, LEGACY_STREAK_THRESHOLD,
     NEW_PLAYER_MMR_DISCOUNT, STREAK_MULTIPLIER_PER_GAME, STREAK_THRESHOLD,
 };
+use cama_domain::wrapped_distinct::tracked_item_counts;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior, params};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -1355,7 +1356,9 @@ fn run_consolidated_backfills(
     if pending(pending_migrations, "recompute_symmetric_glicko_predictions") {
         backfill_glicko_probabilities(transaction)?;
     }
-    if pending(pending_migrations, "create_wrapped_enrichment_facts") {
+    if pending(pending_migrations, "create_wrapped_enrichment_facts")
+        || pending(pending_migrations, "add_wrapped_item_facts")
+    {
         backfill_wrapped_enrichment(transaction)?;
     }
     if pending(
@@ -2103,6 +2106,20 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
                         .and_then(JsonValue::as_i64)
                         .is_some_and(|account_id| ids.contains(&account_id))
                 });
+            let purchase_keys = player
+                .and_then(|fields| fields.get("purchase_log"))
+                .and_then(JsonValue::as_array)
+                .map(|purchases| {
+                    purchases
+                        .iter()
+                        .filter_map(|item| item.get("key").and_then(JsonValue::as_str))
+                        .collect::<Vec<_>>()
+                });
+            let item_counts = purchase_keys
+                .map(tracked_item_counts)
+                .map(|counts| serde_json::to_string(&counts))
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             let rapier_count = player
                 .and_then(|fields| fields.get("purchase_log"))
                 .and_then(JsonValue::as_array)
@@ -2121,14 +2138,15 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
             transaction.execute(
                 "INSERT INTO wrapped_enrichment_facts(
                    guild_id,match_id,discord_id,actions_per_min,courier_kills,
-                   pings,rapier_count,lane_role,comeback,throw
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                   pings,rapier_count,lane_role,comeback,throw,buybacks,item_counts
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
                  ON CONFLICT(guild_id,match_id,discord_id) DO UPDATE SET
                    actions_per_min=excluded.actions_per_min,
                    courier_kills=excluded.courier_kills,
                    pings=excluded.pings,rapier_count=excluded.rapier_count,
                    lane_role=excluded.lane_role,comeback=excluded.comeback,
-                   throw=excluded.throw",
+                   throw=excluded.throw,buybacks=excluded.buybacks,
+                   item_counts=excluded.item_counts",
                 params![
                     guild_id,
                     match_id,
@@ -2140,6 +2158,8 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
                     json_number_i64(player.and_then(|fields| fields.get("lane_role"))),
                     json_number_f64(payload.get("comeback")),
                     json_number_f64(payload.get("throw")),
+                    json_number_i64(player.and_then(|fields| fields.get("buyback_count"))),
+                    item_counts,
                 ],
             )?;
         }

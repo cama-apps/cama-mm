@@ -4,6 +4,7 @@
 //! The match row, participants, ratings, and pairings themselves are recorded
 //! by `MatchRepository::record_match_core_atomic`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use cama_db_core::profit_deductions::{
@@ -175,7 +176,7 @@ pub struct EnrichmentParticipantUpdate {
     pub fantasy_points: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WrappedEnrichmentFactUpdate {
     pub discord_id: i64,
     pub actions_per_min: Option<i64>,
@@ -185,6 +186,9 @@ pub struct WrappedEnrichmentFactUpdate {
     pub lane_role: Option<i64>,
     pub comeback: Option<i64>,
     pub throw_amount: Option<i64>,
+    pub buybacks: Option<i64>,
+    /// Tracked-item purchase counts; `None` when no purchase log was available.
+    pub item_counts: Option<BTreeMap<String, i64>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -722,12 +726,19 @@ impl MatchRecordingRepository {
             params![guild_id, request.match_id],
         )?;
         for fact in request.wrapped_facts {
+            let item_counts = fact
+                .item_counts
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             transaction.execute(
                 "INSERT INTO wrapped_enrichment_facts (
                      guild_id, match_id, discord_id, actions_per_min,
-                     courier_kills, pings, rapier_count, lane_role, comeback, throw
+                     courier_kills, pings, rapier_count, lane_role, comeback, throw,
+                     buybacks, item_counts
                  )
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
                   WHERE EXISTS (
                      SELECT 1 FROM match_participants
                       WHERE guild_id = ?1 AND match_id = ?2 AND discord_id = ?3
@@ -739,7 +750,9 @@ impl MatchRecordingRepository {
                      rapier_count = excluded.rapier_count,
                      lane_role = excluded.lane_role,
                      comeback = excluded.comeback,
-                     throw = excluded.throw",
+                     throw = excluded.throw,
+                     buybacks = excluded.buybacks,
+                     item_counts = excluded.item_counts",
                 params![
                     guild_id,
                     request.match_id,
@@ -751,6 +764,8 @@ impl MatchRecordingRepository {
                     fact.lane_role,
                     fact.comeback,
                     fact.throw_amount,
+                    fact.buybacks,
+                    item_counts,
                 ],
             )?;
         }

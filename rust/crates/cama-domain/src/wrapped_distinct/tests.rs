@@ -2,6 +2,26 @@ use chrono::{TimeZone, Utc};
 
 use super::*;
 
+#[test]
+fn tracked_item_counts_keep_only_tracked_keys_and_rapiers() {
+    let counts = tracked_item_counts([
+        "magic_wand",
+        "blink",
+        "magic_wand",
+        "rapier",
+        "ward_observer",
+    ]);
+    assert_eq!(
+        counts,
+        BTreeMap::from([
+            ("blink".to_owned(), 1),
+            ("magic_wand".to_owned(), 2),
+            ("rapier".to_owned(), 1),
+        ])
+    );
+    assert!(tracked_item_counts(["ward_observer"]).is_empty());
+}
+
 const SINGLE_GAME_KEYS: &[&str] = &[
     "best_game",
     "kill_loss",

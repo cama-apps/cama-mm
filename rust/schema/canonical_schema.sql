@@ -1794,6 +1794,8 @@ CREATE TABLE wrapped_enrichment_facts (
                 lane_role      INTEGER,
                 comeback       NUMERIC,
                 throw          NUMERIC,
+                buybacks       INTEGER,
+                item_counts    TEXT,
                 PRIMARY KEY (guild_id, match_id, discord_id),
                 FOREIGN KEY (match_id, discord_id)
                     REFERENCES match_participants(match_id, discord_id)

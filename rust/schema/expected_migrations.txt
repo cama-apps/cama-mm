@@ -259,3 +259,4 @@ index_guild_normalized_match_dates
 restore_pending_match_id_high_water_mark
 index_economy_ledger_related_markers
 index_pending_dig_deliveries
+add_wrapped_item_facts

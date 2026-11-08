@@ -1532,11 +1532,15 @@ fn test_enrich_match_projects_wrapped_facts_for_every_participant() {
         courier_kills: Some(2),
         pings: Some(44),
         lane_role: Some(2),
-        purchase_keys: vec![
+        buyback_count: Some(2),
+        purchase_keys: Some(vec![
             "rapier".to_owned(),
             "ward_observer".to_owned(),
+            "magic_wand".to_owned(),
             "rapier".to_owned(),
-        ],
+            "magic_wand".to_owned(),
+            "blink".to_owned(),
+        ]),
     };
     let mut details = enrichment_details(vec![matched_player]);
     details.comeback = Some(9_000);
@@ -1574,6 +1578,12 @@ fn test_enrich_match_projects_wrapped_facts_for_every_participant() {
                 lane_role: Some(2),
                 comeback: Some(9_000),
                 throw_amount: Some(4_000),
+                buybacks: Some(2),
+                item_counts: Some(BTreeMap::from([
+                    ("blink".to_owned(), 1),
+                    ("magic_wand".to_owned(), 2),
+                    ("rapier".to_owned(), 2),
+                ])),
             },
             WrappedEnrichmentFact {
                 discord_id: UserId(200),
@@ -1584,7 +1594,40 @@ fn test_enrich_match_projects_wrapped_facts_for_every_participant() {
                 lane_role: None,
                 comeback: Some(9_000),
                 throw_amount: Some(4_000),
+                buybacks: None,
+                item_counts: None,
             },
+        ]
+    );
+}
+
+#[test]
+fn wrapped_projection_reads_buybacks_and_keeps_missing_purchase_log_unknown() {
+    let details = statistics::project_match_details(
+        serde_json::json!({"players": [
+            {"account_id": 1, "buyback_count": 2, "purchase_log": [{"key": "blink"}]},
+            {"account_id": 2, "purchase_log": []},
+            {"account_id": 3}
+        ]}),
+        7,
+    )
+    .expect("projection");
+    let wrapped = details
+        .players
+        .iter()
+        .map(|player| {
+            (
+                player.wrapped.buyback_count,
+                player.wrapped.purchase_keys.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wrapped,
+        [
+            (Some(2), Some(vec!["blink".to_owned()])),
+            (None, Some(Vec::new())),
+            (None, None),
         ]
     );
 }

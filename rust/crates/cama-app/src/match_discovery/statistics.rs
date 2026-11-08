@@ -47,12 +47,12 @@ fn project_match_player(value: &Value) -> Option<OpenDotaPlayer> {
     let purchase_keys = object
         .get("purchase_log")
         .and_then(Value::as_array)
-        .map_or_else(Vec::new, |entries| {
+        .map(|entries| {
             entries
                 .iter()
                 .filter_map(|entry| entry.get("key").and_then(Value::as_str))
                 .map(ToOwned::to_owned)
-                .collect()
+                .collect::<Vec<_>>()
         });
     Some(OpenDotaPlayer {
         account_id: field_i64(object, "account_id").map(SteamId),
@@ -118,6 +118,7 @@ fn project_match_player(value: &Value) -> Option<OpenDotaPlayer> {
             courier_kills: field_i64(object, "courier_kills"),
             pings: field_i64(object, "pings"),
             lane_role: field_i64(object, "lane_role"),
+            buyback_count: field_i64(object, "buyback_count"),
             purchase_keys,
         },
     })
