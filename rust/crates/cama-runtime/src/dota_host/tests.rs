@@ -2519,6 +2519,17 @@ async fn operator_can_resolve_stale_running_cache_with_complete_valve_end_eviden
             .unwrap()
             .is_empty()
     );
+    let state = f.state();
+    let status = format!(
+        "{}\n{}",
+        state.last_message,
+        state.pending_status.unwrap_or_default()
+    );
+    assert!(
+        status.contains("Operator Unknown player: Abandoned after server finished"),
+        "{status}"
+    );
+    assert!(!status.contains("<@"), "{status}");
 }
 
 #[tokio::test]
