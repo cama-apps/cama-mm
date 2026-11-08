@@ -45,7 +45,7 @@ use cama_db::neon_events::NeonEventRepository;
 use cama_db::shop_runtime::{HostileDestination as DbHostileDestination, ShopRuntimeRepository};
 use cama_db::tax_repository::{TaxLedgerEntry, TaxPlayerSnapshot, TaxRepository};
 use cama_db::tip_repository::{TipRepository, TipRepositoryError};
-use cama_domain::discord_content::UNKNOWN_PLAYER;
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::embed_safety::{FIELD_VALUE_LIMIT, MAX_FIELDS, TOTAL_LIMIT, truncate_field};
 use cama_domain::formatting::{JOPACOIN_EMOTE, format_grouped};
 use cama_domain::game_date::next_game_day_start_ts;
@@ -1603,6 +1603,8 @@ struct PendingDisburseVotes {
     requester_id: i64,
     proposal: DisbursementProposal,
     votes: Vec<DisbursementVote>,
+    /// Voter names, resolved once when the audit opens.
+    voter_names: GuildPlayerNameDirectory,
     page: usize,
     created_at: Instant,
 }
@@ -1786,6 +1788,23 @@ impl BettingInteractionHandler {
             .iter()
             .map(|user_id| (*user_id, names.resolve(*user_id)))
             .collect()
+    }
+
+    /// Cache and last-seen names for replies sent without a deferral, which
+    /// cannot wait on a member fetch.
+    fn cached_player_names(
+        &self,
+        guild_id: i64,
+        user_ids: impl IntoIterator<Item = i64>,
+    ) -> GuildPlayerNameDirectory {
+        let user_ids = user_ids
+            .into_iter()
+            .filter_map(|user_id| u64::try_from(user_id).ok())
+            .collect::<Vec<_>>();
+        u64::try_from(guild_id).map_or_else(
+            |_| GuildPlayerNameDirectory::default(),
+            |guild_id| cached_guild_player_names(self.discord.as_ref(), guild_id, &user_ids),
+        )
     }
 
     async fn expire_pending_views(&self) -> Result<usize, String> {
@@ -2131,8 +2150,15 @@ impl BettingInteractionHandler {
                     disbursement_proposal_response_with_disabled_buttons(&proposal),
                 )
                 .await;
+                let names = self.cached_player_names(
+                    guild_id,
+                    result
+                        .distributions
+                        .iter()
+                        .map(|(discord_id, _)| *discord_id),
+                );
                 return responder
-                    .respond(disbursement_response(&result, false))
+                    .respond(disbursement_response(&result, false, &names))
                     .await
                     .map_err(|error| error.to_string());
             }
@@ -4097,6 +4123,18 @@ impl BettingInteractionHandler {
             .unwrap_or_default()
         };
         let (fee, tithe) = tip_fee_and_tithe(amount, self.config.tip_fee_rate, &effects);
+        let rendered_names = self
+            .render_player_names(&[user_id, target], Some(guild_id))
+            .await;
+        let user_display_name = rendered_names
+            .get(&user_id)
+            .cloned()
+            .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned());
+        let target_name = rendered_names
+            .get(&target)
+            .cloned()
+            .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned());
+        let unregistered_target_name = target_name.clone();
         let path = self.database_path.clone();
         let result = sqlite("economy tip", move || {
             let players = PlayerRepository::new(&path);
@@ -4130,7 +4168,7 @@ impl BettingInteractionHandler {
                 .exists(target, Some(guild_id))
                 .map_err(|error| error.to_string())?
             {
-                return Err(format!("<@{target}> is not registered."));
+                return Err(format!("{unregistered_target_name} is not registered."));
             }
             TipRepository::new(&path)
                 .tip_atomic(Some(guild_id), user_id, target, amount, fee, tithe)
@@ -4276,23 +4314,12 @@ impl BettingInteractionHandler {
                 };
                 let response = responder
                     .followup(InteractionResponse::message(format!(
-                        "{prefix}<@{user_id}> tipped {amount} {JOPACOIN_EMOTE} to <@{target}>! \
+                        "{prefix}{user_display_name} tipped {amount} {JOPACOIN_EMOTE} to {target_name}! \
                          ({fee} {JOPACOIN_EMOTE} fee to Jopacoin Reserve){suffix}"
-                    )))
+                    )).without_mentions())
                     .await
                     .map_err(|error| error.to_string());
                 if response.is_ok() {
-                    let rendered_names = self
-                        .render_player_names(&[user_id, target], Some(guild_id))
-                        .await;
-                    let user_display_name = rendered_names
-                        .get(&user_id)
-                        .cloned()
-                        .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned());
-                    let target_name = rendered_names
-                        .get(&target)
-                        .cloned()
-                        .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned());
                     self.emit_tip_neon(
                         channel_id,
                         user_id,
@@ -4355,13 +4382,21 @@ impl BettingInteractionHandler {
         })
         .await;
         match result {
-            Ok(payment) => responder
-                .followup(InteractionResponse::message(format!(
-                    "<@{user_id}> paid {} {} toward <@{target}>'s debt!",
-                    payment.amount_paid, JOPACOIN_EMOTE
-                )))
-                .await
-                .map_err(|error| error.to_string()),
+            Ok(payment) => {
+                let names = self
+                    .render_player_names(&[user_id, target], Some(guild_id))
+                    .await;
+                responder
+                    .followup(
+                        InteractionResponse::message(format!(
+                            "{} paid {} {} toward {}'s debt!",
+                            names[&user_id], payment.amount_paid, JOPACOIN_EMOTE, names[&target]
+                        ))
+                        .without_mentions(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+            }
             Err(error) => followup_ephemeral(responder, &error).await,
         }
     }
@@ -4427,7 +4462,7 @@ impl BettingInteractionHandler {
                     cama_domain::bankruptcy::withheld_rate(per_game, penalty_games) * 100.0;
                 let per_game = per_game * 100.0;
                 format!(
-                    "**<@{user_id}> HAS DECLARED BANKRUPTCY**\n\n\
+                    "**{user_display_name} HAS DECLARED BANKRUPTCY**\n\n\
                      **Details:**\n\
                      Debt cleared: {debt_cleared} {JOPACOIN_EMOTE}\n\
                      Penalty: {withheld_now:.0}% of profit withheld \
@@ -4440,16 +4475,16 @@ impl BettingInteractionHandler {
                 "You need to /player register before you can declare bankruptcy.".to_owned()
             }
             DeclarationOutcome::NotInDebt { balance } => format!(
-                "<@{user_id}> tried to declare bankruptcy, but has no debt.\n\
+                "{user_display_name} tried to declare bankruptcy, but has no debt.\n\
                  Their balance: {balance} {JOPACOIN_EMOTE}"
             ),
             DeclarationOutcome::Cooldown { remaining_seconds } => format!(
-                "<@{user_id}> cannot file again yet. Try again <t:{}:R>.",
+                "{user_display_name} cannot file again yet. Try again <t:{}:R>.",
                 unix_seconds()?.saturating_add(remaining_seconds)
             ),
         };
         let response = responder
-            .followup(InteractionResponse::message(content))
+            .followup(InteractionResponse::message(content).without_mentions())
             .await
             .map_err(|error| error.to_string());
         if response.is_ok()
@@ -4731,11 +4766,20 @@ impl BettingInteractionHandler {
             let recipients = if last.recipients.is_empty() {
                 "No recipients".to_owned()
             } else {
+                let names = self.cached_player_names(
+                    guild_id.unwrap_or_default(),
+                    last.recipients
+                        .iter()
+                        .take(3)
+                        .map(|(discord_id, _)| *discord_id),
+                );
                 let mut lines = last
                     .recipients
                     .iter()
                     .take(3)
-                    .map(|(discord_id, amount)| format!("<@{discord_id}>: +{amount}"))
+                    .map(|(discord_id, amount)| {
+                        format!("{}: +{amount}", names.resolve(*discord_id))
+                    })
                     .collect::<Vec<_>>();
                 if last.recipients.len() > 3 {
                     lines.push(format!("+{} more", last.recipients.len() - 3));
@@ -4874,10 +4918,13 @@ impl BettingInteractionHandler {
                         .map_err(|error| error.to_string())
                 })
                 .await?;
+                let target_name = self
+                    .cached_player_names(guild_id, [target_id])
+                    .resolve(target_id);
                 let content = if removed {
-                    format!("Removed your investment in <@{target_id}>.")
+                    format!("Removed your investment in {target_name}.")
                 } else {
-                    format!("You do not have an investment in <@{target_id}>.")
+                    format!("You do not have an investment in {target_name}.")
                 };
                 respond_ephemeral(responder, &content).await
             }
@@ -4903,6 +4950,10 @@ impl BettingInteractionHandler {
                     )
                     .await;
                 };
+                let target_name = self
+                    .cached_player_names(guild_id, [target_id])
+                    .resolve(target_id);
+                let unregistered_target_name = target_name.clone();
                 let path = self.database_path.clone();
                 let direction_for_validation = direction.clone();
                 let direction_for_storage = direction.clone();
@@ -4917,6 +4968,7 @@ impl BettingInteractionHandler {
                     validate_investment_target(
                         user_id,
                         target_id,
+                        &unregistered_target_name,
                         &direction_for_validation,
                         investor_registered,
                         target_registered,
@@ -4936,7 +4988,7 @@ impl BettingInteractionHandler {
                     Ok(total) => respond_ephemeral(
                         responder,
                         &format!(
-                            "Set a **{direction}** investment in <@{target_id}> at **{percentage}%**. Configured total: **{total}% / 50%**."
+                            "Set a **{direction}** investment in {target_name} at **{percentage}%**. Configured total: **{total}% / 50%**."
                         ),
                     )
                     .await,
@@ -5103,11 +5155,14 @@ impl BettingInteractionHandler {
                     .await;
                 }
                 let key = format!("{guild_id}:{user_id}:{}", proposal.proposal_id);
+                let voter_names =
+                    self.cached_player_names(guild_id, votes.iter().map(|vote| vote.discord_id));
                 let state = PendingDisburseVotes {
                     guild_id,
                     requester_id: user_id,
                     proposal,
                     votes,
+                    voter_names,
                     page: 0,
                     created_at: Instant::now(),
                 };
@@ -5154,8 +5209,15 @@ impl BettingInteractionHandler {
                             disbursement_proposal_response_with_disabled_buttons(&proposal),
                         )
                         .await;
+                        let names = self.cached_player_names(
+                            guild_id,
+                            result
+                                .distributions
+                                .iter()
+                                .map(|(discord_id, _)| *discord_id),
+                        );
                         responder
-                            .respond(disbursement_response(&result, true))
+                            .respond(disbursement_response(&result, true, &names))
                             .await
                             .map_err(|error| error.to_string())
                     }
@@ -5249,10 +5311,21 @@ impl BettingInteractionHandler {
             let result = self
                 .execute_disbursement(proposal.guild_id, proposal, true)
                 .await?;
+            let recipient_ids = result
+                .distributions
+                .iter()
+                .map(|(discord_id, _)| *discord_id)
+                .collect::<Vec<_>>();
+            let names = resolve_guild_player_names(
+                self.discord.as_ref(),
+                u64::try_from(proposal.guild_id).ok(),
+                &recipient_ids,
+            )
+            .await;
             let mut response = disbursement_proposal_response_with_disabled_buttons(proposal);
             response
                 .embeds
-                .extend(disbursement_response(&result, false).embeds);
+                .extend(disbursement_response(&result, false, &names).embeds);
             self.update_persistent_disbursement_message(proposal, response)
                 .await;
             return Ok(());
@@ -5589,8 +5662,8 @@ fn disbursement_votes_response(state: &PendingDisburseVotes) -> InteractionRespo
             .iter()
             .map(|vote| {
                 format!(
-                    "• <@{}> → {}",
-                    vote.discord_id,
+                    "• {} → {}",
+                    state.voter_names.resolve(vote.discord_id),
                     disburse_method_label(&vote.vote_method)
                 )
             })
@@ -5843,7 +5916,11 @@ fn disbursement_proposal_response_with_disabled_buttons_impl(
         .action_rows(rows)
 }
 
-fn disbursement_response(execution: &DisbursementExecution, forced: bool) -> InteractionResponse {
+fn disbursement_response(
+    execution: &DisbursementExecution,
+    forced: bool,
+    names: &GuildPlayerNameDirectory,
+) -> InteractionResponse {
     let title = if execution.cancelled {
         "❌ Proposal Cancelled"
     } else if forced {
@@ -5858,7 +5935,7 @@ fn disbursement_response(execution: &DisbursementExecution, forced: bool) -> Int
             .distributions
             .iter()
             .take(10)
-            .map(|(discord_id, amount)| format!("<@{discord_id}>: +{amount}"))
+            .map(|(discord_id, amount)| format!("{}: +{amount}", names.resolve(*discord_id)))
             .collect::<Vec<_>>();
         if execution.distributions.len() > 10 {
             lines.push(format!(
@@ -6994,16 +7071,18 @@ fn wheel_timeout_response(
         WheelInteractionKind::TownTrial => Some(
             InteractionEmbed::titled("⚖️ THE TOWN HAS SPOKEN")
                 .description(format!(
-                    "The town decided: **{}** for <@{}>!",
-                    option.label, pending.user_id
+                    "The town decided: **{}** for {}!",
+                    option.label,
+                    pending_wheel_player_name(pending)
                 ))
                 .color(0xED_42_45),
         ),
         WheelInteractionKind::Discover => Some(
             InteractionEmbed::titled("🃏 DISCOVER — TIMEOUT")
                 .description(format!(
-                    "<@{}> didn't choose in time. The worst fate applies: **{}**!",
-                    pending.user_id, option.label
+                    "{} didn't choose in time. The worst fate applies: **{}**!",
+                    pending_wheel_player_name(pending),
+                    option.label
                 ))
                 .color(0xED_42_45),
         ),
@@ -7396,18 +7475,27 @@ fn wheel_bankrupt_preview_embed(preview: &str) -> InteractionEmbed {
         .color(0x34_98_DB)
 }
 
+/// The spinner's readable name for wheel embeds, which never resolve mention
+/// markup into a name.
+fn pending_wheel_player_name(pending: &PendingWheelInteraction) -> &str {
+    pending
+        .display_name
+        .as_deref()
+        .and_then(readable_player_name)
+        .unwrap_or(UNKNOWN_PLAYER)
+}
+
 fn wheel_interaction_prompt_embed(pending: &PendingWheelInteraction) -> InteractionEmbed {
+    let name = pending_wheel_player_name(pending);
     match pending.kind {
         WheelInteractionKind::TownTrial => InteractionEmbed::titled("⚖️ TOWN TRIAL")
             .description(format!(
-                "⚖️ **TOWN TRIAL** — The town has **5 minutes** to decide <@{}>'s fate!\n\nVote for a result:",
-                pending.user_id
+                "⚖️ **TOWN TRIAL** — The town has **5 minutes** to decide {name}'s fate!\n\nVote for a result:"
             ))
             .color(0x2A_1A_1A),
         WheelInteractionKind::Discover => InteractionEmbed::titled("🃏 DISCOVER")
             .description(format!(
-                "🃏 **DISCOVER** — <@{}> must choose their fate!\n\nYou have **60 seconds** to choose:",
-                pending.user_id
+                "🃏 **DISCOVER** — {name} must choose their fate!\n\nYou have **60 seconds** to choose:"
             ))
             .color(0x1A_2A_2A),
         WheelInteractionKind::Scrying => {
@@ -7421,15 +7509,13 @@ fn wheel_interaction_prompt_embed(pending: &PendingWheelInteraction) -> Interact
                 .map_or_else(|| "LOSE (0 JC)".to_owned(), scrying_display_label);
             InteractionEmbed::titled("🏝️ MANA SCRYING")
                 .description(format!(
-                    "🔮 <@{}>, the Island reveals two fates:\n\n**A:** {first}\n**B:** {second}\n\nChoose wisely. *(Blue mana: winnings reduced by 25%)*",
-                    pending.user_id
+                    "🔮 {name}, the Island reveals two fates:\n\n**A:** {first}\n**B:** {second}\n\nChoose wisely. *(Blue mana: winnings reduced by 25%)*"
                 ))
                 .color(0x34_98_DB)
         }
         WheelInteractionKind::Reroll => InteractionEmbed::titled("Re-roll available")
             .description(format!(
-                "<@{}> — Red mana lets you re-roll once. 30 seconds to decide.",
-                pending.user_id
+                "{name} — Red mana lets you re-roll once. 30 seconds to decide."
             ))
             .color(0xED_42_45),
     }
@@ -7663,6 +7749,7 @@ const fn is_valid_leverage_tier(leverage: i64) -> bool {
 fn validate_investment_target(
     investor_id: i64,
     target_id: i64,
+    target_name: &str,
     direction: &str,
     investor_registered: bool,
     target_registered: bool,
@@ -7671,7 +7758,7 @@ fn validate_investment_target(
         return Err("You need to /player register before configuring investments.".to_owned());
     }
     if !target_registered {
-        return Err(format!("<@{target_id}> is not registered."));
+        return Err(format!("{target_name} is not registered."));
     }
     if investor_id == target_id && direction == "short" {
         return Err("You cannot short yourself.".to_owned());
