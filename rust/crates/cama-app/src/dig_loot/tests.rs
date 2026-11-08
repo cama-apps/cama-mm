@@ -1518,3 +1518,63 @@ mod social_burn_encounters {
         });
     }
 }
+
+#[test]
+fn artifact_catalog_entries_carry_lore_and_effects_for_every_authored_artifact() {
+    let entries = artifact_catalog_entries();
+    let authored = artifact_catalog();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.name.as_str(), entry.is_relic))
+            .collect::<Vec<_>>(),
+        authored
+            .iter()
+            .map(|artifact| (artifact.id, artifact.name, artifact.is_relic))
+            .collect::<Vec<_>>()
+    );
+    for entry in entries {
+        assert!(!entry.lore_text.is_empty(), "{}", entry.id);
+        assert_eq!(
+            entry
+                .effect
+                .as_deref()
+                .is_some_and(|effect| !effect.is_empty()),
+            entry.is_relic,
+            "{}",
+            entry.id
+        );
+    }
+    assert!(std::ptr::eq(entries, artifact_catalog_entries()));
+}
+
+#[test]
+fn artifact_display_label_never_shows_a_raw_id() {
+    assert_eq!(artifact_display_label("mole_claws", true), "Mole Claws");
+    assert_eq!(
+        artifact_display_label("miner_s_lullaby", false),
+        "The Miner's Lullaby"
+    );
+    // A legacy pool suffix is re-derived from the rolled stats.
+    assert_eq!(
+        artifact_display_label("pinnacle:Crown:Echoes:hp_plus_1:boss_payout_5", false),
+        "Crown of Scales and Tribute"
+    );
+    assert_eq!(
+        artifact_display_label("pinnacle:Crown:Echoes:hp_plus_1:boss_payout_5", true),
+        "Crown of Scales and Tribute (Tougher skin, Bosses pay better)"
+    );
+    // A bespoke quest suffix is kept.
+    assert_eq!(
+        artifact_display_label(
+            "pinnacle:Cloak of the Necropolis:Long Silence:streak_immunity:boss_hp_minus_10",
+            false
+        ),
+        "Cloak of the Necropolis of Long Silence"
+    );
+    assert_eq!(
+        artifact_display_label("retired_trinket", true),
+        "Retired Trinket"
+    );
+    assert_eq!(artifact_display_label("", true), "Unknown artifact");
+}

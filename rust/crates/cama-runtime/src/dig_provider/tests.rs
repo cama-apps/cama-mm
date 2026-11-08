@@ -9484,3 +9484,179 @@ fn recycling_picker_offers_every_recipe_in_a_large_inventory() {
     assert_eq!(seen, expected);
     assert!(response.components.len() <= 5);
 }
+
+fn embed_text_length(embed: &crate::registration::InteractionEmbed) -> usize {
+    let count = |text: &Option<String>| text.as_deref().map_or(0, |text| text.chars().count());
+    count(&embed.title)
+        + count(&embed.description)
+        + count(&embed.footer)
+        + embed
+            .fields
+            .iter()
+            .map(|field| field.name.chars().count() + field.value.chars().count())
+            .sum::<usize>()
+}
+
+#[tokio::test]
+async fn artifacts_command_shows_names_lore_and_effects_instead_of_ids() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    let connection = Connection::open(database.path()).expect("artifact database");
+    for (artifact_id, is_relic, equipped) in [
+        ("mole_claws", 1, 1),
+        ("mole_claws", 1, 0),
+        ("miner_s_lullaby", 0, 0),
+        ("pinnacle:Crown:Echoes:hp_plus_1:boss_payout_5", 1, 0),
+        ("retired_trinket", 0, 0),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO dig_artifacts
+                     (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+                 VALUES (?1,?2,?3,0,?4,?5)",
+                params![USER as i64, GUILD as i64, artifact_id, is_relic, equipped],
+            )
+            .expect("seed artifact");
+    }
+    drop(connection);
+
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            command_request(30, "artifacts", Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("artifacts render");
+
+    let followups = responder.followups.lock().expect("artifact followups");
+    let embeds = followups
+        .iter()
+        .flat_map(|response| response.embeds.iter())
+        .collect::<Vec<_>>();
+    let catalog = cama_app::dig_loot::artifact_catalog_entries();
+    let catalog_pages = catalog.len().div_ceil(20);
+    assert_eq!(embeds.len(), catalog_pages + 1);
+    for embed in &embeds {
+        assert!(embed.fields.len() <= 25);
+        assert!(embed_text_length(embed) <= 6_000);
+    }
+    let catalog_fields = embeds[..catalog_pages]
+        .iter()
+        .flat_map(|embed| embed.fields.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        catalog_fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        catalog
+            .iter()
+            .map(|artifact| artifact.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    for (field, artifact) in catalog_fields.iter().zip(catalog) {
+        assert!(!field.name.contains('_'), "{}", field.name);
+        assert!(field.value.contains(&artifact.lore_text), "{}", field.value);
+        let effect = artifact
+            .effect
+            .as_deref()
+            .unwrap_or("Collectible only (no equip effect).");
+        assert!(
+            field.value.ends_with(&format!("**Effect:** {effect}")),
+            "{}",
+            field.value
+        );
+    }
+    assert_eq!(
+        embeds[0].title.as_deref(),
+        Some(format!("Dig Artifact Catalog (1/{catalog_pages})").as_str())
+    );
+    assert_eq!(
+        embeds[0].footer.as_deref(),
+        Some(
+            format!(
+                "Catalog: {} artifacts • Page 1/{catalog_pages}",
+                catalog.len()
+            )
+            .as_str()
+        )
+    );
+
+    let mine = embeds[catalog_pages];
+    assert_eq!(mine.title.as_deref(), Some("Your Artifacts"));
+    assert_eq!(
+        mine.fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Mole Claws — Owned ×2 • Equipped ×1",
+            "The Miner's Lullaby — Owned ×1",
+            "Crown of Scales and Tribute (Tougher skin, Bosses pay better) — Owned ×1",
+            "Retired Trinket — Owned ×1",
+        ]
+    );
+    assert!(
+        mine.fields[0]
+            .value
+            .starts_with("**Uncommon** • **Dirt** • **Relic**")
+    );
+    assert!(mine.fields[1].value.contains("**Curio**"));
+    assert!(
+        mine.fields[2]
+            .value
+            .starts_with("**Unique** • **Special reward** • **Relic**")
+    );
+    assert!(
+        mine.fields[3]
+            .value
+            .starts_with("**Legacy** • **Unknown layer** • **Curio**")
+    );
+    assert_eq!(
+        mine.footer.as_deref(),
+        Some("Your collection: 4 unique artifacts • Page 1/1")
+    );
+}
+
+#[tokio::test]
+async fn artifacts_command_without_finds_says_so_under_the_catalog() {
+    let (_database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            command_request(31, "artifacts", Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("artifacts render");
+
+    let followups = responder.followups.lock().expect("artifact followups");
+    let mine = followups
+        .last()
+        .and_then(|response| response.embeds.first())
+        .expect("collection page");
+    assert_eq!(mine.title.as_deref(), Some("Your Artifacts"));
+    assert!(mine.fields.is_empty());
+    assert!(
+        mine.description
+            .as_deref()
+            .is_some_and(|text| text.ends_with("\n\nYou haven't found any artifacts yet.")),
+        "{:?}",
+        mine.description
+    );
+}
