@@ -64,7 +64,10 @@ use activity::{
     recap_numbers,
 };
 use distinct::{MIN_STORIES, cave_in_slide, distinct_slides, people_slides, stonks};
-use personal::{fresh_records, hero_story_slides, record_count, record_story_slides};
+use personal::{
+    fresh_hero_stories, fresh_records, hero_stories, hero_story_slides, record_count,
+    record_story_slides,
+};
 
 const COMPONENT_PREFIX: &str = "wrapped:";
 const STORY_TIMEOUT: Duration = Duration::from_secs(600);
@@ -1548,27 +1551,20 @@ fn build_slides(
     people.truncate(deck::MOST_PEOPLE);
 
     // The player against their own games, once they have a year to measure.
-    let (record_candidates, hero_stories) = if raw.matches.len() >= minimum_games {
+    let (record_candidates, hero_candidates) = if raw.matches.len() >= minimum_games {
         (
             personal_records(&raw.year_rows, target_id),
-            hero_story_slides(
-                &raw.year_rows,
-                target_id,
-                &raw.art,
-                seed,
-                target_display_name,
-                &year_label,
-            ),
+            hero_stories(&raw.year_rows, target_id, seed),
         )
     } else {
         (Vec::new(), Vec::new())
     };
 
     // Distinct stories take what the other sections leave, up to eight.
-    // Records hold their slots first, but a record that repeats a distinct
-    // story gives way to the next record; when none is left, its slot goes
-    // back to the distinct stories, which are then picked again. The record
-    // count only falls, so this settles in a few rounds.
+    // Records and hero stories hold their slots first, but one that repeats
+    // a distinct story gives way to the next of its kind; when none is left,
+    // its slot goes back to the distinct stories, which are then picked
+    // again. Both counts only fall, so this settles in a few rounds.
     // Only stories are picked in the loop; their cards, with art and gold
     // graphs, are drawn once it settles.
     let fixed = slides
@@ -1577,17 +1573,20 @@ fn build_slides(
         .count();
     let candidates = distinct_stories(&raw.year_rows, &raw.year_players, target_id, minimum_games);
     let mut held = record_count(&record_candidates);
-    let (slots, selected, fresh) = loop {
+    let mut heroes_held = fresh_hero_stories(&hero_candidates, &[]).len();
+    let (slots, selected, fresh, fresh_heroes) = loop {
         let slots = deck::distinct_slots(
-            fixed + held + hero_stories.len() + people.len() + side_cards + deck::PERSONA_SLOTS,
+            fixed + held + heroes_held + people.len() + side_cards + deck::PERSONA_SLOTS,
         );
         let selected = select_stories(&candidates, slots);
         let fresh = fresh_records(&record_candidates, &selected);
+        let heroes = fresh_hero_stories(&hero_candidates, &selected);
         let fits = record_count(&fresh).min(held);
-        if fits == held {
-            break (slots, selected, fresh);
+        let heroes_fit = heroes.len().min(heroes_held);
+        if fits == held && heroes_fit == heroes_held {
+            break (slots, selected, fresh, heroes);
         }
-        held = fits;
+        (held, heroes_held) = (fits, heroes_fit);
     };
     let distinct = distinct_slides(
         &selected,
@@ -1606,6 +1605,13 @@ fn build_slides(
         target_id,
         &raw.art,
         seed,
+        target_display_name,
+        &year_label,
+    );
+    let hero_cards = hero_story_slides(
+        &fresh_heroes,
+        heroes_held,
+        &raw.art,
         target_display_name,
         &year_label,
     );
@@ -1638,7 +1644,7 @@ fn build_slides(
         }
     }
     slides.extend(records);
-    slides.extend(hero_stories);
+    slides.extend(hero_cards);
     slides.extend(people);
     slides.extend(side);
 
