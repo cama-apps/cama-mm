@@ -16,6 +16,7 @@ use crate::embeds::LobbyKind;
 /// A ready check against a near-empty lobby wastes everyone's react; this is
 /// a fixed floor rather than a per-guild setting for now.
 pub const MINIMUM_READYCHECK_PLAYERS: usize = 10;
+pub const MANUAL_READY_GRACE_SECONDS: f64 = 10.0 * 60.0;
 pub const READYCHECK_COOLDOWN_SECONDS: f64 = 120.0;
 pub const READYCHECK_STALE_SECONDS: f64 = 30.0 * 60.0;
 /// Lobby members still unconfirmed this long after a `/readycheck` (a new
@@ -300,6 +301,7 @@ pub enum ReadycheckCommandFailure {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReadycheckPermit {
     token: u64,
+    manual_ready: BTreeSet<UserId>,
     pub scope: LobbyScope,
     pub expected_message_id: Option<MessageId>,
     pub invoker_id: UserId,
@@ -332,7 +334,18 @@ struct ScopedState {
     lobby: Option<ReadyLobby>,
     readycheck: Option<ReadycheckGeneration>,
     last_command_at: Option<f64>,
+    manual_ready_at: BTreeMap<UserId, f64>,
     pending_publication: Option<PendingPublication>,
+}
+
+impl ScopedState {
+    fn recently_manually_ready(&self, player_id: UserId, now: f64) -> bool {
+        self.manual_ready_at
+            .get(&player_id)
+            .is_some_and(|confirmed_at| {
+                (0.0..MANUAL_READY_GRACE_SECONDS).contains(&(now - confirmed_at))
+            })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -364,7 +377,12 @@ impl ReadycheckService {
 
     pub fn put_lobby(&self, lobby: ReadyLobby) {
         let scope = lobby.scope;
-        self.lock().scopes.entry(scope).or_default().lobby = Some(lobby);
+        let mut state = self.lock();
+        let scoped = state.scopes.entry(scope).or_default();
+        scoped
+            .manual_ready_at
+            .retain(|id, _| lobby.players.contains(id));
+        scoped.lobby = Some(lobby);
     }
 
     #[must_use]
@@ -385,10 +403,14 @@ impl ReadycheckService {
     }
 
     pub fn leave_lobby(&self, scope: LobbyScope, player_id: UserId) -> bool {
-        self.lock()
-            .scopes
-            .get_mut(&scope)
-            .and_then(|scoped| scoped.lobby.as_mut())
+        let mut state = self.lock();
+        let Some(scoped) = state.scopes.get_mut(&scope) else {
+            return false;
+        };
+        scoped.manual_ready_at.remove(&player_id);
+        scoped
+            .lobby
+            .as_mut()
             .is_some_and(|lobby| lobby.remove_player(player_id))
     }
 
@@ -493,6 +515,37 @@ impl ReadycheckService {
         player_id: UserId,
         expected_message_id: Option<MessageId>,
     ) -> bool {
+        self.add_readycheck_reaction_at(scope, player_id, expected_message_id, unix_time_now())
+    }
+
+    /// Only an explicit reaction renews the carry-over window, including a
+    /// reaction from someone who was already automatically confirmed.
+    pub fn add_readycheck_reaction_at(
+        &self,
+        scope: LobbyScope,
+        player_id: UserId,
+        expected_message_id: Option<MessageId>,
+        now: f64,
+    ) -> bool {
+        self.confirm_readycheck_player(scope, player_id, expected_message_id, Some(now))
+    }
+
+    pub fn auto_confirm_readycheck_player(
+        &self,
+        scope: LobbyScope,
+        player_id: UserId,
+        expected_message_id: Option<MessageId>,
+    ) -> bool {
+        self.confirm_readycheck_player(scope, player_id, expected_message_id, None)
+    }
+
+    fn confirm_readycheck_player(
+        &self,
+        scope: LobbyScope,
+        player_id: UserId,
+        expected_message_id: Option<MessageId>,
+        manual_ready_at: Option<f64>,
+    ) -> bool {
         let mut state = self.lock();
         let Some(scoped) = state.scopes.get_mut(&scope) else {
             return false;
@@ -512,11 +565,14 @@ impl ReadycheckService {
             .as_ref()
             .unwrap_or(&generation.lobby_ids)
             .contains(&player_id);
-        if !eligible || !generation.reacted.insert(player_id) {
+        if !eligible || (manual_ready_at.is_none() && generation.declined.contains(&player_id)) {
             return false;
         }
+        if let Some(now) = manual_ready_at {
+            scoped.manual_ready_at.insert(player_id, now);
+        }
         generation.declined.remove(&player_id);
-        true
+        generation.reacted.insert(player_id)
     }
 
     pub fn remove_readycheck_reaction(
@@ -526,11 +582,10 @@ impl ReadycheckService {
         expected_message_id: Option<MessageId>,
     ) -> bool {
         let mut state = self.lock();
-        let Some(generation) = state
-            .scopes
-            .get_mut(&scope)
-            .and_then(|scoped| scoped.readycheck.as_mut())
-        else {
+        let Some(scoped) = state.scopes.get_mut(&scope) else {
+            return false;
+        };
+        let Some(generation) = scoped.readycheck.as_mut() else {
             return false;
         };
         if expected_message_id.is_some_and(|expected| expected != generation.message_id)
@@ -539,6 +594,7 @@ impl ReadycheckService {
             return false;
         }
         generation.declined.insert(player_id);
+        scoped.manual_ready_at.remove(&player_id);
         true
     }
 
@@ -756,6 +812,7 @@ impl ReadycheckService {
             .copied()
             .filter(|player_id| {
                 (!request.confirm_invoker || *player_id != request.invoker_id)
+                    && !scoped.recently_manually_ready(*player_id, request.now)
                     && player_data
                         .get(player_id)
                         .is_none_or(|data| data.group != ReadinessGroup::Recent)
@@ -790,6 +847,11 @@ impl ReadycheckService {
             mode,
             permit: Some(ReadycheckPermit {
                 token,
+                manual_ready: live_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| scoped.recently_manually_ready(*id, request.now))
+                    .collect(),
                 scope,
                 expected_message_id,
                 invoker_id: request.invoker_id,
@@ -831,7 +893,13 @@ impl ReadycheckService {
             .as_ref()
             .filter(|lobby| lobby.status == LobbyStatus::Open)
             .map_or_else(BTreeSet::new, |lobby| lobby.players.clone());
-        let mut reacted = BTreeSet::new();
+        // Keep the eligibility decision used by the posted roster and pings,
+        // while honoring anyone who withdrew during Discord delivery.
+        let mut reacted = permit
+            .manual_ready
+            .into_iter()
+            .filter(|id| lobby_ids.contains(id) && scoped.manual_ready_at.contains_key(id))
+            .collect::<BTreeSet<_>>();
         for (player_id, data) in &player_data {
             if data.group == ReadinessGroup::Recent && lobby_ids.contains(player_id) {
                 reacted.insert(*player_id);
