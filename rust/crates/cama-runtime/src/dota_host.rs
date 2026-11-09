@@ -1700,12 +1700,21 @@ impl DotaHostWorker {
                     || pending.state.extra.get("draft_setup_complete") == Some(&serde_json::Value::Bool(false))
                     || pending.state.extra.get("dota_host_account_key").and_then(serde_json::Value::as_str) != Some(key.as_str())
                     || sessions.session(pending.guild_id, pending.pending_match_id).map_err(|e| e.to_string())?.is_some() { continue; }
+                // One match's invalid options must not stall hosting for every
+                // other match and guild; skip it and leave it to manual handling.
                 let options = if pending.state.extra.contains_key("dota_hosting") {
-                    DotaHostingOptions::from_extra(&pending.state.extra)?
+                    DotaHostingOptions::from_extra(&pending.state.extra)
                 } else {
-                    guilds.dota_hosting_options(pending.guild_id).map_err(|e| e.to_string())?
+                    guilds.dota_hosting_options(pending.guild_id).map_err(|e| e.to_string())
+                }
+                .and_then(|options| options.validate().map(|()| options));
+                let options = match options {
+                    Ok(options) => options,
+                    Err(reason) => {
+                        tracing::warn!(guild_id=pending.guild_id,pending_match_id=pending.pending_match_id,%reason,"Dota hosting skipped a match with invalid hosting options");
+                        continue;
+                    }
                 };
-                options.validate()?;
                 if options.hosting == Some(HostingMode::Manual) { continue; }
                 let Some(league) = options.league_id.or(guilds.get_league_id(pending.guild_id).map_err(|e| e.to_string())?
                     .and_then(|id| u32::try_from(id).ok()).filter(|id| *id > 0)) else {

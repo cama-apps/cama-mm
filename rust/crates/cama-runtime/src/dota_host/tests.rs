@@ -678,6 +678,28 @@ async fn manual_hosting_snapshot_skips_discovery_and_steam_entirely() {
 }
 
 #[tokio::test]
+async fn invalid_hosting_options_on_one_match_do_not_block_discovery_of_others() {
+    let f = Fixture::preview(DotaHostTestMode::Simulated, true);
+    let repo = PendingMatchRepository::new(&f.worker.path);
+    let mut bad = repo.pending_match(1, f.pending).unwrap().unwrap().state;
+    // Sorted ahead of the valid match. Creation validates options, but a row
+    // saved before that validation (or since tightened) can still hold them.
+    bad.shuffle_timestamp = Some(1);
+    let bad_id = repo.create_pending_match(1, &bad).unwrap().pending_match_id;
+    bad.extra
+        .insert("dota_hosting".into(), serde_json::json!({"region": 500}));
+    repo.replace_pending_match_for_tests(1, bad_id, &bad)
+        .unwrap();
+    let bad = bad_id;
+
+    f.worker.tick(&f.port, 100).await.unwrap();
+
+    let sessions = DotaSessionRepository::new(&f.worker.path);
+    assert!(sessions.session(1, bad).unwrap().is_none());
+    assert!(sessions.session(1, f.pending).unwrap().is_some());
+}
+
+#[tokio::test]
 async fn hosting_options_are_frozen_and_override_environment_defaults() {
     let f = Fixture::preview(DotaHostTestMode::Simulated, true);
     let repo = PendingMatchRepository::new(&f.worker.path);
