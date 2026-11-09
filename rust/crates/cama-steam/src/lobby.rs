@@ -17,6 +17,7 @@ use steam_vent::message::{EncodableMessage, MalformedBody};
 use steam_vent::{
     ConnectionTrait, GameCoordinator, NetMessage, NetMessageHeader, NetworkError, RawNetMessage,
 };
+use steam_vent_proto_common::MsgKind;
 use steam_vent_proto_common::protobuf::{Enum, EnumOrUnknown, Message, MessageField};
 use steam_vent_proto_dota2::base_gcmessages::CMsgInviteToLobby;
 use steam_vent_proto_dota2::dota_gcmessages_client::{
@@ -45,7 +46,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
-use tracing::warn;
+use tracing::{trace, warn};
 
 const EVENT_BUFFER: usize = 128;
 const INITIAL_CACHE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1339,6 +1340,13 @@ fn spawn_watchers(
             }
             let expected_kind = message.msgtype() & 0x7fff_ffff;
             let expected_protobuf = message.msgtype() & 0x8000_0000 != 0;
+            // Only kinds this client applies are parsed strictly. Valve adds
+            // and reshapes unrelated GC traffic; one we never read must not
+            // end a hosted session. Job replies are routed by steam-vent.
+            if !applies_gc_kind(MsgKind(expected_kind as i32)) {
+                trace!(kind = expected_kind, "ignoring unhandled Dota GC message");
+                continue;
+            }
             let raw = match RawNetMessage::read(message.payload().to_vec()) {
                 Ok(raw)
                     if raw.kind.0 as u32 == expected_kind
@@ -1356,6 +1364,25 @@ fn spawn_watchers(
         emit_disconnect(&state, &events, reason).await;
     });
     WatcherTask(task)
+}
+
+/// Message kinds [`apply_gc_message`] reads; every other kind is skipped
+/// before its header is parsed.
+fn applies_gc_kind(kind: MsgKind) -> bool {
+    [
+        CMsgClientWelcome::KIND.into(),
+        ConnectionStatusWire::KIND.into(),
+        CMsgClientSuspended::KIND.into(),
+        CMsgSOCacheSubscribed::KIND.into(),
+        CMsgSOCacheSubscribedUpToDate::KIND.into(),
+        SOMultipleObjectsWire::KIND.into(),
+        SOSingleObjectCreateWire::KIND.into(),
+        SOSingleObjectUpdateWire::KIND.into(),
+        SOSingleObjectDestroyWire::KIND.into(),
+        CMsgSOCacheUnsubscribed::KIND.into(),
+        LiveScoreboardWire::KIND.into(),
+    ]
+    .contains(&kind)
 }
 
 async fn apply_gc_message(
@@ -1410,6 +1437,7 @@ async fn apply_gc_message(
         let _ = events.send(DotaSteamEvent::LiveScoreboard(scoreboard));
         true
     } else {
+        debug_assert!(!applies_gc_kind(kind), "applies_gc_kind is out of sync");
         true // Match-detail job replies are consumed by GameCoordinator.
     };
     valid
@@ -2453,6 +2481,67 @@ mod tests {
         assert_eq!(state.lobby.as_ref().unwrap().state, LobbyState::Run);
         assert!(state.lobby_observation_is_fresh(Duration::from_secs(60)));
         assert!(!state.resync_pending);
+    }
+
+    #[tokio::test]
+    async fn unparseable_unhandled_gc_message_does_not_end_the_session() {
+        let state = ready_lobby_state();
+        let (events, mut receiver) = broadcast::channel(EVENT_BUFFER);
+        let (input, mut messages) = tokio::sync::mpsc::unbounded_channel();
+        let _watcher = spawn_watchers(
+            futures_util::stream::poll_fn(move |cx| messages.poll_recv(cx)),
+            &state,
+            &events,
+            || {},
+        );
+        // An unhandled kind whose payload is not even a valid GC header.
+        let unhandled = 9_999_u32;
+        assert!(!applies_gc_kind(MsgKind(unhandled as i32)));
+        let garbage = |msgtype: u32| {
+            Ok(crate::handshake::FromGc(
+                steam_vent_proto_steam::steammessages_clientserver_2::CMsgGCClient {
+                    appid: Some(crate::DOTA_APP_ID),
+                    msgtype: Some(msgtype),
+                    payload: Some(vec![0xff, 0x01]),
+                    ..Default::default()
+                },
+            ))
+        };
+        input.send(garbage(unhandled | 0x8000_0000)).unwrap();
+        input.send(garbage(unhandled)).unwrap();
+        let mut lobby = CSODOTALobby::new();
+        lobby.set_lobby_id(7001);
+        lobby.set_state(csodotalobby::State::RUN);
+        input
+            .send(Ok(gc_envelope(SOSingleObjectUpdateWire(lobby_update(
+                &lobby, 2,
+            )))))
+            .unwrap();
+
+        let updated = timeout(Duration::from_secs(1), async {
+            loop {
+                match receiver.recv().await.unwrap() {
+                    DotaSteamEvent::LobbyUpdated(lobby) => break lobby,
+                    DotaSteamEvent::TransportDisconnected { .. } => panic!("session ended"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(updated.state, LobbyState::Run);
+        assert_eq!(state.read().await.status, CacheStatus::Ready);
+
+        // A malformed message of a kind the client applies still fails closed.
+        let handled: MsgKind = SOSingleObjectUpdateWire::KIND.into();
+        input.send(garbage(handled.0 as u32 | 0x8000_0000)).unwrap();
+        timeout(Duration::from_secs(1), async {
+            while state.read().await.status == CacheStatus::Ready {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
