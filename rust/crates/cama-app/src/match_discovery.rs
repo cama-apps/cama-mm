@@ -21,6 +21,7 @@ use cama_db::match_recording_repository::{
     WrappedEnrichmentFactUpdate as DbWrappedEnrichmentFactUpdate,
 };
 use cama_db::opendota_player::OpenDotaPlayerRepository;
+use cama_domain::wrapped_distinct::tracked_item_counts;
 use chrono::{DateTime, NaiveDateTime};
 use rusqlite::types::Value as SqlValue;
 use serde::Serialize;
@@ -153,7 +154,9 @@ pub struct WrappedPlayerTelemetry {
     pub courier_kills: Option<i64>,
     pub pings: Option<i64>,
     pub lane_role: Option<i64>,
-    pub purchase_keys: Vec<String>,
+    pub buyback_count: Option<i64>,
+    /// `None` when the payload carried no purchase log.
+    pub purchase_keys: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1696,6 +1699,8 @@ pub struct WrappedEnrichmentFact {
     pub lane_role: Option<i64>,
     pub comeback: Option<i64>,
     pub throw_amount: Option<i64>,
+    pub buybacks: Option<i64>,
+    pub item_counts: Option<BTreeMap<String, i64>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1815,6 +1820,8 @@ impl EnrichmentWritePort for MatchRecordingRepository {
                 lane_role: fact.lane_role,
                 comeback: fact.comeback,
                 throw_amount: fact.throw_amount,
+                buybacks: fact.buybacks,
+                item_counts: fact.item_counts.clone(),
             })
             .collect::<Vec<_>>();
         MatchRecordingRepository::apply_enrichment_atomic(
@@ -1961,12 +1968,17 @@ impl<W: EnrichmentWritePort> MatchEnrichmentPolicy<W> {
                             .wrapped
                             .purchase_keys
                             .iter()
+                            .flatten()
                             .filter(|key| key.as_str() == "rapier")
                             .count()
                     }),
                     lane_role: player.and_then(|player| player.wrapped.lane_role),
                     comeback: input.details.comeback,
                     throw_amount: input.details.throw_amount,
+                    buybacks: player.and_then(|player| player.wrapped.buyback_count),
+                    item_counts: player
+                        .and_then(|player| player.wrapped.purchase_keys.as_ref())
+                        .map(|keys| tracked_item_counts(keys.iter().map(String::as_str))),
                 }
             })
             .collect::<Vec<_>>();

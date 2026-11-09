@@ -19,6 +19,14 @@ pub use cama_domain::hero_catalog::hero_name;
 
 const STEAM_CDN_BASE: &str =
     "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes";
+const STEAM_RENDER_BASE: &str =
+    "https://cdn.cloudflare.steamstatic.com/apps/dota2/videos/dota_react/heroes/renders";
+
+/// Full-size hero render for a Dotabase hero slug.
+#[must_use]
+pub fn hero_render_url(slug: &str) -> String {
+    format!("{STEAM_RENDER_BASE}/{slug}.png")
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeroMetadata {
@@ -73,6 +81,7 @@ impl HeroLookup {
         Some(match size {
             HeroImageSize::Full => format!("{STEAM_CDN_BASE}/{slug}.png"),
             HeroImageSize::Icon => format!("{STEAM_CDN_BASE}/icons/{slug}.png"),
+            HeroImageSize::Render => hero_render_url(slug),
         })
     }
 
@@ -103,6 +112,8 @@ impl HeroLookup {
 pub enum HeroImageSize {
     Full,
     Icon,
+    /// Large transparent render, about 1440 px square.
+    Render,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,6 +353,18 @@ mod tests {
             )
         );
         assert_eq!(lookup.color(1), Some(0x78_40_94));
+    }
+
+    #[test]
+    fn render_url_uses_videos_renders_path() {
+        let file = fixture();
+        let lookup = HeroLookup::new(file.path());
+        assert_eq!(
+            lookup.image_url(1, HeroImageSize::Render).as_deref(),
+            Some(
+                "https://cdn.cloudflare.steamstatic.com/apps/dota2/videos/dota_react/heroes/renders/antimage.png"
+            )
+        );
     }
 
     #[test]

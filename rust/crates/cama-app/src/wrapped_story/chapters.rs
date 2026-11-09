@@ -4,11 +4,15 @@
 //!
 //! Every card is backed by a recorded number. Copy is chosen from the numbers
 //! and a per-player seed, so a story reads the same every time it is replayed.
+//! Side-game cards lead with a roast or popoff from `roast_pools`.
 
 use cama_domain::formatting::{format_grouped, format_grouped_signed};
 use cama_domain::wrapped_activity::{
     DigYear, GambaYear, GambleKind, MafiaYear, PetYear, ServerRank,
 };
+use cama_domain::wrapped_distinct::Tier;
+
+use super::roast_pools::side_game_copy;
 
 /// How a card arranges its content. Mirrors the renderer's layouts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +112,36 @@ fn pick<'a>(seed: u64, salt: u64, pool: &[&'a str]) -> &'a str {
 #[must_use]
 pub fn story_seed(discord_id: i64, year: i32) -> u64 {
     (discord_id as u64).rotate_left(17) ^ u64::from(year.unsigned_abs())
+}
+
+/// Cave-ins in a year that earn their own Press F card.
+pub const PRESS_F_CAVE_INS: i64 = 3;
+
+/// The dig card's cave-in line, for a deck whose Press F card sits under
+/// More stats.
+#[must_use]
+pub fn cave_in_line(cave_ins: i64) -> String {
+    format!("You had {} cave-ins.", format_grouped(cave_ins))
+}
+
+/// How loud a side-game joke can be: the top 5% of the server gets the
+/// extreme lines, everyone else the everyday ones.
+#[must_use]
+pub fn side_tier(rank: Option<ServerRank>) -> Tier {
+    match rank.and_then(ServerRank::ahead_of_percent) {
+        Some(percent) if percent >= 95.0 => Tier::Extreme,
+        _ => Tier::Notable,
+    }
+}
+
+/// A side game's setup and punchline as one line of copy.
+fn side_joke(key: &str, tier: Tier, seed: u64) -> String {
+    let beat = side_game_copy(key, tier, seed);
+    let mut punch = beat.punch.chars();
+    match (beat.setup.ends_with(','), punch.next()) {
+        (true, Some(first)) => format!("{} {}{}", beat.setup, first.to_lowercase(), punch.as_str()),
+        _ => format!("{} {}", beat.setup, beat.punch),
+    }
 }
 
 /// "More than 92% of the server" style comparisons, only when they flatter.
@@ -431,16 +465,8 @@ pub fn dig_cards(
     };
     let mut cards = Vec::new();
     let mut dig = ChapterCard::new("story_dig", CardStyle::BigNumber, mood, "Dig");
-    dig.headline = pick(
-        seed,
-        3,
-        &[
-            "Your year in Dig.",
-            "Your digging totals.",
-            "How far you dug.",
-        ],
-    )
-    .to_owned();
+    dig.headline = side_joke("dig", side_tier(year.rank), seed);
+    dig.lines.push(dig.headline.clone());
     let (value, _) = dig_headline_number(year);
     dig.stat_value = value;
     dig.stat_label = if year.blocks_dug > 0 {
@@ -455,12 +481,8 @@ pub fn dig_cards(
         "digs".to_owned()
     };
     dig.badge = rank_badge(year.rank, "Dug more than", "digger");
-    if year.cave_ins >= 3 {
-        dig.lines.push(format!(
-            "You had {} cave-ins.",
-            format_grouped(year.cave_ins)
-        ));
-    }
+    // A year of cave-ins gets its own Press F card; the deck adds
+    // `cave_in_line` here only when that card moves to More stats.
     if year.artifacts > 0 {
         let found = plural(year.artifacts, "artifact", "artifacts");
         dig.lines.push(match year.first_finds {
@@ -601,20 +623,20 @@ pub fn pet_cards(year: &PetYear, names: NameLookup<'_>, seed: u64) -> Vec<Chapte
         pet.art = CardArt::ActivePet;
     }
     pet.headline = star.name.clone();
-    let meals = year.meals();
-    pet.stat_value = plural(meals, "meal", "meals");
-    pet.stat_label = if year.pets.len() > 1 {
-        format!("served across {} pets", year.pets.len())
-    } else {
-        "served this year".to_owned()
+    // Spending is this year's; feedings count each pet's whole life.
+    let across = match year.pets.len() {
+        1 => String::new(),
+        count => format!(" across {count} pets"),
     };
-    pet.badge = rank_badge(year.rank, "Fed more than", "pet parent");
-    if year.jc_spent > 0 && pet.badge.is_empty() {
-        pet.badge = format!("{} JC on pet care", format_grouped(year.jc_spent));
-    } else if year.jc_spent > 0 {
-        pet.lines
-            .push(format!("{} JC on pet care.", format_grouped(year.jc_spent)));
+    if year.jc_spent > 0 {
+        pet.stat_value = format!("{} JC", format_grouped(year.jc_spent));
+        pet.stat_label = format!("on pet care{across} this year");
+    } else {
+        pet.stat_value = plural(year.lifetime_meals(), "meal", "meals");
+        pet.stat_label = format!("served{across}, lifetime");
     }
+    pet.badge = rank_badge(year.rank, "Spent more on pets than", "pet parent");
+    pet.lines.push(side_joke("pet", side_tier(year.rank), seed));
     let brawls = year.brawl_wins + year.brawl_losses + year.brawl_draws;
     if brawls > 0 {
         let mut line = format!(
@@ -648,16 +670,8 @@ pub fn pet_cards(year: &PetYear, names: NameLookup<'_>, seed: u64) -> Vec<Chapte
             CardMood::PetGrave,
             "Pets lost",
         );
-        grave.headline = pick(
-            seed,
-            5,
-            &[
-                "Remembering your pets.",
-                "Your pets who died this year.",
-                "Pets you lost this year.",
-            ],
-        )
-        .to_owned();
+        grave.headline = side_joke("pet_lost", Tier::Notable, seed);
+        grave.lines.push(grave.headline.clone());
         grave.stat_value = format_grouped(losses.len() as i64);
         grave.stat_label = if losses.len() == 1 {
             "pet lost this year".to_owned()
@@ -704,6 +718,8 @@ pub fn mafia_cards(year: &MafiaYear, names: NameLookup<'_>, seed: u64) -> Vec<Ch
         "You won fewer than half your games."
     }
     .to_owned();
+    card.lines
+        .push(side_joke("mafia", side_tier(year.rank), seed));
     let mut tiles = vec![
         (format_grouped(year.games), "games played".to_owned()),
         (format_grouped(year.wins), "wins".to_owned()),

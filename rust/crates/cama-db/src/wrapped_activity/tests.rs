@@ -276,7 +276,8 @@ fn pet_year_covers_pets_alive_during_the_year() {
              VALUES ({GUILD},'player',{ME},-40,100,60,'pet',{MARCH}),
                     ({GUILD},'player',{ME},15,60,75,'pet',{MARCH}),
                     ({GUILD},'player',{ME},-9,75,66,'bet',{MARCH}),
-                    ({GUILD},'player',{ME},-7,66,59,'pet',{LAST_YEAR});"
+                    ({GUILD},'player',{ME},-7,66,59,'pet',{LAST_YEAR}),
+                    ({GUILD},'player',{FRIEND},-10,50,40,'pet',{MARCH});"
         ))
         .unwrap();
     let year = f.repository.pet_year(GUILD, ME, YEAR).unwrap();
@@ -287,7 +288,7 @@ fn pet_year_covers_pets_alive_during_the_year() {
             .collect::<Vec<_>>(),
         ["Old Timer", "Sir Fluff"]
     );
-    assert_eq!(year.meals(), 42);
+    assert_eq!(year.lifetime_meals(), 42);
     assert_eq!(year.losses().len(), 1);
     assert!(year.pets[1].is_active);
     assert_eq!(year.jc_spent, 40);
@@ -303,7 +304,8 @@ fn pet_year_covers_pets_alive_during_the_year() {
         })
     );
     assert_eq!(year.keepsakes, 1);
-    assert_eq!(year.rank, Some(ServerRank { rank: 2, of: 2 }));
+    // FRIEND fed more pets over their lifetime but spent less this year.
+    assert_eq!(year.rank, Some(ServerRank { rank: 1, of: 2 }));
 }
 
 #[test]

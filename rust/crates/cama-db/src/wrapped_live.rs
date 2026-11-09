@@ -5,8 +5,11 @@
 //! generation state is held by Discord for ten minutes and no Wrapped query
 //! mutates match, economy, or rating history.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use cama_domain::wrapped_distinct::{DistinctMatch, DistinctPlayer};
+use chrono::{DateTime, NaiveDateTime};
 use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
 
@@ -139,6 +142,25 @@ pub struct WrappedRatingPoint {
 pub enum WrappedLiveRepositoryError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+}
+
+/// `matches.match_date` is stored as RFC3339 or `YYYY-MM-DD HH:MM:SS` (UTC).
+fn parse_match_date(raw: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|date| date.timestamp())
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+                .map(|date| date.and_utc().timestamp())
+        })
+        .ok()
+}
+
+/// `{"blink":1,"magic_wand":2}` sorted by key; `{}` is a parsed log with no
+/// tracked purchase, and malformed text is unknown.
+fn parse_item_counts(raw: &str) -> Option<Vec<(String, i64)>> {
+    serde_json::from_str::<BTreeMap<String, i64>>(raw)
+        .map(|counts| counts.into_iter().collect())
+        .ok()
 }
 
 #[derive(Clone, Debug)]
@@ -451,12 +473,17 @@ impl WrappedLiveRepository {
     ) -> Result<Vec<WrappedBankruptcy>, WrappedLiveRepositoryError> {
         let connection = open_runtime_connection(&self.path)?;
         let mut statement = connection.prepare(
-            "SELECT bs.discord_id, p.discord_username, bs.bankruptcy_count
-               FROM bankruptcy_state AS bs
-               JOIN players AS p ON p.discord_id = bs.discord_id AND p.guild_id = ?1
-              WHERE bs.guild_id = ?1 AND bs.last_bankruptcy_at >= ?2
-                AND bs.last_bankruptcy_at < ?3
-           ORDER BY bs.bankruptcy_count DESC",
+            // One declaration writes exactly one ledger row (the balance
+            // reset trigger), so rows in the window are this year's events.
+            // `related_id` holds the player, not an event id.
+            "SELECT le.account_id, p.discord_username, COUNT(*) AS events
+               FROM economy_ledger_entries AS le
+               JOIN players AS p ON p.discord_id = le.account_id AND p.guild_id = ?1
+              WHERE le.guild_id = ?1 AND le.account_type = 'player'
+                AND le.related_type = 'bankruptcy'
+                AND le.created_at >= ?2 AND le.created_at < ?3
+           GROUP BY le.account_id
+           ORDER BY events DESC, le.account_id ASC",
         )?;
         statement
             .query_map(params![guild_id, start_ts, end_ts], |row| {
@@ -543,17 +570,20 @@ impl WrappedLiveRepository {
         &self,
         discord_id: i64,
         guild_id: i64,
-        limit: i64,
+        start_ts: i64,
+        end_ts: i64,
     ) -> Result<Vec<WrappedRatingPoint>, WrappedLiveRepositoryError> {
         let connection = open_runtime_connection(&self.path)?;
         let mut statement = connection.prepare(
             "SELECT rating, rating_before, os_mu_after, won, CAST(timestamp AS TEXT)
                FROM rating_history
               WHERE discord_id = ?1 AND guild_id = ?2
-           ORDER BY timestamp DESC, id DESC LIMIT ?3",
+                AND timestamp >= datetime(?3, 'unixepoch')
+                AND timestamp < datetime(?4, 'unixepoch')
+           ORDER BY timestamp DESC, id DESC",
         )?;
         statement
-            .query_map(params![discord_id, guild_id, limit], |row| {
+            .query_map(params![discord_id, guild_id, start_ts, end_ts], |row| {
                 Ok(WrappedRatingPoint {
                     rating: row.get(0)?,
                     rating_before: row.get(1)?,
@@ -566,20 +596,126 @@ impl WrappedLiveRepository {
             .map_err(Into::into)
     }
 
-    pub fn player_name(
+    /// One row per participant of every recorded guild match in the window,
+    /// for registered players only, plus those players' time zones.
+    pub fn guild_year_rows(
         &self,
-        discord_id: i64,
         guild_id: i64,
-    ) -> Result<Option<String>, WrappedLiveRepositoryError> {
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<(Vec<DistinctMatch>, Vec<DistinctPlayer>), WrappedLiveRepositoryError> {
         let connection = open_runtime_connection(&self.path)?;
-        connection
+        // Correction replays can leave several rating rows for one player and
+        // match; the latest id is the one that stands.
+        let mut statement = connection.prepare(
+            "SELECT mp.match_id, mp.discord_id, mp.side, mp.won, m.match_date,
+                    m.duration_seconds, mp.hero_id, mp.kills, mp.deaths, mp.assists,
+                    mp.last_hits, mp.gpm, mp.hero_damage, mp.hero_healing,
+                    CASE WHEN mp.obs_placed IS NULL AND mp.sen_placed IS NULL THEN NULL
+                         ELSE COALESCE(mp.obs_placed, 0) + COALESCE(mp.sen_placed, 0) END,
+                    mp.camps_stacked, mp.rune_pickups, mp.stuns,
+                    wf.match_id IS NOT NULL, wf.courier_kills, wf.pings,
+                    wf.actions_per_min, wf.rapier_count, wf.buybacks, wf.item_counts,
+                    wf.comeback, wf.throw,
+                    rh.expected_team_win_prob, rh.rating - rh.rating_before,
+                    p.timezone, mp.firstblood_claimed, mp.roshans_killed
+               FROM match_participants AS mp
+               JOIN matches AS m ON m.match_id = mp.match_id
+               JOIN players AS p ON p.discord_id = mp.discord_id AND p.guild_id = ?1
+          LEFT JOIN wrapped_enrichment_facts AS wf
+                 ON wf.guild_id = m.guild_id AND wf.match_id = mp.match_id
+                AND wf.discord_id = mp.discord_id
+          LEFT JOIN rating_history AS rh
+                 ON rh.id = (SELECT MAX(r2.id) FROM rating_history AS r2
+                              WHERE r2.match_id = mp.match_id
+                                AND r2.discord_id = mp.discord_id
+                                AND r2.guild_id = m.guild_id)
+              WHERE m.winning_team IS NOT NULL
+                AND m.guild_id = ?1
+                AND m.match_date >= datetime(?2, 'unixepoch')
+                AND m.match_date < datetime(?3, 'unixepoch')
+           ORDER BY m.match_date ASC, mp.match_id ASC, mp.discord_id ASC",
+        )?;
+        let mut matches = Vec::new();
+        let mut players = BTreeMap::new();
+        let mut rows = statement.query(params![guild_id, start_ts, end_ts])?;
+        while let Some(row) = rows.next()? {
+            let discord_id: i64 = row.get(1)?;
+            let match_date: Option<String> = row.get(4)?;
+            let item_counts: Option<String> = row.get(24)?;
+            matches.push(DistinctMatch {
+                match_id: row.get(0)?,
+                discord_id,
+                side: row.get(2)?,
+                won: row.get::<_, Option<i64>>(3)?.map(|won| won != 0),
+                finished_at: match_date.as_deref().and_then(parse_match_date),
+                duration_seconds: row.get(5)?,
+                hero_id: row.get(6)?,
+                kills: row.get(7)?,
+                deaths: row.get(8)?,
+                assists: row.get(9)?,
+                last_hits: row.get(10)?,
+                gpm: row.get(11)?,
+                hero_damage: row.get(12)?,
+                hero_healing: row.get(13)?,
+                wards: row.get(14)?,
+                camps_stacked: row.get(15)?,
+                rune_pickups: row.get(16)?,
+                stuns: row.get(17)?,
+                enriched: row.get(18)?,
+                courier_kills: row.get(19)?,
+                pings: row.get(20)?,
+                actions_per_min: row.get(21)?,
+                rapiers: row.get(22)?,
+                buybacks: row.get(23)?,
+                items: item_counts.as_deref().and_then(parse_item_counts),
+                comeback: row.get(25)?,
+                throw: row.get(26)?,
+                expected_win: row.get(27)?,
+                rating_delta: row.get(28)?,
+                first_blood: row.get::<_, Option<i64>>(30)?.map(|claimed| claimed != 0),
+                roshans: row.get(31)?,
+            });
+            players
+                .entry(discord_id)
+                .or_insert(row.get::<_, Option<String>>(29)?);
+        }
+        let players = players
+            .into_iter()
+            .map(|(discord_id, timezone)| DistinctPlayer {
+                discord_id,
+                timezone,
+            })
+            .collect();
+        Ok((matches, players))
+    }
+
+    /// Radiant gold advantage per minute, when the match was parsed.
+    pub fn gold_advantage(
+        &self,
+        guild_id: i64,
+        match_id: i64,
+    ) -> Result<Option<Vec<f64>>, WrappedLiveRepositoryError> {
+        let connection = open_runtime_connection(&self.path)?;
+        let raw: Option<String> = connection
             .query_row(
-                "SELECT discord_username FROM players WHERE discord_id = ?1 AND guild_id = ?2",
-                params![discord_id, guild_id],
+                "SELECT enrichment_data FROM matches WHERE match_id = ?1 AND guild_id = ?2",
+                params![match_id, guild_id],
                 |row| row.get(0),
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?
+            .flatten();
+        let series = raw
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|payload| {
+                payload
+                    .get("radiant_gold_adv")?
+                    .as_array()?
+                    .iter()
+                    .map(serde_json::Value::as_f64)
+                    .collect::<Option<Vec<_>>>()
+            });
+        Ok(series)
     }
 }
 
@@ -707,5 +843,270 @@ mod tests {
             .unwrap()
             .remove(0);
         assert_eq!(row.avg_kda, 10.0, "NULL row is excluded from SQLite AVG");
+    }
+
+    const START: i64 = 1_767_225_600;
+    const END: i64 = 1_798_761_600;
+
+    fn year_fixture() -> (NamedTempFile, Connection) {
+        let file = NamedTempFile::new().unwrap();
+        copy_migrated_database(file.path()).unwrap();
+        let connection = Connection::open(file.path()).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        (file, connection)
+    }
+
+    fn add_match(
+        connection: &Connection,
+        match_id: i64,
+        guild_id: i64,
+        date: &str,
+        players: &[i64],
+    ) {
+        connection
+            .execute(
+                "INSERT INTO matches(match_id,team1_players,team2_players,winning_team,match_date,guild_id,duration_seconds)
+                 VALUES(?1,'[]','[]',1,?2,?3,2400)",
+                params![match_id, date, guild_id],
+            )
+            .unwrap();
+        for player in players {
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO players(discord_id,guild_id,discord_username,timezone)
+                     VALUES(?1,?2,'P','Europe/Berlin')",
+                    params![player, guild_id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO match_participants(match_id,discord_id,guild_id,won,side,hero_id,kills,deaths,assists,gpm)
+                     VALUES(?1,?2,?3,1,'radiant',5,3,2,1,500)",
+                    params![match_id, player, guild_id],
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn guild_year_rows_covers_every_participant_and_isolates_guilds() {
+        let (file, db) = year_fixture();
+        add_match(&db, 1, 42, "2026-03-14T21:05:00+00:00", &[7, 8]);
+        add_match(&db, 2, 99, "2026-03-14 21:05:00", &[7, 9]);
+        let (matches, players) = WrappedLiveRepository::new(file.path())
+            .guild_year_rows(42, START, END)
+            .unwrap();
+        let mut ids: Vec<_> = matches.iter().map(|m| (m.match_id, m.discord_id)).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [(1, 7), (1, 8)]);
+        assert_eq!(players.len(), 2);
+        assert_eq!(players[0].timezone.as_deref(), Some("Europe/Berlin"));
+        let row = &matches[0];
+        assert_eq!(row.finished_at, Some(1_773_522_300));
+        assert_eq!(row.side.as_deref(), Some("radiant"));
+        assert_eq!((row.won, row.duration_seconds), (Some(true), Some(2400)));
+        assert_eq!(
+            (row.kills, row.gpm, row.hero_id),
+            (Some(3), Some(500), Some(5))
+        );
+    }
+
+    #[test]
+    fn guild_year_rows_respects_year_bounds() {
+        let (file, db) = year_fixture();
+        add_match(&db, 1, 42, "2025-12-31T23:59:59+00:00", &[7]);
+        add_match(&db, 2, 42, "2025-12-31 23:59:59", &[7]);
+        add_match(&db, 3, 42, "2026-01-01 00:00:00", &[7]);
+        add_match(&db, 4, 42, "2026-12-31T23:59:59+00:00", &[7]);
+        add_match(&db, 5, 42, "2027-01-01T00:00:00+00:00", &[7]);
+        add_match(&db, 6, 42, "2027-01-01 00:00:00", &[7]);
+        let (matches, _) = WrappedLiveRepository::new(file.path())
+            .guild_year_rows(42, START, END)
+            .unwrap();
+        let mut ids: Vec<_> = matches.iter().map(|m| m.match_id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [3, 4]);
+        let finished: Vec<_> = matches.iter().map(|m| m.finished_at).collect();
+        assert!(finished.contains(&Some(START)));
+        assert!(finished.contains(&Some(END - 1)));
+    }
+
+    #[test]
+    fn guild_year_rows_keeps_unenriched_values_null() {
+        let (file, db) = year_fixture();
+        add_match(&db, 1, 42, "2026-03-14 21:05:00", &[7, 8]);
+        db.execute(
+            "UPDATE match_participants SET obs_placed=3, sen_placed=NULL WHERE discord_id=8",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO wrapped_enrichment_facts(guild_id,match_id,discord_id,actions_per_min,
+                 courier_kills,pings,rapier_count,buybacks,item_counts)
+             VALUES(42,1,8,250,1,9,2,3,'{\"magic_wand\":2,\"blink\":1}')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO rating_history(discord_id,guild_id,rating_before,rating,timestamp,match_id,expected_team_win_prob)
+             VALUES(8,42,1500,1520,'2026-03-14 21:10:00',1,0.4),
+                   (8,42,1520,1530,'2026-03-14 21:11:00',1,0.45)",
+            [],
+        )
+        .unwrap();
+        let (matches, _) = WrappedLiveRepository::new(file.path())
+            .guild_year_rows(42, START, END)
+            .unwrap();
+        let bare = matches.iter().find(|m| m.discord_id == 7).unwrap();
+        assert!(!bare.enriched);
+        assert_eq!(bare.wards, None);
+        assert_eq!(bare.items, None);
+        assert_eq!(
+            (
+                bare.rapiers,
+                bare.buybacks,
+                bare.expected_win,
+                bare.rating_delta
+            ),
+            (None, None, None, None)
+        );
+        let full = matches.iter().find(|m| m.discord_id == 8).unwrap();
+        assert!(full.enriched);
+        assert_eq!(full.wards, Some(3));
+        assert_eq!(
+            full.items,
+            Some(vec![("blink".to_owned(), 1), ("magic_wand".to_owned(), 2)])
+        );
+        assert_eq!((full.rapiers, full.buybacks), (Some(2), Some(3)));
+        assert_eq!((full.courier_kills, full.pings), (Some(1), Some(9)));
+        assert_eq!(full.actions_per_min, Some(250.0));
+        assert_eq!(full.expected_win, Some(0.45), "latest rating row wins");
+        assert_eq!(full.rating_delta, Some(10.0));
+        db.execute(
+            "UPDATE wrapped_enrichment_facts SET item_counts='not json'",
+            [],
+        )
+        .unwrap();
+        let (matches, _) = WrappedLiveRepository::new(file.path())
+            .guild_year_rows(42, START, END)
+            .unwrap();
+        let malformed = matches.iter().find(|m| m.discord_id == 8).unwrap();
+        assert!(malformed.enriched);
+        assert_eq!(malformed.items, None, "malformed counts are unknown");
+        db.execute("UPDATE wrapped_enrichment_facts SET item_counts='{}'", [])
+            .unwrap();
+        let (matches, _) = WrappedLiveRepository::new(file.path())
+            .guild_year_rows(42, START, END)
+            .unwrap();
+        let empty = matches.iter().find(|m| m.discord_id == 8).unwrap();
+        assert_eq!(empty.items, Some(Vec::new()), "a parsed log bought nothing");
+    }
+
+    #[test]
+    fn guild_year_rows_reads_first_blood_and_roshans() {
+        let (file, db) = year_fixture();
+        add_match(&db, 1, 42, "2026-03-14 21:05:00", &[7, 8, 9]);
+        db.execute(
+            "UPDATE match_participants SET firstblood_claimed=1, roshans_killed=2
+              WHERE discord_id=8",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE match_participants SET firstblood_claimed=0, roshans_killed=0
+              WHERE discord_id=9",
+            [],
+        )
+        .unwrap();
+        let (matches, _) = WrappedLiveRepository::new(file.path())
+            .guild_year_rows(42, START, END)
+            .unwrap();
+        let row = |id: i64| matches.iter().find(|m| m.discord_id == id).unwrap();
+        let facts = |id: i64| (row(id).first_blood, row(id).roshans);
+        assert_eq!(facts(8), (Some(true), Some(2)));
+        // A parsed zero is known; an unparsed game stays unknown.
+        assert_eq!(facts(9), (Some(false), Some(0)));
+        assert_eq!(facts(7), (None, None));
+    }
+
+    #[test]
+    fn gold_advantage_reads_series_and_is_none_without_data() {
+        let (file, db) = year_fixture();
+        add_match(&db, 1, 42, "2026-03-14 21:05:00", &[7]);
+        add_match(&db, 2, 42, "2026-03-15 21:05:00", &[7]);
+        db.execute(
+            "UPDATE matches SET enrichment_data='{\"radiant_gold_adv\":[0,150,-300.5]}' WHERE match_id=1",
+            [],
+        )
+        .unwrap();
+        let repo = WrappedLiveRepository::new(file.path());
+        assert_eq!(
+            repo.gold_advantage(42, 1).unwrap(),
+            Some(vec![0.0, 150.0, -300.5])
+        );
+        assert_eq!(repo.gold_advantage(42, 2).unwrap(), None);
+        assert_eq!(repo.gold_advantage(99, 1).unwrap(), None);
+        assert_eq!(repo.gold_advantage(42, 404).unwrap(), None);
+    }
+
+    #[test]
+    fn rating_history_is_year_scoped() {
+        let (file, db) = year_fixture();
+        for (n, ts) in [
+            "2025-12-31 23:59:59",
+            "2026-02-01 10:00:00",
+            "2026-06-01 10:00:00",
+            "2027-01-01 00:00:00",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            db.execute(
+                "INSERT INTO rating_history(discord_id,guild_id,rating_before,rating,timestamp,match_id)
+                 VALUES(7,42,1500,?1,?2,?3)",
+                params![1500 + n as i64, ts, n as i64 + 1],
+            )
+            .unwrap();
+        }
+        let rows = WrappedLiveRepository::new(file.path())
+            .rating_history(7, 42, START, END)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|row| matches!(row.rating, Some(1501.0 | 1502.0)))
+        );
+    }
+
+    #[test]
+    fn bankruptcies_count_this_years_events_only() {
+        let (file, db) = year_fixture();
+        db.execute_batch(&format!(
+            "INSERT INTO players(discord_id,guild_id,discord_username)
+                VALUES(7,42,'Seven'),(8,42,'Eight'),(42,42,'FortyTwo');
+             INSERT INTO bankruptcy_state(discord_id,guild_id,last_bankruptcy_at,penalty_games_remaining,bankruptcy_count)
+                VALUES(7,42,{m},0,3),(8,42,{p},0,2);
+             INSERT INTO economy_ledger_entries(guild_id,account_type,account_id,delta,balance_before,
+                  balance_after,source,related_type,related_id,created_at)
+             VALUES (42,'player',7,500,-500,0,'bankruptcy','bankruptcy','7',{p}),
+                    (42,'player',7,500,-500,0,'bankruptcy','bankruptcy','7',{p2}),
+                    (42,'player',7,500,-500,0,'bankruptcy','bankruptcy','7',{m}),
+                    (42,'player',7,-20,100,80,'pet','pet','7',{m}),
+                    (99,'player',7,500,-500,0,'bankruptcy','bankruptcy','7',{m}),
+                    (42,'player',8,500,-500,0,'bankruptcy','bankruptcy','8',{p}),
+                    -- The guild's nonprofit account shares its id with player 42.
+                    (42,'nonprofit',42,500,0,500,'bankruptcy','bankruptcy','42',{m});",
+            m = START + 86_400,
+            p = START - 86_400,
+            p2 = START - 2 * 86_400,
+        ))
+        .unwrap();
+        let rows = WrappedLiveRepository::new(file.path())
+            .bankruptcies(42, START, END)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].discord_id, rows[0].bankruptcy_count), (7, 1));
     }
 }

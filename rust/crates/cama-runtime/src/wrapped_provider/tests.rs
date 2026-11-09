@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-use cama_app::wrapped_media::{WrappedSlideData, render_wrapped_slide};
+use cama_app::wrapped_media::{
+    WrappedPunch, WrappedSlideData, backgrounds_alike, render_wrapped_slide, slide_backgrounds,
+};
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
@@ -199,41 +201,20 @@ struct FakeDiscord {
     peak: AtomicUsize,
 }
 
+fn profile(name: &str) -> WrappedDiscordProfile {
+    WrappedDiscordProfile {
+        display_name: name.to_owned(),
+    }
+}
+
 impl FakeDiscord {
     fn production() -> Arc<Self> {
-        let mut avatar_slide = WrappedSlideData::new("story_games", "Avatar");
-        avatar_slide.stat_value = "A".to_owned();
-        let avatar = render_wrapped_slide(&avatar_slide).expect("native avatar fixture");
         Arc::new(Self {
             profiles: BTreeMap::from([
-                (
-                    100,
-                    WrappedDiscordProfile {
-                        display_name: "Guild Owner".to_owned(),
-                        avatar_png: None,
-                    },
-                ),
-                (
-                    200,
-                    WrappedDiscordProfile {
-                        display_name: "Guild Ally".to_owned(),
-                        avatar_png: Some(avatar),
-                    },
-                ),
-                (
-                    300,
-                    WrappedDiscordProfile {
-                        display_name: "Guild Rival".to_owned(),
-                        avatar_png: None,
-                    },
-                ),
-                (
-                    400,
-                    WrappedDiscordProfile {
-                        display_name: "Guild Peer".to_owned(),
-                        avatar_png: None,
-                    },
-                ),
+                (100, profile("Guild Owner")),
+                (200, profile("Guild Ally")),
+                (300, profile("Guild Rival")),
+                (400, profile("Guild Peer")),
             ]),
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
@@ -247,38 +228,26 @@ impl WrappedDiscordPort for FakeDiscord {
         &self,
         _guild_id: u64,
         user_id: u64,
-        include_avatar: bool,
     ) -> Result<Option<WrappedDiscordProfile>, String> {
         let active = self.active.fetch_add(1, AtomicOrdering::SeqCst) + 1;
         self.peak.fetch_max(active, AtomicOrdering::SeqCst);
         tokio::time::sleep(Duration::from_millis(2)).await;
         self.active.fetch_sub(1, AtomicOrdering::SeqCst);
-        Ok(self.profiles.get(&user_id).cloned().map(|mut profile| {
-            if !include_avatar {
-                profile.avatar_png = None;
-            }
-            profile
-        }))
+        Ok(self.profiles.get(&user_id).cloned())
     }
 }
 
 struct ProfileProbe {
     profiles: BTreeMap<u64, WrappedDiscordProfile>,
     failures: BTreeSet<u64>,
-    calls: Mutex<Vec<(u64, bool)>>,
+    calls: Mutex<Vec<u64>>,
     active: AtomicUsize,
     peak: AtomicUsize,
 }
 
 impl ProfileProbe {
     fn new(profiles: BTreeMap<u64, WrappedDiscordProfile>) -> Arc<Self> {
-        Arc::new(Self {
-            profiles,
-            failures: BTreeSet::new(),
-            calls: Mutex::new(Vec::new()),
-            active: AtomicUsize::new(0),
-            peak: AtomicUsize::new(0),
-        })
+        Self::with_failures(profiles, BTreeSet::new())
     }
 
     fn with_failures(
@@ -301,12 +270,11 @@ impl WrappedDiscordPort for ProfileProbe {
         &self,
         _guild_id: u64,
         user_id: u64,
-        include_avatar: bool,
     ) -> Result<Option<WrappedDiscordProfile>, String> {
         self.calls
             .lock()
             .expect("profile probe calls")
-            .push((user_id, include_avatar));
+            .push(user_id);
         let active = self.active.fetch_add(1, AtomicOrdering::SeqCst) + 1;
         self.peak.fetch_max(active, AtomicOrdering::SeqCst);
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -314,40 +282,17 @@ impl WrappedDiscordPort for ProfileProbe {
         if self.failures.contains(&user_id) {
             return Err("member unavailable".to_owned());
         }
-        Ok(self.profiles.get(&user_id).cloned().map(|mut profile| {
-            if !include_avatar {
-                profile.avatar_png = None;
-            }
-            profile
-        }))
+        Ok(self.profiles.get(&user_id).cloned())
     }
 }
 
 #[tokio::test]
-async fn test_prefetch_profiles_reuses_members_for_names_and_avatars() {
+async fn test_prefetch_profiles_asks_once_per_member() {
     let fixture = Fixture::migrated();
     let probe = ProfileProbe::new(BTreeMap::from([
-        (
-            1,
-            WrappedDiscordProfile {
-                display_name: "One".to_owned(),
-                avatar_png: Some(vec![1]),
-            },
-        ),
-        (
-            2,
-            WrappedDiscordProfile {
-                display_name: "Two".to_owned(),
-                avatar_png: Some(vec![2]),
-            },
-        ),
-        (
-            3,
-            WrappedDiscordProfile {
-                display_name: "Three".to_owned(),
-                avatar_png: None,
-            },
-        ),
+        (1, profile("One")),
+        (2, profile("Two")),
+        (3, profile("Three")),
     ]));
     let provider = build_provider(
         &fixture,
@@ -357,7 +302,7 @@ async fn test_prefetch_profiles_reuses_members_for_names_and_avatars() {
 
     let profiles = provider
         .handler
-        .prefetch_profiles(GUILD, BTreeSet::from([1, 2, 3]), BTreeSet::from([1, 2]))
+        .prefetch_profiles(GUILD, BTreeSet::from([1, 2, 3]))
         .await;
 
     assert_eq!(
@@ -367,40 +312,24 @@ async fn test_prefetch_profiles_reuses_members_for_names_and_avatars() {
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(1, "One"), (2, "Two"), (3, "Three")])
     );
-    assert_eq!(profiles[&1].avatar_png, Some(vec![1]));
-    assert_eq!(profiles[&2].avatar_png, Some(vec![2]));
-    assert_eq!(profiles[&3].avatar_png, None);
     let mut calls = probe.calls.lock().expect("profile probe calls").clone();
     calls.sort_unstable();
-    assert_eq!(calls, [(1, true), (2, true), (3, false)]);
+    assert_eq!(calls, [1, 2, 3]);
 }
 
 #[tokio::test]
 async fn test_prefetch_profiles_bounds_all_network_concurrency() {
     let fixture = Fixture::migrated();
-    let probe = ProfileProbe::new(
-        (0..12)
-            .map(|id| {
-                (
-                    id,
-                    WrappedDiscordProfile {
-                        display_name: id.to_string(),
-                        avatar_png: Some(vec![u8::try_from(id).expect("small fixture id")]),
-                    },
-                )
-            })
-            .collect(),
-    );
+    let probe = ProfileProbe::new((0..12).map(|id| (id, profile(&id.to_string()))).collect());
     let provider = build_provider(
         &fixture,
         Arc::clone(&probe) as Arc<dyn WrappedDiscordPort>,
         Duration::from_secs(1),
     );
-    let ids = (0..12).collect::<BTreeSet<_>>();
 
     let profiles = provider
         .handler
-        .prefetch_profiles(GUILD, ids.clone(), ids)
+        .prefetch_profiles(GUILD, (0..12).collect())
         .await;
 
     assert_eq!(profiles.len(), 12);
@@ -408,27 +337,10 @@ async fn test_prefetch_profiles_bounds_all_network_concurrency() {
 }
 
 #[tokio::test]
-async fn test_prefetch_profiles_isolates_member_and_avatar_failures() {
+async fn test_prefetch_profiles_isolates_member_failures() {
     let fixture = Fixture::migrated();
     let probe = ProfileProbe::with_failures(
-        BTreeMap::from([
-            (
-                1,
-                WrappedDiscordProfile {
-                    display_name: "One".to_owned(),
-                    // The live port preserves the member/display name when
-                    // its bounded avatar download fails.
-                    avatar_png: None,
-                },
-            ),
-            (
-                2,
-                WrappedDiscordProfile {
-                    display_name: "Two".to_owned(),
-                    avatar_png: Some(vec![2]),
-                },
-            ),
-        ]),
+        BTreeMap::from([(1, profile("One")), (2, profile("Two"))]),
         BTreeSet::from([2]),
     );
     let provider = build_provider(
@@ -439,12 +351,11 @@ async fn test_prefetch_profiles_isolates_member_and_avatar_failures() {
 
     let profiles = provider
         .handler
-        .prefetch_profiles(GUILD, BTreeSet::from([1, 2]), BTreeSet::from([1, 2]))
+        .prefetch_profiles(GUILD, BTreeSet::from([1, 2]))
         .await;
 
     assert_eq!(profiles.len(), 1);
     assert_eq!(profiles[&1].display_name, "One");
-    assert_eq!(profiles[&1].avatar_png, None);
     assert!(!profiles.contains_key(&2));
 }
 
@@ -717,7 +628,13 @@ async fn personal_story_offers_still_mode_recap_and_separate_details() {
         session
             .slides
             .iter()
-            .any(|slide| slide.kind == "story_moment")
+            .any(|slide| slide.kind == "story_distinct")
+    );
+    assert!(
+        session
+            .slides
+            .iter()
+            .all(|slide| slide.kind != "story_moment")
     );
     assert!(
         session
@@ -739,23 +656,23 @@ async fn personal_story_offers_still_mode_recap_and_separate_details() {
         assert_eq!(slide.chapter_index, index);
         assert_eq!(slide.chapter_count, session.slides.len());
     }
-    assert!(
-        session
-            .slides
-            .iter()
-            .filter(|slide| matches!(
-                slide.kind.as_str(),
-                "story_teammates" | "story_rivals" | "chart_rating"
-            ))
-            .all(|slide| slide.year_label == "All-Time")
-    );
-    assert!(
-        session
-            .slides
-            .iter()
-            .filter(|slide| slide.kind.starts_with("chart_gamba") || slide.kind == "story_gamba")
-            .all(|slide| slide.year_label == "Cama Wrapped 2026")
-    );
+    // The rating chart is a detail page and only covers the requested year.
+    let rating_chart = session
+        .details
+        .iter()
+        .find(|slide| slide.kind == "chart_rating")
+        .expect("fixture produces a rating chart detail page");
+    assert_eq!(rating_chart.year_label, "Cama Wrapped 2026");
+    let gamba = session
+        .slides
+        .iter()
+        .chain(&session.details)
+        .filter(|slide| slide.kind.contains("gamba"))
+        .collect::<Vec<_>>();
+    assert!(!gamba.is_empty(), "the fixture's bets make a gamba card");
+    for slide in gamba {
+        assert_eq!(slide.year_label, "Cama Wrapped 2026", "{}", slide.kind);
+    }
     assert!(!session.animated);
     assert!(
         session
@@ -765,6 +682,30 @@ async fn personal_story_offers_still_mode_recap_and_separate_details() {
             .sum::<usize>()
             <= MAX_CACHED_MEDIA_BYTES
     );
+}
+
+#[test]
+fn an_unreadable_year_row_leaves_the_rest_of_wrapped_standing() {
+    let fixture = Fixture::migrated();
+    // A buyback count stored as text cannot be read back as a number.
+    Connection::open(&fixture.path)
+        .unwrap()
+        .execute(
+            "UPDATE wrapped_enrichment_facts SET buybacks='x' WHERE match_id=1",
+            [],
+        )
+        .unwrap();
+    let raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .expect("the bad row does not fail the deck")
+        .expect("the year still has games");
+    assert!(raw.year_rows.is_empty() && raw.year_players.is_empty());
+    assert_eq!(raw.people, PeopleYear::default());
+    assert_eq!(raw.matches.len(), 3);
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    let story = story_of(&slides);
+    assert_eq!(story.first().unwrap().kind, "story_intro");
+    assert_eq!(story.last().unwrap().kind, "story_finale");
 }
 
 #[test]
@@ -780,11 +721,10 @@ fn missing_or_unreadable_profiles_never_show_discord_ids() {
             .iter()
             .all(|slide| slide.username == "Unknown player")
     );
-    let peers = slides
-        .iter()
-        .filter(|slide| matches!(slide.kind.as_str(), "story_teammates" | "story_rivals"));
-    for slide in peers {
-        assert!(slide.rows.iter().all(|row| row.primary == "Unknown player"));
+    for slide in &slides {
+        for text in slide_texts(slide) {
+            assert!(!text.contains("<@"), "{}: {text}", slide.kind);
+        }
     }
 }
 
@@ -811,6 +751,15 @@ fn sparse_wrapped_does_not_invent_zero_combat_or_identity() {
         row.tower_damage = None;
         row.comeback = None;
         row.enrichment_present = false;
+    }
+    for row in &mut raw.year_rows {
+        row.hero_id = None;
+        row.kills = None;
+        row.deaths = None;
+        row.assists = None;
+        row.duration_seconds = None;
+        row.rapiers = None;
+        row.enriched = false;
     }
     let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
     assert!(!slides.iter().any(|slide| slide.kind == "story_identity"));
@@ -852,32 +801,6 @@ fn review_hero_without_combat_does_not_claim_zero_kda() {
         .find(|slide| slide.kind == "story_hero")
         .unwrap();
     assert!(hero.lines.iter().all(|line| !line.contains("KDA")));
-}
-
-#[test]
-fn review_year_packages_and_original_summary_metrics_remain_accurate() {
-    let fixture = Fixture::migrated();
-    let raw = WrappedSources::new(&fixture.path)
-        .load(GUILD as i64, OWNER as i64, 2026)
-        .unwrap()
-        .unwrap();
-    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
-    let package = slides
-        .iter()
-        .find(|slide| slide.kind == "story_packages")
-        .unwrap();
-    assert_eq!(package.year_label, "Cama Wrapped 2026");
-    let summary = slides
-        .iter()
-        .find(|slide| slide.kind == "story_summary")
-        .unwrap();
-    assert!(summary.lines.iter().any(|line| line.contains("67%")));
-    assert!(
-        summary
-            .lines
-            .iter()
-            .any(|line| line.contains("5.5 aggregate KDA") && line.contains("3 recorded games"))
-    );
 }
 
 #[test]
@@ -1138,13 +1061,19 @@ async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
         "records_endurance",
         "story_hero",
         "story_lanes",
-        "story_teammates",
-        "story_rivals",
-        "story_packages",
+        "story_distinct",
         "chart_rating",
         "chart_gamba",
     ] {
         assert!(kinds.contains(kind), "missing {kind}");
+    }
+    for kind in [
+        "story_teammates",
+        "story_rivals",
+        "story_packages",
+        "story_identity",
+    ] {
+        assert!(!kinds.contains(kind), "{kind} left the story");
     }
     assert_eq!(locked.slides.first().unwrap().kind, "story_intro");
     assert_eq!(locked.slides.last().unwrap().kind, "story_finale");
@@ -1152,19 +1081,6 @@ async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
         let bytes = render_wrapped_slide(slide).expect("render every native story page");
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
-    let teammates = locked
-        .slides
-        .iter()
-        .find(|slide| slide.kind == "story_teammates")
-        .unwrap();
-    assert!(teammates.rows.iter().any(|row| row.primary == "Guild Ally"));
-    assert!(
-        teammates
-            .rows
-            .iter()
-            .all(|row| !row.primary.contains("Database Ally"))
-    );
-    assert!(!teammates.avatars.is_empty());
     let wrapped_gamba = locked
         .slides
         .iter()
@@ -1177,6 +1093,14 @@ async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
     assert_eq!(wrapped_gamba.stat_value, "+140 JC");
     assert_eq!(wrapped_gamba.stat_label, "across 3 gambles");
     assert_eq!(wrapped_gamba.series, [0.0, 120.0, 20.0, 140.0]);
+    // A profitable year is a Stonks card ending on the curve.
+    assert_eq!(wrapped_gamba.layout, WrappedLayout::TwoBeat);
+    assert!(wrapped_gamba.theme.is_popoff_beat());
+    let stonks = wrapped_gamba.beat.as_ref().expect("Stonks copy");
+    assert_eq!(stonks.treatment, WrappedPunch::Stonks);
+    assert_eq!(stonks.value, "+140 JC");
+    assert_eq!(stonks.credit, "+140 JC across 3 gambles");
+    assert!(stonks.punch.to_lowercase().contains("stonks"));
     let report = locked
         .slides
         .iter()
@@ -1453,13 +1377,15 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         bets_against: Vec::new(),
         bankruptcies: Vec::new(),
         matches: Vec::new(),
-        pairwise: PairwiseInput::default(),
-        pairwise_names: BTreeMap::new(),
-        package_purchases: Vec::new(),
+        year_rows: Vec::new(),
+        year_players: Vec::new(),
+        people: PeopleYear::default(),
         rating_history: Vec::new(),
         gamba_stats: None,
         activity: ActivityData::default(),
         hero_art: BTreeMap::new(),
+        art: ArtSources::for_assets(&repository_assets()),
+        gold: Box::new(|_| None),
     };
     let awards = generate_awards(&raw, 3, 3);
     let titles = awards.iter().map(|award| award.title).collect::<Vec<_>>();
@@ -1573,15 +1499,7 @@ fn seed_life_outside_the_queue(fixture: &Fixture) {
 fn named(profiles: &[(i64, &str)]) -> BTreeMap<i64, WrappedDiscordProfile> {
     profiles
         .iter()
-        .map(|(id, name)| {
-            (
-                *id,
-                WrappedDiscordProfile {
-                    display_name: (*name).to_owned(),
-                    avatar_png: None,
-                },
-            )
-        })
+        .map(|(id, name)| (*id, profile(name)))
         .collect()
 }
 
@@ -1606,13 +1524,23 @@ fn top_heroes_wear_portraits_from_the_warm_cache_only() {
         )
         .unwrap();
     let cache = heroes.path().join("trivia");
-    std::fs::create_dir_all(cache.join("heroes")).unwrap();
+    std::fs::create_dir_all(cache.join("heroes/renders")).unwrap();
     let portrait = std::fs::read(repository_assets().join("wrapped/ward.png")).unwrap();
     std::fs::write(cache.join("heroes/antimage.png"), &portrait).unwrap();
+    let render = std::fs::read(repository_assets().join("wrapped/courier.png")).unwrap();
+    std::fs::write(cache.join("heroes/renders/antimage.png"), &render).unwrap();
     let art = ArtSources::for_assets(&repository_assets()).with_hero_portraits(
         cama_app::hero_lookup::HeroLookup::new(&dotabase),
         cache.clone(),
     );
+    // Anti-Mage is the main hero: two of the player's three games.
+    Connection::open(&fixture.path)
+        .unwrap()
+        .execute(
+            "UPDATE match_participants SET hero_id=1 WHERE match_id=3 AND discord_id=100",
+            [],
+        )
+        .unwrap();
     let raw = WrappedSources::with_art(&fixture.path, art)
         .load(GUILD as i64, OWNER as i64, 2026)
         .unwrap()
@@ -1631,6 +1559,7 @@ fn top_heroes_wear_portraits_from_the_warm_cache_only() {
             .clone()
     };
     assert_eq!(image("Anti-Mage"), Some(portrait.clone()));
+    assert_eq!(card.art_png, Some(render), "the main hero's render cutout");
     let recap = slides
         .iter()
         .find(|slide| slide.kind == "story_finale")
@@ -1667,11 +1596,12 @@ fn life_outside_the_queue_gets_its_own_chapters_and_a_cama_type() {
         "the most-fought boss brings its authored scenes"
     );
     assert!(raw.activity.pet_art.is_some(), "the living pet is drawn");
-    let (profile_ids, _) = prefetch_ids(&raw, 3, 3);
+    let profile_ids = prefetch_ids(&raw, OWNER as i64, 3, 3);
     assert!(
         profile_ids.contains(&300),
         "chapter subjects are prefetched"
     );
+    assert!(profile_ids.contains(&(OWNER as i64)));
 
     let profiles = named(&[(100, "Guild Owner"), (300, "Guild Rival")]);
     let slides = build_slides(raw, &profiles, OWNER as i64, "Guild Owner", 2026, 3, 3);
@@ -1681,17 +1611,35 @@ fn life_outside_the_queue_gets_its_own_chapters_and_a_cama_type() {
         .filter(|kind| !is_detail_page(kind))
         .collect::<Vec<_>>();
     for kind in [
+        "chart_gamba",
         "story_dig",
-        "story_dig_boss",
-        "story_dig_feud",
         "story_pet",
         "story_mafia",
-        "story_mafia_victim",
         "story_persona",
-        "story_months",
     ] {
         assert!(kinds.contains(&kind), "missing {kind} in {kinds:?}");
     }
+    // Four side-game cards at most: each game's main card stays, extras
+    // move to More stats.
+    for kind in [
+        "more_story_gamba",
+        "more_story_dig_boss",
+        "more_story_dig_feud",
+        "more_story_mafia_victim",
+    ] {
+        assert!(
+            slides
+                .iter()
+                .any(|slide| slide.kind == kind && is_detail_page(&slide.kind)),
+            "{kind} is under More stats"
+        );
+    }
+    assert!(
+        slides
+            .iter()
+            .any(|slide| slide.kind == "story_months" && is_detail_page(&slide.kind)),
+        "the month-by-month chart moved to More stats"
+    );
     let position = |kind| {
         kinds
             .iter()
@@ -1705,7 +1653,7 @@ fn life_outside_the_queue_gets_its_own_chapters_and_a_cama_type() {
     assert_eq!(*kinds.last().unwrap(), "story_finale");
 
     let find = |kind| slides.iter().find(|slide| slide.kind == kind).unwrap();
-    let boss = find("story_dig_boss");
+    let boss = find("more_story_dig_boss");
     assert_eq!(boss.layout, WrappedLayout::Spotlight);
     assert!(boss.art_png.is_some());
     assert_eq!(boss.stat_value, "3 fights");
@@ -1713,24 +1661,41 @@ fn life_outside_the_queue_gets_its_own_chapters_and_a_cama_type() {
     assert_eq!(pet.headline, "Sir Fluff");
     assert!(pet.art_png.is_some());
     assert_eq!(
-        find("story_dig_feud").headline,
+        find("more_story_dig_feud").headline,
         "You targeted Guild Rival most often."
     );
     assert_eq!(
-        find("story_mafia_victim").headline,
+        find("more_story_mafia_victim").headline,
         "You targeted Guild Rival most often."
     );
     assert!(
-        find("story_mafia_victim")
+        find("more_story_mafia_victim")
             .stat_label
             .contains("Guild Rival")
     );
+    // The pet card claims only this year's spending or lifetime feedings.
+    assert_eq!(pet.stat_value, "14 meals");
+    assert_eq!(pet.stat_label, "served, lifetime");
     let persona = find("story_persona");
     assert!(!persona.stat_value.is_empty());
+    assert_eq!(persona.title, "Your Cama type");
+    assert_eq!(persona.lines, std::slice::from_ref(&persona.headline));
+    // The pills are the stories behind the title, strongest first.
+    assert_eq!(
+        persona
+            .rows
+            .iter()
+            .map(|row| (row.primary.as_str(), row.secondary.as_str()))
+            .collect::<Vec<_>>(),
+        [("1", "Divine Rapier"), ("11 / 5 / 13", "Bane")]
+    );
     let recap = slides.last().unwrap();
     assert_eq!(recap.headline, persona.stat_value);
-    assert!(recap.lines.contains(&"2|Mafia games".to_owned()));
+    // Games, time, then the best popoff, ahead of the side games.
+    assert_eq!(recap.lines[0], "3|games played");
+    assert_eq!(recap.lines[2], "1|Divine Rapier");
     assert!(recap.lines.iter().any(|line| line.ends_with("|blocks dug")));
+    assert_eq!(recap.lines.len(), 5);
     for slide in &slides {
         render_wrapped_slide(slide).expect("every chapter renders");
     }
@@ -1750,16 +1715,16 @@ fn chapters_never_name_people_without_a_readable_name() {
     assert!(
         slides
             .iter()
-            .all(|slide| slide.kind != "story_mafia_victim")
+            .all(|slide| !slide.kind.ends_with("story_mafia_victim"))
     );
     let feud = slides
         .iter()
-        .find(|slide| slide.kind == "story_dig_feud")
+        .find(|slide| slide.kind == "more_story_dig_feud")
         .unwrap();
     assert_eq!(feud.headline, "Your sabotage activity.");
     for slide in slides.iter().filter(|slide| {
         matches!(
-            slide.kind.as_str(),
+            slide.kind.trim_start_matches("more_"),
             "story_dig" | "story_dig_feud" | "story_pet" | "story_mafia" | "story_persona"
         )
     }) {
@@ -1861,7 +1826,7 @@ async fn recap_can_be_shared_once_as_a_lasting_message() {
 }
 
 #[test]
-fn personal_superlatives_are_spaced_through_the_story_with_evidence_and_a_recap() {
+fn thin_decks_borrow_personal_awards_without_fine_print() {
     let fixture = Fixture::migrated();
     let mut raw = WrappedSources::new(&fixture.path)
         .load(GUILD as i64, OWNER as i64, 2026)
@@ -1880,46 +1845,44 @@ fn personal_superlatives_are_spaced_through_the_story_with_evidence_and_a_recap(
         row.duration_seconds = Some(1200);
         row.won = Some(true);
     }
+    // Unparsed combat and no Rapier leave nothing distinct to rank.
+    for row in &mut raw.year_rows {
+        row.kills = None;
+        row.rapiers = None;
+    }
     let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
     let story = slides
         .iter()
         .filter(|slide| !is_detail_page(&slide.kind))
         .collect::<Vec<_>>();
+    assert!(story.iter().all(|slide| slide.kind != "story_distinct"));
     let awards = story
         .iter()
-        .enumerate()
-        .filter(|(_, slide)| slide.kind == "story_superlative")
+        .filter(|slide| slide.kind == "story_superlative")
         .collect::<Vec<_>>();
-    assert_eq!(
-        awards.len(),
-        3,
-        "all three personal awards should be reachable in the main story"
-    );
-    assert!(
-        awards.windows(2).all(|pair| pair[1].0 > pair[0].0 + 1),
-        "personal awards need breathing room between reveals"
-    );
-    for (_, award) in &awards {
+    assert_eq!(awards.len(), 3, "every personal award joins a thin deck");
+    for award in &awards {
         assert!(award.badge.is_empty());
         assert!(!award.headline.is_empty());
         assert!(!award.stat_value.is_empty());
         assert!(!award.stat_label.is_empty());
-        assert_eq!(award.lines.len(), 2);
-        assert!(!award.lines[0].is_empty());
-        assert!(award.lines[1].contains("3 of 3"));
+        // The detail line stays; the coverage fine print does not.
+        assert_eq!(award.lines.len(), 1);
+        assert!(!award.lines[0].starts_with("Recorded in"));
     }
-    assert_eq!(awards[0].1.title, "Can't touch this");
-    assert_eq!(awards[0].1.stat_value, "3");
-    assert_eq!(awards[1].1.title, "Speedrun");
-    assert_eq!(awards[1].1.stat_value, "20:00");
-    assert_eq!(awards[2].1.title, "Assist machine");
-    assert_eq!(awards[2].1.stat_value, "30");
-    assert_eq!(story.last().unwrap().badge, awards[0].1.title);
-    assert!(story.iter().all(|slide| slide.kind != "chart_rating"));
+    assert_eq!(awards[0].title, "Can't touch this");
+    assert_eq!(awards[1].title, "Speedrun");
+    assert_eq!(awards[2].title, "Assist machine");
+    assert_eq!(story.last().unwrap().badge, awards[0].title);
+    // The borrowed cards sit where the distinct stories would.
+    let position = |kind: &str| story.iter().position(|slide| slide.kind == kind).unwrap();
+    assert!(position("story_superlative") > position("story_hero"));
     assert!(
-        slides
+        story
             .iter()
-            .any(|slide| slide.kind == "chart_rating" && is_detail_page(&slide.kind))
+            .filter(|slide| slide.kind == "story_moment")
+            .count()
+            <= STORY_MOMENTS
     );
     let overflow = slides
         .iter()
@@ -1935,14 +1898,8 @@ fn personal_superlatives_are_spaced_through_the_story_with_evidence_and_a_recap(
         assert!(!moment.stat_value.is_empty());
         assert!(!moment.stat_label.is_empty());
         assert_eq!(moment.lines.len(), 2);
+        assert!(moment.lines[1].starts_with("Recorded in"));
     }
-    assert!(
-        story
-            .iter()
-            .filter(|slide| slide.kind == "story_moment")
-            .count()
-            <= 2
-    );
 }
 
 #[test]
@@ -1955,5 +1912,1136 @@ fn personal_superlatives_are_absent_without_observed_match_evidence() {
     raw.matches.clear();
     let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
     assert!(slides.iter().all(|slide| slide.kind != "story_superlative"));
-    assert!(slides.last().unwrap().badge.is_empty());
+    // No award to name: the recap wears the best popoff's fact line.
+    assert_eq!(
+        slides.last().unwrap().badge,
+        "1 Divine Rapier in parsed games"
+    );
+}
+
+#[test]
+fn hero_render_reads_cache_and_never_downloads() {
+    let heroes = tempfile::tempdir().unwrap();
+    let dotabase = heroes.path().join("dotabase.db");
+    Connection::open(&dotabase)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE heroes (
+                 id INTEGER PRIMARY KEY,name TEXT,color TEXT,localized_name TEXT,roles TEXT
+             );
+             INSERT INTO heroes VALUES
+                 (1,'npc_dota_hero_antimage','#784094','Anti-Mage','Carry'),
+                 (2,'npc_dota_hero_axe','#b32b2b','Axe','Initiator');",
+        )
+        .unwrap();
+    let cache = heroes.path().join("trivia");
+    std::fs::create_dir_all(cache.join("heroes/renders")).unwrap();
+    std::fs::write(cache.join("heroes/renders/antimage.png"), b"render").unwrap();
+    std::fs::write(
+        cache.join("heroes/renders/axe.png"),
+        vec![0_u8; 4 * 1024 * 1024 + 1],
+    )
+    .unwrap();
+    let art = ArtSources::for_assets(&repository_assets()).with_hero_portraits(
+        cama_app::hero_lookup::HeroLookup::new(&dotabase),
+        cache.clone(),
+    );
+    assert_eq!(art.hero_render(1), Some(b"render".to_vec()));
+    // Oversized files, unknown heroes and uncached renders yield nothing.
+    assert_eq!(art.hero_render(2), None);
+    assert_eq!(art.hero_render(999), None);
+}
+
+/// Peers carry snowflake-sized ids, so a leaked id shows as a long digit run.
+const PEER: i64 = 900_000_000_000_000_001;
+/// On the player's team in every 2026 game.
+const DUO: i64 = PEER;
+/// On the other team in every 2026 game.
+const NEMESIS: i64 = PEER + 1;
+/// The player's partner in 2025, absent in 2026.
+const OLD_DUO: i64 = PEER + 2;
+/// Twelve more peers fill the remaining seats in turn.
+const ROTATING_FIRST: i64 = PEER + 3;
+
+impl Fixture {
+    /// A fifteen-player 2026 league of twelve games. The player is in the
+    /// first `games` of them, and won twelve 2025 games with `OLD_DUO`.
+    fn league(games: i64) -> Self {
+        let directory = tempfile::tempdir().expect("temporary Wrapped directory");
+        let path = directory.path().join("league.sqlite3");
+        initialize_or_migrate(&path).expect("migrate Wrapped database");
+        let connection = Connection::open(&path).expect("open league fixture");
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("disable fixture foreign keys");
+        for id in std::iter::once(OWNER as i64).chain((0..15).map(|index| PEER + index)) {
+            connection
+                .execute(
+                    "INSERT INTO players(discord_id,guild_id,discord_username) VALUES(?1,42,?2)",
+                    params![id, format!("Registered {id}")],
+                )
+                .expect("insert league player");
+        }
+        let seat = |match_id: i64, id: i64, radiant: bool, won: bool| {
+            // The player stands out; everyone else differs a little.
+            let (hero, kills, deaths, last_hits, gpm, damage) = if id == OWNER as i64 {
+                (1, 22, 13, 380, 820, 61_000)
+            } else {
+                let offset = id - PEER;
+                (
+                    2 + offset,
+                    4 + offset % 5,
+                    4 + offset % 4,
+                    120 + offset * 5,
+                    380 + offset * 7,
+                    14_000 + offset * 300,
+                )
+            };
+            connection
+                .execute(
+                    "INSERT INTO match_participants(
+                         match_id,discord_id,guild_id,team_number,side,won,hero_id,
+                         kills,deaths,assists,last_hits,gpm,hero_damage
+                     ) VALUES(?1,?2,42,?3,?4,?5,?6,?7,?8,10,?9,?10,?11)",
+                    params![
+                        match_id,
+                        id,
+                        if radiant { 1 } else { 2 },
+                        if radiant { "radiant" } else { "dire" },
+                        won,
+                        hero,
+                        kills,
+                        deaths,
+                        last_hits,
+                        gpm,
+                        damage,
+                    ],
+                )
+                .expect("insert league participant");
+        };
+        let game = |match_id: i64, date: String, radiant_won: bool, gold: Option<&str>| {
+            connection
+                .execute(
+                    "INSERT INTO matches(
+                         match_id,team1_players,team2_players,winning_team,match_date,
+                         guild_id,duration_seconds,enrichment_data
+                     ) VALUES(?1,'[]','[]',?2,?3,42,2400,?4)",
+                    params![match_id, if radiant_won { 1 } else { 2 }, date, gold],
+                )
+                .expect("insert league match");
+        };
+        for index in 0..12_i64 {
+            let match_id = index + 1;
+            let radiant_won = index % 6 != 5;
+            // The sixth game is the one the player's team threw.
+            let gold = (index == 5)
+                .then_some(r#"{"radiant_gold_adv":[0,1500,6000,12000,15000,9000,2000,-4000]}"#);
+            // 08:30 UTC finishes are the small hours in New York.
+            game(
+                match_id,
+                format!("2026-03-{:02} 08:30:00", index + 1),
+                radiant_won,
+                gold,
+            );
+            let mut radiant = vec![DUO];
+            if index < games {
+                radiant.push(OWNER as i64);
+            }
+            let mut dire = vec![NEMESIS];
+            for chair in 0..7 {
+                let peer = ROTATING_FIRST + (index * 7 + chair) % 12;
+                if chair < 3 {
+                    radiant.push(peer);
+                } else {
+                    dire.push(peer);
+                }
+            }
+            for id in radiant {
+                seat(match_id, id, true, radiant_won);
+            }
+            for id in dire {
+                seat(match_id, id, false, !radiant_won);
+            }
+        }
+        if games > 5 {
+            connection
+                .execute(
+                    "INSERT INTO wrapped_enrichment_facts(
+                         guild_id,match_id,discord_id,rapier_count,comeback,throw
+                     ) VALUES(42,6,100,0,0,15000)",
+                    [],
+                )
+                .expect("insert the thrown game's facts");
+        }
+        if games > 2 {
+            connection
+                .execute(
+                    "INSERT INTO rating_history(
+                         discord_id,guild_id,rating_before,rating,timestamp,match_id,
+                         expected_team_win_prob
+                     ) VALUES(100,42,1500,1530,'2026-03-03 09:00:00',3,0.18)",
+                    [],
+                )
+                .expect("insert the upset win");
+        }
+        for index in 0..12_i64 {
+            let match_id = 1001 + index;
+            game(
+                match_id,
+                format!("2025-06-{:02} 20:00:00", index + 1),
+                true,
+                None,
+            );
+            seat(match_id, OWNER as i64, true, true);
+            seat(match_id, OLD_DUO, true, true);
+            seat(match_id, ROTATING_FIRST, false, false);
+        }
+        Self {
+            _directory: directory,
+            path,
+        }
+    }
+}
+
+fn league_names() -> BTreeMap<i64, WrappedDiscordProfile> {
+    named(&[
+        (OWNER as i64, "Guild Owner"),
+        (DUO, "Duo Partner"),
+        (NEMESIS, "Arch Rival"),
+        (OLD_DUO, "Old Partner"),
+        // The side games' rival from `seed_life_outside_the_queue`.
+        (300, "Guild Rival"),
+    ])
+}
+
+fn league_deck(
+    fixture: &Fixture,
+    profiles: &BTreeMap<i64, WrappedDiscordProfile>,
+) -> Vec<WrappedSlideData> {
+    let raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    build_slides(raw, profiles, OWNER as i64, "Guild Owner", 2026, 3, 3)
+}
+
+/// Every piece of copy a card can show.
+fn slide_texts(slide: &WrappedSlideData) -> Vec<String> {
+    let mut texts = vec![
+        slide.kind.clone(),
+        slide.title.clone(),
+        slide.headline.clone(),
+        slide.stat_value.clone(),
+        slide.stat_label.clone(),
+        slide.badge.clone(),
+    ];
+    texts.extend(slide.lines.iter().cloned());
+    texts.extend(
+        slide
+            .rows
+            .iter()
+            .flat_map(|row| [row.primary.clone(), row.secondary.clone()]),
+    );
+    if let Some(beat) = &slide.beat {
+        texts.extend([
+            beat.setup.clone(),
+            beat.value.clone(),
+            beat.setup_label.clone(),
+            beat.punch.clone(),
+            beat.credit.clone(),
+        ]);
+    }
+    texts
+}
+
+#[test]
+fn deck_has_two_beat_distinct_cards_for_an_active_player() {
+    let fixture = Fixture::league(12);
+    let slides = league_deck(&fixture, &league_names());
+    let distinct = slides
+        .iter()
+        .filter(|slide| slide.kind == "story_distinct")
+        .collect::<Vec<_>>();
+    assert!(
+        (5..=8).contains(&distinct.len()),
+        "{} distinct cards",
+        distinct.len()
+    );
+    for slide in &distinct {
+        assert_eq!(slide.layout, WrappedLayout::TwoBeat);
+        let beat = slide.beat.as_ref().expect("two-beat copy");
+        assert!(!beat.setup.is_empty(), "{beat:?}");
+        assert!(!beat.punch.is_empty(), "{beat:?}");
+        assert!(!beat.credit.is_empty(), "{beat:?}");
+        assert!(slide.theme.is_roast_beat() || slide.theme.is_popoff_beat());
+        render_wrapped_slide(slide).expect("every distinct card renders");
+    }
+    // The thrown game plots its gold lead from the player's side.
+    let graph = distinct
+        .iter()
+        .find(|slide| {
+            slide
+                .beat
+                .as_ref()
+                .is_some_and(|beat| beat.treatment == WrappedPunch::GoldGraph)
+        })
+        .expect("the thrown game becomes a gold graph");
+    assert_eq!(
+        graph.series,
+        [
+            0.0, 1500.0, 6000.0, 12000.0, 15000.0, 9000.0, 2000.0, -4000.0
+        ]
+    );
+    // Two roasts and two popoffs at least, and the recap carries the best
+    // of each.
+    let roasts = distinct
+        .iter()
+        .filter(|slide| slide.theme.is_roast_beat())
+        .count();
+    assert!(roasts >= 2 && distinct.len() - roasts >= 2);
+    let recap = slides.last().unwrap();
+    assert_eq!(recap.kind, "story_finale");
+    assert!(
+        recap.lines.contains(&"22 / 13 / 10|Anti-Mage".to_owned()),
+        "{:?}",
+        recap.lines
+    );
+    assert!(
+        recap.lines.contains(&"13.0|deaths a game".to_owned()),
+        "{:?}",
+        recap.lines
+    );
+    let story = slides
+        .iter()
+        .filter(|slide| !is_detail_page(&slide.kind))
+        .map(|slide| slide.kind.as_str())
+        .collect::<Vec<_>>();
+    let position = |wanted: &str| story.iter().position(|kind| *kind == wanted).unwrap();
+    assert!(position("story_distinct") > position("story_hero"));
+    assert!(
+        story
+            .iter()
+            .all(|kind| !matches!(*kind, "story_moment" | "story_superlative"))
+    );
+}
+
+#[test]
+fn deck_contains_no_package_deal_or_moderation_content() {
+    let fixture = Fixture::migrated();
+    Connection::open(&fixture.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO low_priority_state(
+                 discord_id,guild_id,wins_required,wins_remaining,active,set_by
+             ) VALUES(100,42,3,3,1,400)",
+            [],
+        )
+        .unwrap();
+    let raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    for slide in &slides {
+        assert!(!slide.kind.contains("package"), "{}", slide.kind);
+        for text in slide_texts(slide) {
+            let lower = text.to_lowercase();
+            for banned in ["package deal", "low priority", "low-priority"] {
+                assert!(!lower.contains(banned), "{}: {text}", slide.kind);
+            }
+        }
+    }
+}
+
+#[test]
+fn people_cards_are_year_scoped() {
+    let fixture = Fixture::league(12);
+    let slides = league_deck(&fixture, &league_names());
+    let people = slides
+        .iter()
+        .filter(|slide| slide.kind == "story_people")
+        .collect::<Vec<_>>();
+    assert!(
+        !people.is_empty(),
+        "the league has year-scoped people cards"
+    );
+    let duo = people
+        .iter()
+        .find(|slide| slide.title == "Your duo")
+        .expect("a duo card");
+    let beat = duo.beat.as_ref().expect("two-beat duo copy");
+    assert_eq!(beat.value, "10");
+    assert!(beat.credit.contains("Duo Partner"), "{beat:?}");
+    for slide in &people {
+        assert_eq!(slide.layout, WrappedLayout::TwoBeat);
+        for text in slide_texts(slide) {
+            assert!(!text.contains("Old Partner"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn people_cards_never_show_ids_when_names_are_missing() {
+    let fixture = Fixture::league(12);
+    // The duo partner's only known name is the placeholder; nobody else has one.
+    let slides = league_deck(&fixture, &named(&[(DUO, UNKNOWN_PLAYER)]));
+    let people = slides
+        .iter()
+        .filter(|slide| slide.kind == "story_people")
+        .collect::<Vec<_>>();
+    assert!(!people.is_empty(), "people cards survive missing names");
+    for slide in people {
+        let beat = slide.beat.as_ref().expect("two-beat people copy");
+        assert!(!beat.setup.is_empty() && !beat.punch.is_empty());
+        for text in slide_texts(slide) {
+            let longest_digits = text
+                .split(|character: char| !character.is_ascii_digit())
+                .map(str::len)
+                .max()
+                .unwrap_or(0);
+            assert!(longest_digits < 5, "{text}");
+            assert!(!text.contains("<@"), "{text}");
+            assert!(!text.contains(UNKNOWN_PLAYER), "{text}");
+        }
+    }
+}
+
+#[test]
+fn below_minimum_target_falls_back() {
+    let fixture = Fixture::league(2);
+    // A long, deathless win gives the fallback something to say.
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection
+        .execute(
+            "UPDATE matches SET duration_seconds=3700 WHERE match_id=1",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE match_participants SET deaths=0 WHERE match_id=1 AND discord_id=100",
+            [],
+        )
+        .unwrap();
+    let slides = league_deck(&fixture, &league_names());
+    let story = slides
+        .iter()
+        .filter(|slide| !is_detail_page(&slide.kind))
+        .collect::<Vec<_>>();
+    assert!(story.iter().all(|slide| slide.kind != "story_distinct"));
+    assert!(
+        story
+            .iter()
+            .any(|slide| matches!(slide.kind.as_str(), "story_moment" | "story_superlative")),
+        "{:?}",
+        story.iter().map(|slide| &slide.kind).collect::<Vec<_>>()
+    );
+    for slide in &slides {
+        render_wrapped_slide(slide).expect("a thin deck still renders");
+    }
+}
+
+#[test]
+fn story_cards_have_no_coverage_fine_print() {
+    let thin = Fixture::league(2);
+    Connection::open(&thin.path)
+        .unwrap()
+        .execute(
+            "UPDATE matches SET duration_seconds=3700 WHERE match_id=1",
+            [],
+        )
+        .unwrap();
+    let decks = [
+        league_deck(&thin, &league_names()),
+        league_deck(&Fixture::league(12), &league_names()),
+        {
+            let fixture = Fixture::migrated();
+            let raw = WrappedSources::new(&fixture.path)
+                .load(GUILD as i64, OWNER as i64, 2026)
+                .unwrap()
+                .unwrap();
+            build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3)
+        },
+    ];
+    assert!(
+        decks[0].iter().any(|slide| slide.kind == "story_playtime"),
+        "the thin deck keeps its time card"
+    );
+    for slide in decks
+        .iter()
+        .flatten()
+        .filter(|slide| !is_detail_page(&slide.kind))
+    {
+        for text in slide_texts(slide) {
+            assert!(!text.starts_with("Recorded in"), "{}: {text}", slide.kind);
+        }
+    }
+    // The evidence stays on the detail pages.
+    let overflow = decks[1]
+        .iter()
+        .filter(|slide| slide.kind == "records_moments")
+        .collect::<Vec<_>>();
+    assert!(!overflow.is_empty());
+    assert!(overflow.iter().all(|slide| {
+        slide
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Recorded in"))
+    }));
+}
+
+#[tokio::test]
+async fn deck_is_still_public_and_acknowledged_first() {
+    let fixture = Fixture::league(12);
+    let provider = build_provider(&fixture, FakeDiscord::production(), STORY_TIMEOUT);
+    let registry = build_registry(&provider);
+    let responder = Arc::new(Responder::default());
+    registry
+        .command_handler("wrapped")
+        .unwrap()
+        .handle(command(OWNER, Some(GUILD)), responder.clone())
+        .await
+        .unwrap();
+    assert_eq!(*responder.defers.lock().unwrap(), vec![false]);
+    {
+        let followups = responder.followups.lock().unwrap();
+        assert_eq!(followups.len(), 1);
+        assert!(!followups[0].ephemeral);
+        assert_native_media(&followups[0]);
+    }
+    let session = provider
+        .handler
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    let session = session.lock().await;
+    assert!(
+        session
+            .slides
+            .iter()
+            .any(|slide| slide.kind == "story_distinct")
+    );
+    assert_eq!(session.slides.last().unwrap().kind, "story_finale");
+}
+
+/// The league plus every side game: Dig with cave-ins, a boss and a feud,
+/// a living pet and a lost one, Mafia, and a profitable gamba year.
+fn seed_all_activity(fixture: &Fixture) {
+    seed_life_outside_the_queue(fixture);
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    for (match_id, payout) in [(1_i64, Some(260_i64)), (2, None), (3, None), (4, None)] {
+        connection
+            .execute(
+                "INSERT INTO bets(guild_id,match_id,discord_id,team_bet_on,amount,leverage,
+                     payout,bet_time,is_blind)
+                 VALUES(42,?1,100,'radiant',100,1,?2,?3,0)",
+                params![match_id, payout, MARCH_2026 + match_id],
+            )
+            .unwrap();
+    }
+    for index in 0..4_i64 {
+        connection
+            .execute(
+                "INSERT INTO dig_actions(guild_id,actor_id,action_type,depth_before,depth_after,
+                     jc_delta,detail,created_at)
+                 VALUES(42,100,'dig',120,120,0,json_object('cave_in',1),?1)",
+                params![MARCH_2026 + 500 + index],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO pets(pet_id,discord_id,guild_id,name,species,adopted_at,hatched_at,
+                 adopt_fee,last_fed_at,hunger_at_last_fed,times_fed,is_active,died_at,
+                 death_cause)
+             VALUES(2,100,42,'Old Timer','common_cama',?1,?1,0,?1,0,3,0,?2,'starvation')",
+            params![MARCH_2026 - 1_000, MARCH_2026 + 1_000],
+        )
+        .unwrap();
+}
+
+fn story_of(slides: &[WrappedSlideData]) -> Vec<&WrappedSlideData> {
+    slides
+        .iter()
+        .filter(|slide| !is_detail_page(&slide.kind))
+        .collect()
+}
+
+const SIDE_KINDS: [&str; 10] = [
+    "chart_gamba",
+    "story_gamba",
+    "story_dig",
+    "story_dig_boss",
+    "story_dig_feud",
+    "story_dig_cave_in",
+    "story_pet",
+    "story_pet_grave",
+    "story_mafia",
+    "story_mafia_victim",
+];
+
+/// Standout games for the player, all Anti-Mage wins: 31 kills on March 4,
+/// which is also the best game the Cinema card shows, a 78:12 game on
+/// March 7, and 1,400 GPM on March 9.
+fn seed_record_games(fixture: &Fixture) {
+    Connection::open(&fixture.path)
+        .unwrap()
+        .execute_batch(
+            "UPDATE match_participants SET kills=31 WHERE match_id=4 AND discord_id=100;
+             UPDATE match_participants SET gpm=1400 WHERE match_id=9 AND discord_id=100;
+             UPDATE matches SET duration_seconds=4692 WHERE match_id=7;",
+        )
+        .unwrap();
+}
+
+/// Parsed first-blood data for six of the player's games, two of them
+/// first bloods: a weak count record, but one that repeats no story.
+fn seed_first_bloods(fixture: &Fixture) {
+    Connection::open(&fixture.path)
+        .unwrap()
+        .execute_batch(
+            "UPDATE match_participants SET firstblood_claimed=0
+              WHERE discord_id=100 AND match_id IN (1,5,6,8);
+             UPDATE match_participants SET firstblood_claimed=1
+              WHERE discord_id=100 AND match_id IN (2,3);",
+        )
+        .unwrap();
+}
+
+/// Art sources whose warm cache holds one Anti-Mage render, and its bytes.
+fn anti_mage_art() -> (TempDir, ArtSources, Vec<u8>) {
+    let heroes = tempfile::tempdir().unwrap();
+    let dotabase = heroes.path().join("dotabase.db");
+    Connection::open(&dotabase)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE heroes (
+                 id INTEGER PRIMARY KEY,name TEXT,color TEXT,localized_name TEXT,roles TEXT
+             );
+             INSERT INTO heroes VALUES (1,'npc_dota_hero_antimage','#784094','Anti-Mage','Carry');",
+        )
+        .unwrap();
+    let cache = heroes.path().join("trivia");
+    std::fs::create_dir_all(cache.join("heroes/renders")).unwrap();
+    let render = std::fs::read(repository_assets().join("wrapped/courier.png")).unwrap();
+    std::fs::write(cache.join("heroes/renders/antimage.png"), &render).unwrap();
+    let art = ArtSources::for_assets(&repository_assets())
+        .with_hero_portraits(cama_app::hero_lookup::HeroLookup::new(&dotabase), cache);
+    (heroes, art, render)
+}
+
+#[test]
+fn deck_respects_twenty_card_budget_for_an_all_activity_player() {
+    let fixture = Fixture::league(12);
+    seed_all_activity(&fixture);
+    seed_record_games(&fixture);
+    let slides = league_deck(&fixture, &league_names());
+    let story = story_of(&slides);
+    let count = |kind: &str| story.iter().filter(|slide| slide.kind == kind).count();
+    assert_eq!(story.last().unwrap().kind, "story_finale");
+    assert!(
+        story.len() - 1 <= 20,
+        "{} cards before the recap",
+        story.len() - 1
+    );
+    for kind in ["story_intro", "story_games", "story_playtime", "story_hero"] {
+        assert_eq!(count(kind), 1, "{kind}");
+    }
+    assert!((5..=8).contains(&count("story_distinct")));
+    // The 78:12 game makes the cut; the peak GPM and kill games repeat
+    // stories the deck already tells, and their slot goes back to one more
+    // distinct story, so all twenty slots are used.
+    assert_eq!(count("story_record"), 1);
+    assert_eq!(story.len() - 1, 20);
+    assert_eq!(count("story_hero_year"), 1);
+    assert!(count("story_people") <= 2);
+    assert_eq!(count("story_persona"), 1);
+    // Every side game's main card stays; extras drop to More stats first.
+    let side = story
+        .iter()
+        .filter(|slide| SIDE_KINDS.contains(&slide.kind.as_str()))
+        .map(|slide| slide.kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        side,
+        ["chart_gamba", "story_dig", "story_pet", "story_mafia"]
+    );
+    for kind in [
+        "more_story_gamba",
+        "more_story_dig_boss",
+        "more_story_dig_feud",
+        "more_story_dig_cave_in",
+        "more_story_pet_grave",
+        "more_story_mafia_victim",
+    ] {
+        assert!(
+            slides
+                .iter()
+                .any(|slide| slide.kind == kind && is_detail_page(&slide.kind)),
+            "{kind} is under More stats"
+        );
+    }
+}
+
+#[test]
+fn record_cards_use_hero_render_and_credit_the_game() {
+    let fixture = Fixture::league(12);
+    seed_record_games(&fixture);
+    seed_first_bloods(&fixture);
+    let (_heroes, art, render) = anti_mage_art();
+    let raw = WrappedSources::with_art(&fixture.path, art)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    let slides = build_slides(
+        raw,
+        &league_names(),
+        OWNER as i64,
+        "Guild Owner",
+        2026,
+        3,
+        3,
+    );
+    let story = story_of(&slides);
+    let records = story
+        .iter()
+        .filter(|slide| slide.kind == "story_record")
+        .collect::<Vec<_>>();
+    // The strongest record of each kind: the 78:12 roast, dated in the
+    // player's time zone with its result, and the two first bloods. The
+    // 31-kill game is already the Cinema card and the peak GPM repeats the
+    // GPM story, so neither comes back as a record.
+    let beats = records
+        .iter()
+        .map(|slide| slide.beat.as_ref().expect("two-beat record copy"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        beats
+            .iter()
+            .map(|beat| beat.credit.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "78:12 · Anti-Mage · Mar 7 · Won",
+            "2 first bloods in parsed games · latest on Anti-Mage"
+        ]
+    );
+    assert_eq!(
+        (beats[0].value.as_str(), beats[0].setup_label.as_str()),
+        ("78:12", "Anti-Mage · Mar 7")
+    );
+    let cinema = story
+        .iter()
+        .filter_map(|slide| slide.beat.as_ref())
+        .find(|beat| beat.treatment == WrappedPunch::Cinema)
+        .expect("the best game's cinema card");
+    assert!(
+        cinema.credit.starts_with("31 / 13 / 10"),
+        "{}",
+        cinema.credit
+    );
+    assert!(records[0].theme.is_roast_beat() && records[1].theme.is_popoff_beat());
+    for (slide, beat) in records.iter().zip(&beats) {
+        assert_eq!(slide.layout, WrappedLayout::TwoBeat);
+        assert_eq!(slide.art_png.as_deref(), Some(render.as_slice()));
+        assert_eq!(beat.treatment, WrappedPunch::Plain);
+        assert!(!beat.setup.is_empty() && !beat.punch.is_empty());
+        render_wrapped_slide(slide).expect("a record card renders");
+    }
+    // The best hero wears its render too.
+    let hero = story
+        .iter()
+        .find(|slide| slide.kind == "story_hero_year")
+        .expect("the best-hero card");
+    let beat = hero.beat.as_ref().expect("two-beat hero copy");
+    assert_eq!(
+        (beat.value.as_str(), beat.credit.as_str()),
+        ("83%", "Won 10 of 12 on Anti-Mage")
+    );
+    assert_eq!(hero.art_png.as_deref(), Some(render.as_slice()));
+}
+
+#[test]
+fn records_never_repeat_a_shown_story() {
+    let fixture = Fixture::league(12);
+    seed_all_activity(&fixture);
+    seed_record_games(&fixture);
+    seed_first_bloods(&fixture);
+    let slides = league_deck(&fixture, &league_names());
+    let story = story_of(&slides);
+    let beats_of = |kind: &str| {
+        story
+            .iter()
+            .filter(|slide| slide.kind == kind)
+            .filter_map(|slide| slide.beat.as_ref())
+            .collect::<Vec<_>>()
+    };
+    let (records, distinct) = (beats_of("story_record"), beats_of("story_distinct"));
+    // A record's number and the distinct story about the same measure.
+    let twins = [
+        (" kills", "kills a game"),
+        (" deaths", "deaths a game"),
+        (" GPM", "gold a minute"),
+        (" damage", "hero damage a minute"),
+        (" wards", "wards a game"),
+    ];
+    for record in &records {
+        for (unit, label) in twins {
+            if record.value.ends_with(unit) {
+                assert!(
+                    distinct.iter().all(|story| story.setup_label != label),
+                    "{} repeats the {label} story",
+                    record.value
+                );
+            }
+        }
+    }
+    // The next record that repeats nothing takes the freed slot.
+    assert_eq!(
+        records
+            .iter()
+            .map(|beat| beat.credit.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "78:12 · Anti-Mage · Mar 7 · Won",
+            "2 first bloods in parsed games · latest on Anti-Mage"
+        ]
+    );
+    assert_eq!(story.len() - 1, 20);
+}
+
+#[test]
+fn single_counts_read_in_the_singular() {
+    let fixture = Fixture::league(12);
+    // One game on a second hero.
+    Connection::open(&fixture.path)
+        .unwrap()
+        .execute(
+            "UPDATE match_participants SET hero_id=14 WHERE match_id=7 AND discord_id=100",
+            [],
+        )
+        .unwrap();
+    let slides = league_deck(&fixture, &league_names());
+    let heroes = slides
+        .iter()
+        .find(|slide| slide.kind == "story_hero")
+        .expect("the top-heroes card");
+    let details = heroes
+        .rows
+        .iter()
+        .map(|row| row.secondary.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        details.iter().any(|detail| detail.starts_with("1 game · ")),
+        "{details:?}"
+    );
+    // "1 games" or "1 heroes" anywhere, but not "11 games" or "1,204 games".
+    let singular_slip = |text: &str| {
+        let words = text
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+        words
+            .windows(2)
+            .any(|pair| pair[0] == "1" && matches!(pair[1], "games" | "heroes" | "wins" | "losses"))
+    };
+    for slide in &slides {
+        for text in slide_texts(slide) {
+            assert!(!singular_slip(&text), "{}: {text}", slide.kind);
+        }
+    }
+}
+
+#[test]
+fn dota_cards_come_before_side_games() {
+    let fixture = Fixture::league(12);
+    seed_all_activity(&fixture);
+    seed_record_games(&fixture);
+    let slides = league_deck(&fixture, &league_names());
+    let kinds = story_of(&slides)
+        .iter()
+        .map(|slide| slide.kind.as_str())
+        .collect::<Vec<_>>();
+    let span = |kind: &str| {
+        let first = kinds.iter().position(|seen| *seen == kind);
+        let last = kinds.iter().rposition(|seen| *seen == kind);
+        first
+            .zip(last)
+            .unwrap_or_else(|| panic!("{kind} in {kinds:?}"))
+    };
+    // Distinct stories, then records, then hero stories, then people.
+    let sections = [
+        "story_hero",
+        "story_distinct",
+        "story_record",
+        "story_hero_year",
+        "story_people",
+    ]
+    .map(span);
+    for pair in sections.windows(2) {
+        assert!(pair[0].1 < pair[1].0, "{kinds:?}");
+    }
+    let first_side = kinds
+        .iter()
+        .position(|kind| SIDE_KINDS.contains(kind))
+        .expect("side games in the story");
+    assert!(sections[4].1 < first_side, "{kinds:?}");
+    assert!(
+        kinds[first_side..]
+            .iter()
+            .all(|kind| SIDE_KINDS.contains(kind)
+                || matches!(*kind, "story_persona" | "story_finale")),
+        "{kinds:?}"
+    );
+}
+
+#[test]
+fn a_cave_in_card_under_more_stats_leaves_its_count_on_the_dig_card() {
+    let fixture = Fixture::league(12);
+    seed_all_activity(&fixture);
+    let slides = league_deck(&fixture, &league_names());
+    assert!(
+        slides
+            .iter()
+            .any(|slide| slide.kind == "more_story_dig_cave_in")
+    );
+    let dig = story_of(&slides)
+        .into_iter()
+        .find(|slide| slide.kind == "story_dig")
+        .expect("the dig card");
+    assert!(
+        dig.lines.iter().any(|line| line == "You had 4 cave-ins."),
+        "{:?}",
+        dig.lines
+    );
+}
+
+#[test]
+fn a_cave_in_card_in_the_story_keeps_the_dig_card_quiet() {
+    let fixture = Fixture::league(12);
+    let connection = Connection::open(&fixture.path).unwrap();
+    for index in 0..10_i64 {
+        let detail = if index < 4 { r#"{"cave_in":1}"# } else { "{}" };
+        connection
+            .execute(
+                "INSERT INTO dig_actions(guild_id,actor_id,action_type,depth_before,depth_after,
+                     jc_delta,detail,created_at)
+                 VALUES(42,100,'dig',?1,?2,2,?3,?4)",
+                params![index * 20, index * 20 + 20, detail, MARCH_2026 + index],
+            )
+            .unwrap();
+    }
+    let slides = league_deck(&fixture, &league_names());
+    let story = story_of(&slides);
+    assert!(story.iter().any(|slide| slide.kind == "story_dig_cave_in"));
+    let dig = story
+        .iter()
+        .find(|slide| slide.kind == "story_dig")
+        .expect("the dig card");
+    assert!(
+        dig.lines.iter().all(|line| !line.contains("cave-in")),
+        "{:?}",
+        dig.lines
+    );
+}
+
+#[test]
+fn a_dota_only_deck_rolls_spare_slots_into_distinct_stories() {
+    let fixture = Fixture::league(12);
+    let slides = league_deck(&fixture, &league_names());
+    let story = story_of(&slides);
+    // Twelve candidates and no side games: all eight distinct slots fill.
+    assert_eq!(
+        story
+            .iter()
+            .filter(|slide| slide.kind == "story_distinct")
+            .count(),
+        8
+    );
+    assert!(story.len() - 1 <= 20);
+}
+
+#[test]
+fn recap_badge_names_something_the_deck_showed() {
+    let full = league_deck(&Fixture::league(12), &league_names());
+    let credits = story_of(&full)
+        .into_iter()
+        .filter(|slide| slide.kind == "story_distinct" && slide.theme.is_popoff_beat())
+        .filter_map(|slide| slide.beat.as_ref().map(|beat| beat.credit.clone()))
+        .collect::<Vec<_>>();
+    let badge = &full.last().unwrap().badge;
+    assert_eq!(badge, "22 / 13 / 10 · Anti-Mage · #1 of 15");
+    assert!(credits.contains(badge), "{badge} is a popoff in the deck");
+
+    let thin = Fixture::league(2);
+    let connection = Connection::open(&thin.path).unwrap();
+    connection
+        .execute(
+            "UPDATE matches SET duration_seconds=3700 WHERE match_id=1",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE match_participants SET deaths=0 WHERE match_id=1 AND discord_id=100",
+            [],
+        )
+        .unwrap();
+    let slides = league_deck(&thin, &league_names());
+    let award = story_of(&slides)
+        .into_iter()
+        .find(|slide| slide.kind == "story_superlative")
+        .expect("a thin deck shows its awards")
+        .title
+        .clone();
+    assert_eq!(slides.last().unwrap().badge, award);
+}
+
+#[test]
+fn people_cards_never_call_a_beaten_opponent_a_nemesis() {
+    let slides = league_deck(&Fixture::league(12), &league_names());
+    let people = story_of(&slides)
+        .into_iter()
+        .filter(|slide| slide.kind == "story_people")
+        .collect::<Vec<_>>();
+    // The player won 10 of 12 against Arch Rival.
+    assert!(people.iter().all(|slide| slide.title != "Your nemesis"));
+    let bag = people
+        .iter()
+        .find(|slide| slide.title == "Punching bag")
+        .expect("the opponent the player beat");
+    let beat = bag.beat.as_ref().unwrap();
+    assert_eq!(beat.credit, "Won 10 of 12 against Arch Rival");
+}
+
+#[test]
+fn neighboring_story_cards_never_share_a_background() {
+    let all = Fixture::league(12);
+    seed_all_activity(&all);
+    seed_record_games(&all);
+    let thin = Fixture::league(2);
+    Connection::open(&thin.path)
+        .unwrap()
+        .execute(
+            "UPDATE matches SET duration_seconds=3700 WHERE match_id=1",
+            [],
+        )
+        .unwrap();
+    let default = Fixture::migrated();
+    seed_life_outside_the_queue(&default);
+    let decks = [
+        league_deck(&all, &league_names()),
+        league_deck(&Fixture::league(12), &league_names()),
+        league_deck(&thin, &league_names()),
+        {
+            let raw = WrappedSources::new(&default.path)
+                .load(GUILD as i64, OWNER as i64, 2026)
+                .unwrap()
+                .unwrap();
+            build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3)
+        },
+    ];
+    for deck in &decks {
+        let story = story_of(deck);
+        let sequence = story
+            .iter()
+            .map(|slide| {
+                let treatment = slide.beat.as_ref().map(|beat| beat.treatment);
+                format!("{} {:?} {treatment:?}", slide.kind, slide.theme)
+            })
+            .collect::<Vec<_>>();
+        for pair in story.windows(2) {
+            let (before, after) = (slide_backgrounds(pair[0]), slide_backgrounds(pair[1]));
+            assert!(
+                before
+                    .iter()
+                    .all(|color| after.iter().all(|other| !backgrounds_alike(*color, *other))),
+                "{} ({:?}) then {} ({:?}) look alike in {sequence:#?}",
+                pair[0].kind,
+                pair[0].theme,
+                pair[1].kind,
+                pair[1].theme
+            );
+        }
+        // The owner asked for fewer all-yellow cards: two at most end there.
+        let yellow = story
+            .iter()
+            .filter(|slide| {
+                slide_backgrounds(slide)
+                    .last()
+                    .is_some_and(|color| looks_yellow(*color))
+            })
+            .count();
+        assert!(yellow <= 2, "{yellow} cards end on yellow in {sequence:#?}");
+    }
+}
+
+/// A bright, saturated background between orange and lime.
+fn looks_yellow(color: [u8; 3]) -> bool {
+    let [red, green, blue] = color.map(f32::from);
+    let (high, low) = (red.max(green).max(blue), red.min(green).min(blue));
+    if high < 200.0 || (high - low) / high < 0.5 {
+        return false;
+    }
+    let hue = if high == red {
+        60.0 * ((green - blue) / (high - low))
+    } else if high == green {
+        60.0 * ((blue - red) / (high - low) + 2.0)
+    } else {
+        60.0 * ((red - green) / (high - low) + 4.0)
+    };
+    (42.0..=64.0).contains(&hue)
+}
+
+#[test]
+fn hero_stories_wear_the_hero_render() {
+    let fixture = Fixture::league(12);
+    let (_heroes, art, render) = anti_mage_art();
+    let raw = WrappedSources::with_art(&fixture.path, art)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    let slides = build_slides(
+        raw,
+        &league_names(),
+        OWNER as i64,
+        "Guild Owner",
+        2026,
+        3,
+        3,
+    );
+    let distinct = slides
+        .iter()
+        .filter(|slide| slide.kind == "story_distinct")
+        .collect::<Vec<_>>();
+    // The best game, the latest finish, and the thrown game all name the
+    // player's Anti-Mage; average stories have no single hero.
+    let with_art = distinct
+        .iter()
+        .filter(|slide| slide.art_png.as_deref() == Some(render.as_slice()))
+        .count();
+    assert!(with_art >= 3, "{with_art} hero stories with art");
+    assert!(
+        distinct
+            .iter()
+            .filter(|slide| slide.art_png.is_some())
+            .all(|slide| slide.art_png.as_deref() == Some(render.as_slice()))
+    );
+    let clock = distinct
+        .iter()
+        .find(|slide| {
+            slide.art_png.is_some()
+                && slide
+                    .beat
+                    .as_ref()
+                    .is_some_and(|beat| beat.treatment == WrappedPunch::Clock)
+        })
+        .expect("the latest finish wears its hero");
+    assert!(render_wrapped_slide(clock).is_ok());
 }

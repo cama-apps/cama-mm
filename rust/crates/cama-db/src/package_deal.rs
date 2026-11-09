@@ -38,17 +38,6 @@ pub struct PackageDeal {
     pub games_added: i64,
 }
 
-/// One immutable row from Python's `package_deal_purchases` table.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PackageDealPurchase {
-    pub guild_id: i64,
-    pub buyer_discord_id: i64,
-    pub partner_discord_id: i64,
-    pub jc_spent: i64,
-    pub games_committed: i64,
-    pub created_at: i64,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PackageDealPurchaseFailureReason {
     AlreadyFull,
@@ -354,35 +343,6 @@ impl PackageDealRepository {
         Ok(deals)
     }
 
-    /// Read immutable purchases in Python's inclusive-start/exclusive-end window.
-    pub fn get_purchases_involving_player(
-        &self,
-        guild_id: Option<i64>,
-        discord_id: i64,
-        start_ts: i64,
-        end_ts: i64,
-    ) -> Result<Vec<PackageDealPurchase>, PackageDealRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT guild_id, buyer_discord_id, partner_discord_id,
-                    jc_spent, games_committed, created_at
-             FROM package_deal_purchases
-             WHERE guild_id = ?1
-               AND (buyer_discord_id = ?2 OR partner_discord_id = ?2)
-               AND created_at >= ?3
-               AND created_at < ?4
-             ORDER BY created_at DESC",
-        )?;
-        let purchases = statement
-            .query_map(
-                params![guild_id, discord_id, start_ts, end_ts],
-                row_to_purchase,
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(purchases)
-    }
-
     /// Return a buyer's active deals.
     pub fn get_user_deals(
         &self,
@@ -590,17 +550,6 @@ fn row_to_deal(row: &Row<'_>) -> Result<PackageDeal, rusqlite::Error> {
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
         games_added: 0,
-    })
-}
-
-fn row_to_purchase(row: &Row<'_>) -> Result<PackageDealPurchase, rusqlite::Error> {
-    Ok(PackageDealPurchase {
-        guild_id: row.get(0)?,
-        buyer_discord_id: row.get(1)?,
-        partner_discord_id: row.get(2)?,
-        jc_spent: row.get(3)?,
-        games_committed: row.get(4)?,
-        created_at: row.get(5)?,
     })
 }
 
@@ -828,6 +777,26 @@ mod tests {
             Connection::open(self.file.path()).expect("open fixture database")
         }
 
+        /// `(buyer, partner, jc_spent, games_committed)` for every purchase
+        /// log row involving `discord_id`, newest first.
+        fn purchases(&self, discord_id: i64) -> Vec<(i64, i64, i64, i64)> {
+            self.connection()
+                .prepare(
+                    "SELECT buyer_discord_id, partner_discord_id, jc_spent, games_committed
+                     FROM package_deal_purchases
+                     WHERE guild_id = ?1
+                       AND (buyer_discord_id = ?2 OR partner_discord_id = ?2)
+                     ORDER BY created_at DESC, rowid DESC",
+                )
+                .expect("prepare purchase log read")
+                .query_map(params![GUILD_ID, discord_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .expect("read purchase log")
+                .collect::<Result<_, _>>()
+                .expect("purchase log rows")
+        }
+
         fn seed_player(&self, discord_id: i64, guild_id: i64, balance: i64) {
             self.connection()
                 .execute(
@@ -901,14 +870,11 @@ mod tests {
             .unwrap();
         assert_eq!(deal.games_remaining, 10);
         assert_eq!(deal.games_added, 10);
-        let purchases = fixture
-            .repository
-            .get_purchases_involving_player(Some(GUILD_ID), BUYER_ID, 0, i64::MAX)
-            .unwrap();
+        let purchases = fixture.purchases(BUYER_ID);
         assert_eq!(
             purchases
                 .iter()
-                .map(|purchase| purchase.games_committed)
+                .map(|purchase| purchase.3)
                 .collect::<Vec<_>>(),
             [10]
         );
@@ -930,11 +896,9 @@ mod tests {
         assert_eq!(second.games_added, 3);
         assert_eq!(second.cost_paid, 1_100);
         let mut committed = fixture
-            .repository
-            .get_purchases_involving_player(Some(GUILD_ID), BUYER_ID, 0, i64::MAX)
-            .unwrap()
+            .purchases(BUYER_ID)
             .into_iter()
-            .map(|purchase| purchase.games_committed)
+            .map(|purchase| purchase.3)
             .collect::<Vec<_>>();
         committed.sort_unstable();
         assert_eq!(committed, [3, 7]);
@@ -962,14 +926,11 @@ mod tests {
         assert_eq!(deal.games_remaining, 10);
         assert_eq!(deal.games_added, 0);
         assert_eq!(fixture.balance(BUYER_ID, GUILD_ID), 1_000);
-        let purchases = fixture
-            .repository
-            .get_purchases_involving_player(Some(GUILD_ID), BUYER_ID, 0, i64::MAX)
-            .unwrap();
+        let purchases = fixture.purchases(BUYER_ID);
         assert_eq!(
             purchases
                 .iter()
-                .map(|purchase| (purchase.jc_spent, purchase.games_committed))
+                .map(|purchase| (purchase.2, purchase.3))
                 .collect::<Vec<_>>(),
             [(1, 10)]
         );
@@ -1016,11 +977,10 @@ mod tests {
         let deals = repository.get_user_deals(Some(GUILD_ID), BUYER_ID).unwrap();
         assert_eq!(deals.len(), 1);
         assert_eq!(deals[0].games_remaining, 10);
-        let mut purchases = repository
-            .get_purchases_involving_player(Some(GUILD_ID), BUYER_ID, 0, i64::MAX)
-            .unwrap()
+        let mut purchases = fixture
+            .purchases(BUYER_ID)
             .into_iter()
-            .map(|purchase| (purchase.jc_spent, purchase.games_committed))
+            .map(|purchase| (purchase.2, purchase.3))
             .collect::<Vec<_>>();
         purchases.sort_unstable();
         assert_eq!(purchases, [(0, 7), (100, 3)]);
@@ -1239,14 +1199,11 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let purchases = fixture
-            .repository
-            .get_purchases_involving_player(Some(GUILD_ID), BUYER_ID, 0, i64::MAX)
-            .unwrap();
+        let purchases = fixture.purchases(BUYER_ID);
         assert_eq!(
             purchases
                 .iter()
-                .map(|purchase| (purchase.jc_spent, purchase.games_committed))
+                .map(|purchase| (purchase.2, purchase.3))
                 .collect::<Vec<_>>(),
             vec![(1, 7)]
         );
@@ -1515,52 +1472,8 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let purchases = fixture
-            .repository
-            .get_purchases_involving_player(Some(GUILD_ID), BUYER_ID, 0, i64::MAX)
-            .unwrap();
-        assert_eq!(purchases.len(), 1);
-        assert_eq!(purchases[0].buyer_discord_id, BUYER_ID);
-        assert_eq!(purchases[0].partner_discord_id, PARTNER_ID);
-        assert_eq!(purchases[0].games_committed, 3);
-        assert_eq!(purchases[0].jc_spent, 90);
-    }
-
-    #[test]
-    fn test_purchase_log_time_window_filter() {
-        let fixture = Fixture::new();
-        let deal = fixture
-            .repository
-            .create_or_extend_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, 5, 40)
-            .unwrap();
-        let created = deal.created_at;
-        assert_eq!(
-            fixture
-                .repository
-                .get_purchases_involving_player(Some(GUILD_ID), BUYER_ID, created, created + 1,)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(
-            fixture
-                .repository
-                .get_purchases_involving_player(
-                    Some(GUILD_ID),
-                    BUYER_ID,
-                    created + 1,
-                    created + 10,
-                )
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            fixture
-                .repository
-                .get_purchases_involving_player(Some(GUILD_ID), BUYER_ID, created - 10, created,)
-                .unwrap()
-                .is_empty()
-        );
+        let purchases = fixture.purchases(BUYER_ID);
+        assert_eq!(purchases, [(BUYER_ID, PARTNER_ID, 90, 3)]);
     }
 
     #[test]
@@ -1740,12 +1653,6 @@ mod tests {
         assert!(error.to_string().contains("forced package deal failure"));
         assert_eq!(fixture.balance(BUYER_ID, GUILD_ID), 1_000);
         assert!(fixture.package_ledger_rows(BUYER_ID, GUILD_ID).is_empty());
-        assert!(
-            fixture
-                .repository
-                .get_purchases_involving_player(Some(GUILD_ID), BUYER_ID, 0, i64::MAX)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(fixture.purchases(BUYER_ID).is_empty());
     }
 }

@@ -14,6 +14,20 @@ pub(super) const FRAMES: usize = 30;
 /// Hundredths of a second. Twenty-five frames a second is near the fastest pace
 /// that clients honor rather than slow down.
 const FRAME_DELAY: u16 = 4;
+/// Seconds into a two-beat card at which its timeline reaches each mark: the
+/// setup is in by 1 s and holds to 5.6 s so a person can read it, the wipe
+/// takes about half a second, and the punchline settles by 7.2 s. Marks sit
+/// on frame boundaries. Unchanged frames merge, so holds are cheap.
+const TWO_BEAT_PACE: [(f32, f32); 6] = [
+    (0.0, 0.0),
+    (1.0, 0.30),
+    (5.6, 0.48),
+    (6.08, 0.56),
+    (7.2, 0.92),
+    (7.52, 1.0),
+];
+/// One frame every `FRAME_DELAY`, start to end of the paced timeline.
+const TWO_BEAT_FRAMES: usize = 189;
 /// No loop extension: one reveal, then the finished card. If a client replays it
 /// anyway, a long hold keeps the card readable between plays.
 const FINAL_HOLD: u16 = 600;
@@ -21,6 +35,26 @@ const WIDTH: usize = WRAPPED_SLIDE_WIDTH;
 const HEIGHT: usize = WRAPPED_SLIDE_HEIGHT;
 /// Colors available to the image; the last palette slot means "unchanged".
 const COLORS: usize = 255;
+
+pub(super) fn frame_count(layout: WrappedLayout) -> usize {
+    match layout {
+        WrappedLayout::TwoBeat => TWO_BEAT_FRAMES,
+        _ => FRAMES,
+    }
+}
+
+/// Where frame `index` of `frames` falls on the card's timeline, from 0 to 1.
+pub(super) fn frame_time(layout: WrappedLayout, index: usize, frames: usize) -> f32 {
+    if layout != WrappedLayout::TwoBeat {
+        return index as f32 / (frames - 1).max(1) as f32;
+    }
+    let seconds = index as f32 * f32::from(FRAME_DELAY) / 100.0;
+    let mut marks = TWO_BEAT_PACE.windows(2);
+    marks.find(|pair| seconds <= pair[1].0).map_or(1.0, |pair| {
+        let ((from, start), (to, end)) = (pair[0], pair[1]);
+        start + (end - start) * (seconds - from) / (to - from)
+    })
+}
 
 pub(super) fn animate(slide: &WrappedSlideData) -> Result<Vec<u8>, gif::EncodingError> {
     // Award setups need a beat before the prize is named. Keep the same
@@ -30,8 +64,9 @@ pub(super) fn animate(slide: &WrappedSlideData) -> Result<Vec<u8>, gif::Encoding
     } else {
         FRAME_DELAY
     };
+    let frames = frame_count(slide.layout);
     let mut stage = Stage::new(slide);
-    let colors = shared_palette(&mut stage);
+    let colors = shared_palette(&mut stage, frames);
     let transparent = (colors.len() / 3) as u8;
     let mut table = colors.clone();
     table.extend_from_slice(&[0, 0, 0]);
@@ -41,8 +76,8 @@ pub(super) fn animate(slide: &WrappedSlideData) -> Result<Vec<u8>, gif::Encoding
         let mut encoder = gif::Encoder::new(&mut bytes, WIDTH as u16, HEIGHT as u16, &table)?;
         let mut previous: Option<Vec<u8>> = None;
         let mut pending: Option<gif::Frame<'static>> = None;
-        for index in 0..FRAMES {
-            let t = index as f32 / (FRAMES - 1) as f32;
+        for index in 0..frames {
+            let t = frame_time(slide.layout, index, frames);
             let indexed = mapper.map(&stage.paint(t).pixels);
             let frame = match &previous {
                 None => Some(sub_frame(
@@ -74,12 +109,14 @@ pub(super) fn animate(slide: &WrappedSlideData) -> Result<Vec<u8>, gif::Encoding
 }
 
 /// Exact colors when a card has few enough, otherwise a quantized palette drawn
-/// from across the timeline so transient colors still have a home.
-fn shared_palette(stage: &mut Stage<'_>) -> Vec<u8> {
-    const SAMPLES: [f32; 4] = [1.0, 0.75, 0.5, 0.25];
-    let mut stacked = Vec::with_capacity(WIDTH * HEIGHT * 4 * SAMPLES.len());
+/// from across the timeline so transient colors still have a home. A longer
+/// timeline is sampled more often, so both beats of a two-beat card count.
+fn shared_palette(stage: &mut Stage<'_>, frames: usize) -> Vec<u8> {
+    let count = if frames > FRAMES { 6 } else { 4 };
+    let samples = (0..count).map(|index| 1.0 - index as f32 / count as f32);
+    let mut stacked = Vec::with_capacity(WIDTH * HEIGHT * 4 * count);
     let mut unique = HashSet::new();
-    for t in SAMPLES {
+    for t in samples {
         let pixels = &stage.paint(t).pixels;
         let mut last = [0_u8; 4];
         for pixel in pixels.chunks_exact(4) {
@@ -96,12 +133,8 @@ fn shared_palette(stage: &mut Stage<'_>) -> Vec<u8> {
         colors.sort_unstable();
         return colors.concat();
     }
-    let frame = gif::Frame::from_rgba_speed(
-        WIDTH as u16,
-        (HEIGHT * SAMPLES.len()) as u16,
-        &mut stacked,
-        10,
-    );
+    let frame =
+        gif::Frame::from_rgba_speed(WIDTH as u16, (HEIGHT * count) as u16, &mut stacked, 10);
     let mut palette = frame.palette.unwrap_or_default();
     // Free one slot for transparency by retiring the least-used color.
     if palette.len() / 3 > COLORS {

@@ -28,7 +28,7 @@ use thiserror::Error;
 
 use crate::{
     expected_migrations,
-    json_numeric::{coerce_i64_like_python, number_f64},
+    json_numeric::{coerce_i64_like_python, coerce_integral_i64, number_f64},
 };
 
 /// Canonical schema produced by the current ordered migration set.
@@ -1355,7 +1355,9 @@ fn run_consolidated_backfills(
     if pending(pending_migrations, "recompute_symmetric_glicko_predictions") {
         backfill_glicko_probabilities(transaction)?;
     }
-    if pending(pending_migrations, "create_wrapped_enrichment_facts") {
+    if pending(pending_migrations, "create_wrapped_enrichment_facts")
+        || pending(pending_migrations, "add_wrapped_item_facts")
+    {
         backfill_wrapped_enrichment(transaction)?;
     }
     if pending(
@@ -2103,32 +2105,20 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
                         .and_then(JsonValue::as_i64)
                         .is_some_and(|account_id| ids.contains(&account_id))
                 });
-            let rapier_count = player
-                .and_then(|fields| fields.get("purchase_log"))
-                .and_then(JsonValue::as_array)
-                .map_or(0_i64, |purchases| {
-                    i64::try_from(
-                        purchases
-                            .iter()
-                            .filter_map(JsonValue::as_object)
-                            .filter(|item| {
-                                item.get("key").and_then(JsonValue::as_str) == Some("rapier")
-                            })
-                            .count(),
-                    )
-                    .unwrap_or(i64::MAX)
-                });
+            let purchases = crate::json_numeric::wrapped_purchase_facts(player)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             transaction.execute(
                 "INSERT INTO wrapped_enrichment_facts(
                    guild_id,match_id,discord_id,actions_per_min,courier_kills,
-                   pings,rapier_count,lane_role,comeback,throw
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                   pings,rapier_count,lane_role,comeback,throw,buybacks,item_counts
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
                  ON CONFLICT(guild_id,match_id,discord_id) DO UPDATE SET
                    actions_per_min=excluded.actions_per_min,
                    courier_kills=excluded.courier_kills,
                    pings=excluded.pings,rapier_count=excluded.rapier_count,
                    lane_role=excluded.lane_role,comeback=excluded.comeback,
-                   throw=excluded.throw",
+                   throw=excluded.throw,buybacks=excluded.buybacks,
+                   item_counts=excluded.item_counts",
                 params![
                     guild_id,
                     match_id,
@@ -2136,10 +2126,14 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
                     json_number_f64(player.and_then(|fields| fields.get("actions_per_min"))),
                     json_number_i64(player.and_then(|fields| fields.get("courier_kills"))),
                     json_number_i64(player.and_then(|fields| fields.get("pings"))),
-                    rapier_count,
+                    purchases.rapier_count,
                     json_number_i64(player.and_then(|fields| fields.get("lane_role"))),
                     json_number_f64(payload.get("comeback")),
                     json_number_f64(payload.get("throw")),
+                    player
+                        .and_then(|fields| fields.get("buyback_count"))
+                        .and_then(coerce_integral_i64),
+                    purchases.item_counts,
                 ],
             )?;
         }

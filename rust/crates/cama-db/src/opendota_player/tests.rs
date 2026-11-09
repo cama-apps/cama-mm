@@ -1136,6 +1136,8 @@ CREATE TABLE player_steam_ids (
         lane_role INTEGER,
         comeback INTEGER,
         throw INTEGER,
+        buybacks INTEGER,
+        item_counts TEXT,
         PRIMARY KEY(guild_id,match_id,discord_id)
     );
 "#;
@@ -1204,4 +1206,71 @@ fn orphaned_deadlock_link_remains_globally_owned_and_can_be_repaired_by_its_owne
         fixture.repository.get_steam_id_owner(12345).unwrap(),
         Some(100)
     );
+}
+
+#[test]
+fn test_wrapped_refresh_preserves_buybacks_and_item_counts_across_link_changes() {
+    let fixture = Fixture::new();
+    fixture.player(100, GUILD, "item-player", None);
+    link(&fixture, 100, 12_345, true, 10);
+    let match_id = fixture.enriched_match(
+        &[100],
+        r#"{"players":[{"account_id":12345,"buyback_count":3,
+            "purchase_log":[{"key":"blink"},{"key":"magic_wand"},{"key":"magic_wand"},{"key":"ward_observer"}]}]}"#,
+    );
+    let read = |fixture: &Fixture| {
+        fixture
+            .connection()
+            .query_row(
+                "SELECT buybacks,item_counts FROM wrapped_enrichment_facts
+                  WHERE guild_id=?1 AND match_id=?2 AND discord_id=100",
+                params![GUILD, match_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .expect("read item facts")
+    };
+    let expected = (Some(3), Some(r#"{"blink":1,"magic_wand":2}"#.to_owned()));
+    assert_eq!(read(&fixture), expected);
+
+    link(&fixture, 100, 99_999, false, 20);
+    assert_eq!(read(&fixture), expected);
+    assert!(
+        fixture
+            .repository
+            .remove_steam_id(100, 99_999)
+            .expect("unlink")
+    );
+    assert_eq!(read(&fixture), expected);
+}
+
+#[test]
+fn test_wrapped_refresh_keeps_only_integral_buyback_counts() {
+    let fixture = Fixture::new();
+    fixture.player(100, GUILD, "whole-number", None);
+    fixture.player(200, GUILD, "text", None);
+    link(&fixture, 100, 12_345, true, 10);
+    link(&fixture, 200, 23_456, true, 10);
+    let match_id = fixture.enriched_match(
+        &[100, 200],
+        r#"{"players":[{"account_id":12345,"buyback_count":2.0},
+            {"account_id":23456,"buyback_count":"x"}]}"#,
+    );
+    let buybacks = |discord_id: i64| {
+        fixture
+            .connection()
+            .query_row(
+                "SELECT buybacks FROM wrapped_enrichment_facts
+                  WHERE guild_id=?1 AND match_id=?2 AND discord_id=?3",
+                params![GUILD, match_id, discord_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .expect("read buybacks")
+    };
+    assert_eq!(buybacks(100), Some(2));
+    assert_eq!(buybacks(200), None);
 }

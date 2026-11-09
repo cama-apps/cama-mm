@@ -18,35 +18,48 @@ const POPPINS_BLACK: &[u8] =
 const POPPINS_BOLD: &[u8] = include_bytes!("../../../../../assets/wrapped/fonts/Poppins-Bold.ttf");
 const POPPINS_MEDIUM: &[u8] =
     include_bytes!("../../../../../assets/wrapped/fonts/Poppins-Medium.ttf");
+const ANTON: &[u8] = include_bytes!("../../../../../assets/wrapped/fonts/Anton-Regular.ttf");
+const PLAYFAIR_BLACK: &[u8] =
+    include_bytes!("../../../../../assets/wrapped/fonts/PlayfairDisplay-Black.ttf");
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum Face {
     Black,
     Bold,
     Medium,
+    /// Anton: condensed numbers and meme caps.
+    Display,
+    /// Playfair Display Black: the movie title.
+    Serif,
 }
 
 impl Face {
     fn font(self) -> &'static Font {
         fn parse(bytes: &'static [u8]) -> Font {
-            Font::from_bytes(bytes, FontSettings::default()).expect("bundled Poppins parses")
+            Font::from_bytes(bytes, FontSettings::default()).expect("bundled font parses")
         }
         static BLACK: OnceLock<Font> = OnceLock::new();
         static BOLD: OnceLock<Font> = OnceLock::new();
         static MEDIUM: OnceLock<Font> = OnceLock::new();
+        static DISPLAY: OnceLock<Font> = OnceLock::new();
+        static SERIF: OnceLock<Font> = OnceLock::new();
         match self {
             Self::Black => BLACK.get_or_init(|| parse(POPPINS_BLACK)),
             Self::Bold => BOLD.get_or_init(|| parse(POPPINS_BOLD)),
             Self::Medium => MEDIUM.get_or_init(|| parse(POPPINS_MEDIUM)),
+            Self::Display => DISPLAY.get_or_init(|| parse(ANTON)),
+            Self::Serif => SERIF.get_or_init(|| parse(PLAYFAIR_BLACK)),
         }
     }
 
     /// Display sizes are set tight; reading sizes get room to breathe.
-    const fn leading(self) -> f32 {
+    pub(super) const fn leading(self) -> f32 {
         match self {
             Self::Black => 1.02,
             Self::Bold => 1.12,
             Self::Medium => 1.22,
+            Self::Display => 0.95,
+            Self::Serif => 1.0,
         }
     }
 
@@ -55,6 +68,9 @@ impl Face {
             Self::Black => -0.025,
             Self::Bold => -0.01,
             Self::Medium => 0.0,
+            Self::Display => 0.01,
+            // Title-card caps are set wide.
+            Self::Serif => 0.08,
         }
     }
 
@@ -71,6 +87,17 @@ impl Face {
     }
 }
 
+/// How far the tallest glyph in `value` rises above the baseline.
+pub(super) fn ink_height(value: &str, size: f32, face: Face) -> f32 {
+    value
+        .chars()
+        .map(|character| {
+            let metrics = face.font_for(character).metrics(character, size);
+            metrics.height as f32 + metrics.ymin as f32
+        })
+        .fold(0.0, f32::max)
+}
+
 pub(super) fn text_width(value: &str, size: f32, face: Face) -> f32 {
     let tracking = face.tracking() * size;
     value
@@ -84,10 +111,10 @@ pub(super) fn text_width(value: &str, size: f32, face: Face) -> f32 {
         .sum()
 }
 
-const FIRST_BASELINE: f32 = 0.9;
-const DESCENT: f32 = 0.27;
+pub(super) const FIRST_BASELINE: f32 = 0.9;
+pub(super) const DESCENT: f32 = 0.27;
 
-fn block_height(rows: usize, size: f32, face: Face) -> f32 {
+pub(super) fn block_height(rows: usize, size: f32, face: Face) -> f32 {
     if rows == 0 {
         return 0.0;
     }
@@ -103,7 +130,19 @@ pub(super) fn fit_text(
     width: i32,
     height: i32,
 ) -> (f32, Vec<String>) {
-    const SMALLEST: f32 = 14.0;
+    fit_text_within(value, face, maximum, 14.0, width, height)
+}
+
+/// `fit_text` that shrinks no further than `smallest`: a block still too tall
+/// there ends in an ellipsis.
+pub(super) fn fit_text_within(
+    value: &str,
+    face: Face,
+    maximum: f32,
+    smallest: f32,
+    width: i32,
+    height: i32,
+) -> (f32, Vec<String>) {
     let width = width as f32;
     let mut size = maximum;
     loop {
@@ -139,7 +178,7 @@ pub(super) fn fit_text(
         if block_height(rows.len(), size, face) <= height as f32 {
             return (size, rows);
         }
-        if size <= SMALLEST {
+        if size <= smallest {
             let mut kept = rows.len();
             while kept > 1 && block_height(kept, size, face) > height as f32 {
                 kept -= 1;
@@ -153,7 +192,7 @@ pub(super) fn fit_text(
             }
             return (size, rows);
         }
-        size = (size - if size > 40.0 { 2.0 } else { 1.0 }).max(SMALLEST);
+        size = (size - if size > 40.0 { 2.0 } else { 1.0 }).max(smallest);
     }
 }
 
@@ -312,6 +351,72 @@ pub(super) fn palette(theme: WrappedTheme) -> Palette {
             Rgba::rgb(60, 70, 240),
             INK,
         ),
+        // The two-beat setups use the approved mockup colors exactly.
+        WrappedTheme::BeatRoast => (
+            Rgba::rgb(255, 90, 54),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(255, 138, 107),
+            Rgba::rgb(255, 90, 54),
+        ),
+        WrappedTheme::BeatPopoff => (
+            Rgba::rgb(45, 70, 185),
+            Rgba::rgb(255, 255, 255),
+            Rgba::rgb(255, 225, 77),
+            Rgba::rgb(58, 85, 200),
+            Rgba::rgb(20, 10, 46),
+        ),
+        // Each further two-beat palette is a setup color and the punchline
+        // color it flips to (the accent), never one already in the set.
+        WrappedTheme::BeatRoastRed => (
+            Rgba::rgb(196, 20, 52),
+            CREAM,
+            CREAM,
+            Rgba::rgb(170, 14, 44),
+            Rgba::rgb(196, 20, 52),
+        ),
+        WrappedTheme::BeatRoastViolet => (
+            Rgba::rgb(92, 33, 240),
+            Rgba::rgb(255, 255, 255),
+            Rgba::rgb(200, 255, 60),
+            Rgba::rgb(118, 66, 250),
+            Rgba::rgb(92, 33, 240),
+        ),
+        WrappedTheme::BeatRoastPlum => (
+            PLUM,
+            CREAM,
+            Rgba::rgb(255, 225, 77),
+            Rgba::rgb(88, 30, 112),
+            PLUM,
+        ),
+        WrappedTheme::BeatPopoffYellow => (
+            Rgba::rgb(255, 225, 77),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(45, 70, 185),
+            Rgba::rgb(255, 236, 140),
+            Rgba::rgb(255, 225, 77),
+        ),
+        WrappedTheme::BeatPopoffLime => (
+            Rgba::rgb(200, 255, 60),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(226, 255, 150),
+            Rgba::rgb(200, 255, 60),
+        ),
+        WrappedTheme::BeatPopoffPink => (
+            Rgba::rgb(255, 157, 230),
+            Rgba::rgb(20, 10, 46),
+            PLUM,
+            Rgba::rgb(255, 190, 238),
+            Rgba::rgb(255, 157, 230),
+        ),
+        WrappedTheme::BeatPopoffAqua => (
+            Rgba::rgb(60, 225, 215),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(8, 60, 72),
+            Rgba::rgb(140, 238, 232),
+            Rgba::rgb(60, 225, 215),
+        ),
     };
     Palette {
         bg,
@@ -335,6 +440,14 @@ pub(super) struct PreparedArt {
     pub(super) pixels: Vec<u8>,
 }
 
+/// Prepared art with its top-left corner on the card and its corner radius.
+pub(super) struct PlacedArt {
+    pub(super) art: PreparedArt,
+    pub(super) left: i32,
+    pub(super) top: i32,
+    pub(super) radius: f32,
+}
+
 /// A rasterized glyph, shared between frames.
 type Glyph = Rc<(Metrics, Vec<u8>)>;
 /// Text wrapped to a box: the size it fit at and its lines.
@@ -346,9 +459,12 @@ pub(super) struct Stage<'a> {
     pub(super) palette: Palette,
     pub(super) t: f32,
     pub(super) art: Option<PreparedArt>,
+    /// A two-beat Cinema punchline's letterboxed hero still.
+    pub(super) still_art: Option<PreparedArt>,
+    /// The hero beside a Plain punchline, placed clear of its type.
+    pub(super) punch_art: Option<PlacedArt>,
     /// Pictures for ranked rows, by row index.
     pub(super) row_art: Vec<Option<PreparedArt>>,
-    pub(super) avatars: Vec<Option<DecodedPng>>,
     glyphs: HashMap<(Face, char, u32), Glyph>,
     fits: HashMap<(String, Face, u32, i32, i32), Fit>,
 }
@@ -356,18 +472,20 @@ pub(super) struct Stage<'a> {
 impl<'a> Stage<'a> {
     pub(super) fn new(slide: &'a WrappedSlideData) -> Self {
         let palette = palette(slide.theme);
+        let (art, still_art, punch_art) = if slide.layout == WrappedLayout::TwoBeat {
+            artwork::prepare_beat(slide)
+        } else {
+            (artwork::prepare(slide), None, None)
+        };
         Self {
             canvas: Canvas::new(WRAPPED_SLIDE_WIDTH, WRAPPED_SLIDE_HEIGHT, palette.bg),
             slide,
             palette,
             t: 1.0,
-            art: artwork::prepare(slide),
+            art,
+            still_art,
+            punch_art,
             row_art: artwork::prepare_rows(slide),
-            avatars: slide
-                .avatars
-                .iter()
-                .map(|avatar| decode_png(&avatar.png))
-                .collect(),
             glyphs: HashMap::new(),
             fits: HashMap::new(),
         }
@@ -381,7 +499,7 @@ impl<'a> Stage<'a> {
         &self.canvas
     }
 
-    fn progress(&self, start: f32, end: f32) -> f32 {
+    pub(super) fn progress(&self, start: f32, end: f32) -> f32 {
         if self.t >= 1.0 {
             return 1.0;
         }
@@ -518,10 +636,35 @@ impl<'a> Stage<'a> {
         align: Align,
         rise: (f32, f32),
     ) -> i32 {
+        self.stat_in(
+            Face::Black,
+            final_value,
+            shown,
+            rect,
+            maximum,
+            color,
+            align,
+            rise,
+        )
+    }
+
+    /// `stat` set in another face.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn stat_in(
+        &mut self,
+        face: Face,
+        final_value: &str,
+        shown: &str,
+        rect: (i32, i32, i32, i32),
+        maximum: f32,
+        color: Rgba,
+        align: Align,
+        rise: (f32, f32),
+    ) -> i32 {
         if final_value.trim().is_empty() {
             return rect.1;
         }
-        let width = text_width(final_value, maximum, Face::Black);
+        let width = text_width(final_value, maximum, face);
         let fitted = if width > rect.2 as f32 {
             maximum * rect.2 as f32 / width
         } else {
@@ -532,8 +675,7 @@ impl<'a> Stage<'a> {
         let x = match align {
             Align::Left => rect.0 as f32,
             Align::Center => {
-                rect.0 as f32
-                    + (rect.2 as f32 - text_width(final_value, size, Face::Black)).max(0.0) / 2.0
+                rect.0 as f32 + (rect.2 as f32 - text_width(final_value, size, face)).max(0.0) / 2.0
             }
         };
         let shown_amount = self.ease(rise.0, rise.1);
@@ -544,7 +686,7 @@ impl<'a> Stage<'a> {
                 x,
                 baseline + (1.0 - shown_amount) * size,
                 size,
-                Face::Black,
+                face,
                 color,
                 clip,
             );
@@ -568,10 +710,9 @@ impl<'a> Stage<'a> {
         if value.trim().is_empty() {
             return y;
         }
-        let padding = size * 0.75;
+        let (width, height) = pill_extent(value, maximum_width, size);
+        let padding = size * PILL_PADDING;
         let size = pill_size(value, maximum_width, size);
-        let width = text_width(value, size, Face::Bold) + padding * 2.0;
-        let height = size * 1.9;
         let scale = self.pop(start, start + 0.2);
         if self.t >= start && scale > 0.01 {
             let (cx, cy) = (x as f32 + width / 2.0, y as f32 + height / 2.0);
@@ -602,9 +743,15 @@ impl<'a> Stage<'a> {
     }
 }
 
+/// A pill's padding on each side and its height, in multiples of its type.
+const PILL_PADDING: f32 = 0.75;
+pub(super) const PILL_HEIGHT: f32 = 1.9;
+/// The footer name under every card: its box top, box height and type size.
+pub(super) const FOOTER_NAME: (i32, i32, f32) = (HEIGHT - 50, 36, 23.0);
+
 /// Shrink a pill's type until it fits, keeping its padding.
-fn pill_size(value: &str, maximum_width: i32, size: f32) -> f32 {
-    let available = maximum_width as f32 - size * 1.5;
+pub(super) fn pill_size(value: &str, maximum_width: i32, size: f32) -> f32 {
+    let available = maximum_width as f32 - size * PILL_PADDING * 2.0;
     let width = text_width(value, size, Face::Bold);
     if width > available {
         size * available / width
@@ -613,10 +760,19 @@ fn pill_size(value: &str, maximum_width: i32, size: f32) -> f32 {
     }
 }
 
+/// The width and height of a pill holding `value` at `size`, its type
+/// shrunk to fit `maximum_width`.
+pub(super) fn pill_extent(value: &str, maximum_width: i32, size: f32) -> (f32, f32) {
+    let fitted = pill_size(value, maximum_width, size);
+    (
+        text_width(value, fitted, Face::Bold) + size * PILL_PADDING * 2.0,
+        fitted * PILL_HEIGHT,
+    )
+}
+
 impl Stage<'_> {
     pub(super) fn pill_width(&self, value: &str, maximum_width: i32, size: f32) -> i32 {
-        let fitted = pill_size(value, maximum_width, size);
-        (text_width(value, fitted, Face::Bold) + size * 1.5).ceil() as i32
+        pill_extent(value, maximum_width, size).0.ceil() as i32
     }
 }
 
@@ -736,6 +892,15 @@ mod tests {
             WrappedTheme::Persona,
             WrappedTheme::Awards,
             WrappedTheme::Recap,
+            WrappedTheme::BeatRoast,
+            WrappedTheme::BeatPopoff,
+            WrappedTheme::BeatRoastRed,
+            WrappedTheme::BeatRoastViolet,
+            WrappedTheme::BeatRoastPlum,
+            WrappedTheme::BeatPopoffYellow,
+            WrappedTheme::BeatPopoffLime,
+            WrappedTheme::BeatPopoffPink,
+            WrappedTheme::BeatPopoffAqua,
         ] {
             let p = palette(theme);
             assert!(contrast(p.fg, p.bg) >= 4.5, "{theme:?} text on background");

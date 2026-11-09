@@ -111,13 +111,14 @@ pub struct PetYear {
     pub brawl_draws: i64,
     pub brawl_rival: Option<PersonTally>,
     pub keepsakes: i64,
-    /// Ranked by meals served.
+    /// Ranked by this year's pet spending.
     pub rank: Option<ServerRank>,
 }
 
 impl PetYear {
+    /// Lifetime feedings of the pets kept this year; not a yearly figure.
     #[must_use]
-    pub fn meals(&self) -> i64 {
+    pub fn lifetime_meals(&self) -> i64 {
         self.pets.iter().map(|pet| pet.times_fed).sum()
     }
 
@@ -270,7 +271,7 @@ mod tests {
             ],
             ..PetYear::default()
         };
-        assert_eq!(year.meals(), 11);
+        assert_eq!(year.lifetime_meals(), 11);
         assert_eq!(year.losses().len(), 1);
     }
 }

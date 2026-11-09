@@ -228,6 +228,14 @@ pub fn format_grouped(value: i64) -> String {
     }
 }
 
+/// A grouped count and its noun, singular for exactly one: `"1 game"`,
+/// `"1,204 games"`.
+#[must_use]
+pub fn count_noun(count: i64, one: &str, many: &str) -> String {
+    let noun = if count == 1 { one } else { many };
+    format!("{} {noun}", format_grouped(count))
+}
+
 /// [`format_grouped`] with an explicit `+` on positive values; zero and
 /// negative values are unchanged, such as `+1,234`, `0`, and `-1,234`.
 #[must_use]
@@ -281,9 +289,18 @@ pub fn python_round_decimals(value: f64, decimals: usize) -> f64 {
 mod tests {
     use super::{
         BettingDisplayOptions, JOPACOIN_EMOTE, PoolOddsSeeds, ROLE_EMOJIS, ROLE_NAMES,
-        calculate_pool_odds, format_betting_display, format_grouped, format_grouped_signed,
-        format_grouped_unsigned, format_role_display, python_round_decimals, truncate_utf8_bytes,
+        calculate_pool_odds, count_noun, format_betting_display, format_grouped,
+        format_grouped_signed, format_grouped_unsigned, format_role_display, python_round_decimals,
+        truncate_utf8_bytes,
     };
+
+    #[test]
+    fn count_noun_is_singular_for_exactly_one() {
+        assert_eq!(count_noun(1, "game", "games"), "1 game");
+        assert_eq!(count_noun(0, "game", "games"), "0 games");
+        assert_eq!(count_noun(1_204, "game", "games"), "1,204 games");
+        assert_eq!(count_noun(-1, "loss", "losses"), "-1 losses");
+    }
 
     #[test]
     fn test_truncate_utf8_bytes_keeps_character_boundaries() {

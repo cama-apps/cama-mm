@@ -7,7 +7,9 @@ use cama_app::hero_lookup::{HeroImageSize, HeroLookup};
 use cama_app::pet_assets::{
     FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
 };
-use cama_app::trivia_image_cache::{TriviaImageCache, production_trivia_cache_path};
+use cama_app::trivia_image_cache::{
+    MAX_CACHED_IMAGE_BYTES, TriviaImageCache, production_trivia_cache_path,
+};
 use cama_app::wrapped_media::{WrappedLayout, WrappedRow, WrappedTheme};
 use cama_app::wrapped_story::chapters::{
     CardArt, CardMood, CardStyle, ChapterCard, DigContext, PersonaActivity, PersonaSignal,
@@ -21,6 +23,7 @@ use cama_domain::wrapped_activity::{
     DigYear, GambaYear, GambleEvent, GambleKind, MafiaYear, PetYear,
 };
 
+use super::distinct::Persona;
 use super::*;
 
 /// The deepest layers of the mine get the darker palette.
@@ -93,6 +96,17 @@ impl ArtSources {
         let bytes = std::fs::read(path).ok()?;
         // Steam portraits are well under this; anything larger is not one.
         (bytes.len() <= 1024 * 1024).then_some(bytes)
+    }
+
+    /// The hero's full render when startup has already cached it. Never
+    /// downloads; callers fall back to the portrait.
+    pub(super) fn hero_render(&self, hero_id: i64) -> Option<Vec<u8>> {
+        let url = self.heroes.image_url(hero_id, HeroImageSize::Render)?;
+        let path = TriviaImageCache::new(&self.hero_cache)
+            .ok()?
+            .path_for_url(&url);
+        let bytes = std::fs::read(path).ok()?;
+        (bytes.len() <= MAX_CACHED_IMAGE_BYTES).then_some(bytes)
     }
 
     fn boss_scene(&self, boss_id: &str, scene: &str) -> Option<Vec<u8>> {
@@ -405,12 +419,16 @@ pub(super) fn persona_signals(
             },
         });
     }
-    let meals = activity.pets.meals();
-    if meals >= 5 {
+    // Pets rank by this year's spending; their feedings are lifetime totals.
+    let pets = &activity.pets;
+    if pets.jc_spent > 0 {
         signals.push(PersonaSignal {
             activity: PersonaActivity::Pets,
-            strength: strength(activity.pets.rank),
-            evidence: (format_grouped(meals), "pet meals served".to_owned()),
+            strength: strength(pets.rank),
+            evidence: (
+                format!("{} JC", format_grouped(pets.jc_spent)),
+                "on pet care".to_owned(),
+            ),
         });
     }
     let events = &activity.gamba.events;
@@ -444,19 +462,38 @@ pub(super) fn persona_signals(
     signals
 }
 
+/// The Cama type: a persona title from the distinct stories, over the
+/// stories behind it, or each activity's evidence when there are none.
 pub(super) fn persona_slide(
     signals: &[PersonaSignal],
+    persona: Option<&Persona>,
     activity: &ActivityData,
     username: &str,
     year_label: &str,
 ) -> Option<WrappedSlideData> {
-    persona_card(signals).map(|card| card_slide(card, activity, username, year_label))
+    let Some(persona) = persona else {
+        return persona_card(signals).map(|card| card_slide(card, activity, username, year_label));
+    };
+    let mut slide = base_slide("story_persona", "Your Cama type", username, year_label);
+    slide.layout = WrappedLayout::Persona;
+    slide.theme = WrappedTheme::Persona;
+    slide.stat_value.clone_from(&persona.title);
+    slide.headline.clone_from(&persona.subtitle);
+    slide.lines = vec![persona.subtitle.clone()];
+    slide.rows = persona
+        .evidence
+        .iter()
+        .map(|(value, label)| WrappedRow::new(value.clone(), label.clone()))
+        .collect();
+    Some(slide)
 }
 
-/// The share card's "numbers" column: `value|label` pairs, most personal first.
+/// The share card's "numbers" column: `value|label` pairs, most personal
+/// first. `highlights` are the best popoff and roast, already in that form.
 pub(super) fn recap_numbers(
     personal: Option<&PersonalSummaryWrapped>,
     playtime: Option<&str>,
+    highlights: &[String],
     activity: &ActivityData,
 ) -> Vec<String> {
     let mut numbers = Vec::new();
@@ -469,6 +506,7 @@ pub(super) fn recap_numbers(
     if let Some(time) = playtime {
         numbers.push(format!("{time}|in recorded matches"));
     }
+    numbers.extend(highlights.iter().cloned());
     if activity.dig.digs >= 5 {
         let (value, label) = dig_headline_number(&activity.dig);
         numbers.push(format!("{value}|{label}"));
@@ -488,9 +526,11 @@ pub(super) fn recap_numbers(
             format_grouped(activity.mafia.games)
         ));
     }
-    let meals = activity.pets.meals();
-    if meals >= 5 {
-        numbers.push(format!("{}|pet meals", format_grouped(meals)));
+    if activity.pets.jc_spent > 0 {
+        numbers.push(format!(
+            "{} JC|on pet care",
+            format_grouped(activity.pets.jc_spent)
+        ));
     }
     numbers.truncate(5);
     numbers

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -86,10 +86,7 @@ use crate::wrapped_provider::{WrappedDiscordPort, WrappedDiscordProfile};
 
 mod spectator;
 
-const WRAPPED_AVATAR_MAX_BYTES: usize = 2 * 1024 * 1024;
-const WRAPPED_AVATAR_TIMEOUT: Duration = Duration::from_secs(10);
 const INTERACTION_ACKNOWLEDGEMENT_DEADLINE: Duration = Duration::from_millis(1_500);
-static WRAPPED_AVATAR_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn named_text_channel(
     guild: GuildId,
@@ -5264,7 +5261,6 @@ impl WrappedDiscordPort for SerenityDiscordTransport {
         &self,
         guild_id: u64,
         user_id: u64,
-        include_avatar: bool,
     ) -> Result<Option<WrappedDiscordProfile>, String> {
         let signed_user = crate::ids::signed_id(user_id, "user")?;
         let display_name = crate::discord_transport::resolve_guild_player_names(
@@ -5274,98 +5270,8 @@ impl WrappedDiscordPort for SerenityDiscordTransport {
         )
         .await
         .resolve(signed_user);
-        let mut profile = WrappedDiscordProfile {
-            display_name,
-            avatar_png: None,
-        };
-        if !include_avatar {
-            return Ok(Some(profile));
-        }
-        // Optional artwork must never discard a live or last-seen name.
-        let Ok(context) = self.context() else {
-            return Ok(Some(profile));
-        };
-        let guild_id = GuildId::new(guild_id);
-        let user_id = UserId::new(user_id);
-        let member = match guild_id
-            .member((&context.cache, context.http.as_ref()), user_id)
-            .await
-        {
-            Ok(member) => member,
-            Err(error) => {
-                warn!(%error, user_id = user_id.get(), "wrapped avatar member lookup failed");
-                return Ok(Some(profile));
-            }
-        };
-        profile.avatar_png = if let Some(avatar) = member.avatar {
-            let url = format!(
-                "https://cdn.discordapp.com/guilds/{}/users/{}/avatars/{avatar}.png?size=64",
-                guild_id.get(),
-                user_id.get(),
-            );
-            match download_wrapped_avatar(&url).await {
-                Ok(bytes) => Some(bytes),
-                Err(error) => {
-                    warn!(%error, user_id = user_id.get(), "wrapped avatar download failed");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        Ok(Some(profile))
+        Ok(Some(WrappedDiscordProfile { display_name }))
     }
-}
-
-async fn download_wrapped_avatar(url: &str) -> Result<Vec<u8>, String> {
-    let client = WRAPPED_AVATAR_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::limited(3))
-            .user_agent("cama-rust-wrapped/1")
-            .build()
-            .expect("static Wrapped avatar HTTP client configuration")
-    });
-    let mut response = client
-        .get(url)
-        .timeout(WRAPPED_AVATAR_TIMEOUT)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Discord CDN returned HTTP {} for Wrapped avatar",
-            response.status()
-        ));
-    }
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if !content_type
-        .split(';')
-        .next()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("image/png"))
-    {
-        return Err(format!(
-            "Discord CDN returned unsupported Wrapped avatar content type {content_type:?}"
-        ));
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > WRAPPED_AVATAR_MAX_BYTES as u64)
-    {
-        return Err("Wrapped avatar exceeded the 2 MiB limit".to_owned());
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
-        if bytes.len().saturating_add(chunk.len()) > WRAPPED_AVATAR_MAX_BYTES {
-            return Err("Wrapped avatar exceeded the 2 MiB limit".to_owned());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
 }
 
 fn serenity_attachment(attachment: &InteractionAttachment) -> CreateAttachment {

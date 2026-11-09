@@ -40,9 +40,8 @@ fn gamba_slide() -> WrappedSlideData {
     slide
 }
 
-const ALL_KINDS: [&str; 17] = [
+const ALL_KINDS: [&str; 13] = [
     "story_intro",
-    "story_identity",
     "story_superlative",
     "story_moment",
     "story_finale",
@@ -53,9 +52,6 @@ const ALL_KINDS: [&str; 17] = [
     "records_combat",
     "story_hero",
     "story_lanes",
-    "story_teammates",
-    "story_rivals",
-    "story_packages",
     "chart_rating",
     "chart_gamba",
 ];
@@ -65,7 +61,6 @@ const ALL_LAYOUTS: [WrappedLayout; 12] = [
     WrappedLayout::BigNumber,
     WrappedLayout::TopList,
     WrappedLayout::Bars,
-    WrappedLayout::People,
     WrappedLayout::Curve,
     WrappedLayout::Tiles,
     WrappedLayout::Spotlight,
@@ -73,6 +68,7 @@ const ALL_LAYOUTS: [WrappedLayout; 12] = [
     WrappedLayout::Award,
     WrappedLayout::Recap,
     WrappedLayout::Details,
+    WrappedLayout::TwoBeat,
 ];
 
 fn busy(kind: &str) -> WrappedSlideData {
@@ -217,41 +213,537 @@ fn reveal_is_bounded_moves_and_ends_on_exactly_the_still_card() {
             "no frame is too fast for clients to honor"
         );
 
-        // The last frame is exactly the still card seen through the shared
-        // palette: every pixel holds the nearest color to the still's pixel.
-        let decoder = gif::DecodeOptions::new()
-            .read_info(media.bytes.as_slice())
-            .unwrap();
-        let palette = decoder.global_palette().unwrap().to_vec();
-        // The final slot means "unchanged" and is never drawn.
-        let colors = &palette[..palette.len() - 3];
-        let still = stage::render_still(&slide);
-        let mut nearest = std::collections::HashMap::new();
-        let expected = still
-            .pixels
-            .chunks_exact(4)
-            .map(|pixel| {
-                *nearest
-                    .entry([pixel[0], pixel[1], pixel[2]])
-                    .or_insert_with(|| {
-                        colors
-                            .chunks_exact(3)
-                            .enumerate()
-                            .min_by_key(|(_, entry)| {
-                                (0..3)
-                                    .map(|c| (i32::from(entry[c]) - i32::from(pixel[c])).pow(2))
-                                    .sum::<i32>()
-                            })
-                            .map(|(index, _)| index as u8)
-                            .unwrap()
-                    })
-            })
-            .collect::<Vec<_>>();
         assert!(
-            *frames.last().unwrap() == expected,
+            *frames.last().unwrap() == still_through_palette(&media.bytes, &slide),
             "{layout:?} final frame is not the still card"
         );
     }
+}
+
+/// The still card seen through a reveal's shared palette: every pixel holds
+/// the nearest palette color to the still's pixel.
+fn still_through_palette(gif_bytes: &[u8], slide: &WrappedSlideData) -> Vec<u8> {
+    let decoder = gif::DecodeOptions::new().read_info(gif_bytes).unwrap();
+    let palette = decoder.global_palette().unwrap().to_vec();
+    // The final slot means "unchanged" and is never drawn.
+    let colors = &palette[..palette.len() - 3];
+    let still = stage::render_still(slide);
+    let mut nearest = std::collections::HashMap::new();
+    still
+        .pixels
+        .chunks_exact(4)
+        .map(|pixel| {
+            *nearest
+                .entry([pixel[0], pixel[1], pixel[2]])
+                .or_insert_with(|| {
+                    colors
+                        .chunks_exact(3)
+                        .enumerate()
+                        .min_by_key(|(_, entry)| {
+                            (0..3)
+                                .map(|c| (i32::from(entry[c]) - i32::from(pixel[c])).pow(2))
+                                .sum::<i32>()
+                        })
+                        .map(|(index, _)| index as u8)
+                        .unwrap()
+                })
+        })
+        .collect()
+}
+
+fn two_beat(treatment: WrappedPunch) -> WrappedSlideData {
+    let mut slide = WrappedSlideData::new("story_distinct", "Biggest throw");
+    slide.layout = WrappedLayout::TwoBeat;
+    slide.theme = WrappedTheme::BeatRoast;
+    slide.username = "Alexandria".to_owned();
+    slide.year_label = "Cama Wrapped 2026".to_owned();
+    slide.chapter_index = 4;
+    slide.chapter_count = 14;
+    slide.stat_value = "18%".to_owned();
+    slide.series = vec![
+        0.0, 900.0, 2_400.0, 6_100.0, 11_800.0, 23_400.0, 15_000.0, 4_200.0, -3_900.0, -9_000.0,
+    ];
+    slide.beat = Some(WrappedBeat {
+        setup: "You were up".to_owned(),
+        value: "23,400".to_owned(),
+        setup_label: "gold. Your team, anyway.".to_owned(),
+        punch: "this is fine.".to_owned(),
+        credit: "Team gold lead +23,400".to_owned(),
+        treatment,
+    });
+    slide
+}
+
+/// A 1440x1440 render-sized RGBA image: a gradient figure on transparency.
+fn full_render() -> Vec<u8> {
+    const SIDE: usize = 1440;
+    let mut image = Canvas::new(SIDE, SIDE, Rgba([0, 0, 0, 0]));
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let (dx, dy) = (x as f32 - 720.0, y as f32 - 760.0);
+            if (dx / 520.0).powi(2) + (dy / 640.0).powi(2) <= 1.0 {
+                let offset = (y * SIDE + x) * 4;
+                image.pixels[offset..offset + 4].copy_from_slice(&[
+                    (x * 255 / SIDE) as u8,
+                    (y * 255 / SIDE) as u8,
+                    ((x + y) * 255 / (SIDE * 2)) as u8,
+                    255,
+                ]);
+            }
+        }
+    }
+    encode_png(&image)
+}
+
+#[test]
+fn two_beat_still_is_the_punchline() {
+    let slide = two_beat(WrappedPunch::Plain);
+    let still = decode_png(&render_wrapped_slide(&slide).unwrap()).unwrap();
+    let setup = stage::palette(WrappedTheme::BeatRoast).bg;
+    let punch = beats::look(WrappedTheme::BeatRoast, WrappedPunch::Plain).bg;
+    assert_ne!(setup, punch, "the punchline flips the card's color");
+    for (x, y) in [(6, 300), (6, 620), (714, 880)] {
+        assert_eq!(pixel(&still, x, y), punch.0, "({x}, {y})");
+    }
+    let mut uncredited = slide.clone();
+    uncredited.beat.as_mut().unwrap().credit.clear();
+    assert_ne!(
+        render_wrapped_slide(&slide).unwrap(),
+        render_wrapped_slide(&uncredited).unwrap(),
+        "the punchline still carries the fact"
+    );
+    let mut other_setup = slide.clone();
+    other_setup.beat.as_mut().unwrap().setup = "Different setup".to_owned();
+    assert_eq!(
+        render_wrapped_slide(&slide).unwrap(),
+        render_wrapped_slide(&other_setup).unwrap(),
+        "the setup has left the finished card"
+    );
+}
+
+#[test]
+fn two_beat_gif_has_more_frames_and_ends_on_still() {
+    for treatment in [WrappedPunch::GoldGraph, WrappedPunch::Cinema] {
+        let mut slide = two_beat(treatment);
+        slide.art_png = Some(encode_png(&Canvas::new(256, 144, Rgba::rgb(160, 40, 60))));
+        let media = render_wrapped_media(&slide, true).unwrap();
+        assert_eq!(media.filename, "wrapped_slide.gif", "{treatment:?}");
+        let (frames, delays) = play(&media.bytes);
+        assert!(
+            frames.len() > motion::FRAMES,
+            "{treatment:?} plays a longer two-beat timeline: {} frames",
+            frames.len()
+        );
+        assert!(*delays.last().unwrap() >= 300, "the punchline holds");
+        assert!(
+            *frames.last().unwrap() == still_through_palette(&media.bytes, &slide),
+            "{treatment:?} final frame is not the still card"
+        );
+        // The opening frames show the setup's color, not the punchline's.
+        let mut stage = stage::Stage::new(&slide);
+        let setup = stage::palette(slide.theme).bg;
+        assert_eq!(
+            &stage.paint(0.4).pixels[(300 * 720 + 6) * 4..][..4],
+            setup.0
+        );
+    }
+}
+
+#[test]
+fn every_treatment_renders_without_oversize_error() {
+    // Worst-case copy at the authored limits: a 28-character setup, a
+    // 30-character punchline, and the longest placeholder values.
+    let setup = "Keeper of the Light, again.";
+    let punch = "Black King Bar didn't save you";
+    assert!(setup.chars().count() <= 28 && punch.chars().count() <= 30);
+    for treatment in WrappedPunch::ALL {
+        for theme in ROAST_PALETTES.into_iter().chain(POPOFF_PALETTES) {
+            let mut slide = two_beat(treatment);
+            slide.theme = theme;
+            let beat = slide.beat.as_mut().unwrap();
+            beat.setup = setup.to_owned();
+            beat.punch = punch.to_owned();
+            beat.value = "12:59 AM".to_owned();
+            beat.setup_label = "Keeper of the Light · Mar 14".to_owned();
+            beat.credit = "27 / 2 / 14 · KEEPER OF THE LIGHT".to_owned();
+            let png = render_wrapped_slide(&slide).unwrap();
+            let decoded = decode_png(&png).unwrap();
+            assert!(decoded.pixels.chunks_exact(4).all(|p| p[3] == 255));
+            // Missing chart data and art never break a treatment.
+            slide.series.clear();
+            slide.stat_value.clear();
+            slide.art_png = Some(b"not png".to_vec());
+            assert!(render_wrapped_slide(&slide).is_ok(), "{treatment:?} bare");
+        }
+    }
+    let mut oversized = two_beat(WrappedPunch::Plain);
+    oversized.beat.as_mut().unwrap().credit = "a".repeat(501);
+    assert!(matches!(
+        render_wrapped_slide(&oversized),
+        Err(WrappedMediaError::OversizedText)
+    ));
+}
+
+#[test]
+fn two_beat_with_full_render_stays_under_cap() {
+    let mut slide = two_beat(WrappedPunch::Cinema);
+    slide.art_png = Some(full_render());
+    let stage = stage::Stage::new(&slide);
+    assert!(stage.art.is_some(), "the full render decodes for the setup");
+    assert!(stage.still_art.is_some(), "and for the letterboxed still");
+    let media = render_wrapped_media(&slide, true).unwrap();
+    assert_eq!(media.filename, "wrapped_slide.gif");
+    assert!(
+        media.bytes.len() <= MAX_ANIMATION_BYTES,
+        "{} bytes",
+        media.bytes.len()
+    );
+    // A plain punchline keeps the render beside its type, still animated
+    // and still ending on exactly the finished card.
+    let mut plain = two_beat(WrappedPunch::Plain);
+    plain.art_png = Some(full_render());
+    let media = render_wrapped_media(&plain, true).unwrap();
+    assert_eq!(media.filename, "wrapped_slide.gif");
+    assert!(media.bytes.len() <= MAX_ANIMATION_BYTES);
+    let (frames, _) = play(&media.bytes);
+    assert!(*frames.last().unwrap() == still_through_palette(&media.bytes, &plain));
+}
+
+/// A 256x144 opaque portrait, the art a card wears before a render is cached.
+fn portrait() -> Vec<u8> {
+    encode_png(&Canvas::new(256, 144, Rgba::rgb(160, 40, 60)))
+}
+
+#[test]
+fn plain_punchline_keeps_the_hero_clear_of_its_type() {
+    for punch in [
+        "Stop picking it.",
+        "The fountain knew you by name.",
+        "Black King Bar didn't save you",
+    ] {
+        for (name, art) in [("render", full_render()), ("portrait", portrait())] {
+            let mut slide = two_beat(WrappedPunch::Plain);
+            slide.beat.as_mut().unwrap().punch = punch.to_owned();
+            slide.art_png = Some(art);
+            let mut stage = stage::Stage::new(&slide);
+            let placed = stage
+                .punch_art
+                .take()
+                .unwrap_or_else(|| panic!("no room for the {name} beside {punch:?}"));
+            // The finished still carries the hero: the middle of its visible
+            // part lands on the card exactly.
+            let still = decode_png(&render_wrapped_slide(&slide).unwrap()).unwrap();
+            let (width, height) = (placed.art.width, placed.art.height);
+            let visible = height.min((stage::HEIGHT - placed.top) as usize);
+            let (column, row) = (width / 2, visible / 2);
+            let solid = &placed.art.pixels[(row * width + column) * 4..][..4];
+            assert_eq!(solid[3], 255, "{name}: the middle of the hero is solid");
+            let (x, y) = (placed.left as usize + column, placed.top as usize + row);
+            assert_eq!(pixel(&still, x, y)[..3], solid[..3], "{name} on the still");
+
+            // The same layout with an invisible hero shows where the type,
+            // its chip and the footer name actually ink the card.
+            stage.punch_art = Some(stage::PlacedArt {
+                art: stage::PreparedArt {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 4],
+                },
+                left: placed.left,
+                top: placed.top,
+                radius: 0.0,
+            });
+            let typed = stage.paint(1.0).pixels.clone();
+            let background = beats::look(slide.theme, WrappedPunch::Plain).bg.0;
+            let (card_width, card_height) = (WRAPPED_SLIDE_WIDTH, WRAPPED_SLIDE_HEIGHT);
+            // Below the progress bar and year label.
+            let inked = |x: usize, y: usize| {
+                y >= 90 && typed[(y * card_width + x) * 4..][..3] != background[..3]
+            };
+            // Every inked pixel sits inside the boxes placement keeps clear.
+            let taken = beats::punch_art_clearance(&slide).unwrap();
+            for y in 0..card_height {
+                for x in (0..card_width).filter(|x| inked(*x, y)) {
+                    let (x, y) = (x as i32, y as i32);
+                    let covered = taken.iter().any(|(left, top, right, bottom)| {
+                        x >= left - 3 && x < right + 3 && y >= top - 3 && y < bottom + 3
+                    });
+                    assert!(
+                        covered,
+                        "{punch:?}: ink at ({x}, {y}) outside the clearance"
+                    );
+                }
+            }
+            // No visible pixel of the hero lands on or beside any ink.
+            const NEAR: usize = 3;
+            let mut near_ink = vec![false; card_width * card_height];
+            for y in 0..card_height {
+                for x in (0..card_width).filter(|x| inked(*x, y)) {
+                    for ny in y.saturating_sub(NEAR)..(y + NEAR + 1).min(card_height) {
+                        for nx in x.saturating_sub(NEAR)..(x + NEAR + 1).min(card_width) {
+                            near_ink[ny * card_width + nx] = true;
+                        }
+                    }
+                }
+            }
+            for (index, hero) in placed.art.pixels.chunks_exact(4).enumerate() {
+                let x = placed.left + (index % width) as i32;
+                let y = placed.top + (index / width) as i32;
+                if hero[3] < 32 || !(0..card_width as i32).contains(&x) || y >= card_height as i32 {
+                    continue;
+                }
+                assert!(
+                    !near_ink[y as usize * card_width + x as usize],
+                    "{punch:?}: the {name} touches the type at ({x}, {y})"
+                );
+            }
+        }
+    }
+    // Meme punchlines keep their graphics to themselves.
+    let mut graph = two_beat(WrappedPunch::GoldGraph);
+    graph.art_png = Some(full_render());
+    assert!(stage::Stage::new(&graph).punch_art.is_none());
+}
+
+#[test]
+fn two_beat_punchlines_settle_before_the_final_hold() {
+    // Below the progress bar, which fills across the whole reveal, the card
+    // is finished by 0.92 even with a two-line punchline.
+    let below_bar = 40 * WRAPPED_SLIDE_WIDTH * 4;
+    for treatment in WrappedPunch::ALL {
+        let mut slide = two_beat(treatment);
+        slide.beat.as_mut().unwrap().punch = "Black King Bar didn't save you".to_owned();
+        let mut stage = stage::Stage::new(&slide);
+        let held = stage.paint(0.925).pixels[below_bar..].to_vec();
+        assert!(
+            held == stage.paint(1.0).pixels[below_bar..],
+            "{treatment:?} is still moving during the hold"
+        );
+    }
+}
+
+#[test]
+fn every_punchline_keeps_its_text_readable() {
+    fn luminance(color: Rgba) -> f32 {
+        let channel = |value: u8| {
+            let value = f32::from(value) / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.0[0]) + 0.7152 * channel(color.0[1]) + 0.0722 * channel(color.0[2])
+    }
+    fn contrast(a: Rgba, b: Rgba) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+    for treatment in WrappedPunch::ALL {
+        for theme in ROAST_PALETTES.into_iter().chain(POPOFF_PALETTES) {
+            let look = beats::look(theme, treatment);
+            assert!(
+                contrast(look.ink, look.bg) >= 4.5,
+                "{treatment:?} punchline"
+            );
+            assert!(contrast(look.quiet, look.bg) >= 4.5, "{treatment:?} credit");
+            assert!(
+                contrast(look.signal, look.bg) >= 3.0,
+                "{treatment:?} graphic"
+            );
+        }
+    }
+}
+
+#[test]
+fn two_beat_copy_fits_rejects_overlong_lines() {
+    assert!(two_beat_copy_fits("You were up", "this is fine."));
+    assert!(two_beat_copy_fits("", "Absolute cinema."));
+    assert!(two_beat_copy_fits(
+        "Keeper of the Light, again.",
+        "Black King Bar didn't save you"
+    ));
+    assert!(!two_beat_copy_fits(
+        "You were up a frankly unreasonable amount of gold that game",
+        "this is fine."
+    ));
+    assert!(!two_beat_copy_fits(
+        "You were up",
+        "this is fine, absolutely fine, totally and completely fine."
+    ));
+    assert!(
+        !two_beat_copy_fits("You were up", "Supercalifragilisticexpialidoc"),
+        "a word too wide for the line would break mid-word"
+    );
+}
+
+#[test]
+fn long_words_shrink_instead_of_breaking() {
+    // Each is one word wider than the column at some treatment's design
+    // size, yet fits whole above that treatment's minimum.
+    for punch in ["Calculated.", "Calculated. Obviously.", "Respectfully."] {
+        assert!(two_beat_copy_fits("You won at", punch), "{punch}");
+    }
+}
+
+#[test]
+fn every_pool_line_fits_its_beat() {
+    // The widest value each placeholder takes on a real card; names longer
+    // than the inline limit only reach the credit line.
+    let worst = [
+        ("{n}", "23,400"),
+        ("{hero}", "Keeper of the Light"),
+        ("{rank}", "187"),
+        ("{of}", "187"),
+        ("{time}", "12:59 AM"),
+        ("{item}", "Black King Bar"),
+    ];
+    let beats = crate::wrapped_story::roast_pools::all_beats();
+    assert!(!beats.is_empty());
+    let mut misfits = Vec::new();
+    for beat in beats {
+        for name in ["Alexandria", "Maximilianus"] {
+            let fill = |line: &str| {
+                worst
+                    .iter()
+                    .fold(line.replace("{name}", name), |text, (slot, value)| {
+                        text.replace(slot, value)
+                    })
+            };
+            let (setup, punch) = (fill(beat.setup), fill(beat.punch));
+            if !two_beat_copy_fits(&setup, &punch) {
+                misfits.push(format!("{setup} / {punch}"));
+            }
+        }
+    }
+    misfits.dedup();
+    assert!(
+        misfits.is_empty(),
+        "{} misfits: {misfits:#?}",
+        misfits.len()
+    );
+}
+
+#[test]
+fn every_label_and_credit_fits_its_beat() {
+    use crate::wrapped_story::roast_pools::{
+        CopyVars, HERO_STORY_KINDS, PEOPLE_KINDS, hero_copy, people_copy, record_copy,
+        side_split_copy, story_copy,
+    };
+    use cama_domain::wrapped_activity::ServerRank;
+    use cama_domain::wrapped_distinct::{
+        DistinctStory, HeroLine, HeroYear, METRIC_KEYS, PairStory, PersonalRecord, RECORD_KEYS,
+        TRACKED_ITEMS, TableEnd, Theme, Tier, metric_directions,
+    };
+    // The longest hero, and long readable names with and without a break.
+    const HERO: &str = "Keeper of the Light";
+    const NAMES: [&str; 2] = ["Bartholomew Featherstone", "Bartholomew_Featherstone"];
+    let vars = CopyVars {
+        hero: Some(HERO.to_owned()),
+        ..CopyVars::default()
+    };
+    let mut copies = Vec::new();
+    for metric in METRIC_KEYS.iter().copied() {
+        let items: Vec<Option<&str>> = if metric == "item" {
+            TRACKED_ITEMS.iter().copied().map(Some).collect()
+        } else {
+            vec![None]
+        };
+        let display = match metric {
+            "best_game" => "27 / 22 / 34",
+            "night_owl" => "12:59 AM",
+            "rating_swing" => "-23,400",
+            "hero_pool" => "187 heroes",
+            _ => "23,400",
+        };
+        for item in items {
+            for direction in metric_directions(metric) {
+                for tier in [Tier::Extreme, Tier::Strong, Tier::Notable] {
+                    for end in [TableEnd::Top, TableEnd::Bottom] {
+                        let story = DistinctStory {
+                            metric,
+                            theme: Theme::Chaos,
+                            direction: *direction,
+                            tier,
+                            value: 2.0,
+                            display: display.to_owned(),
+                            rank: Some(ServerRank { rank: 187, of: 187 }),
+                            end,
+                            hero_id: Some(1),
+                            match_id: Some(1),
+                            item: item.map(str::to_owned),
+                            score: 1.0,
+                        };
+                        copies.push(story_copy(&story, &vars, 7));
+                    }
+                }
+            }
+        }
+    }
+    let pair = PairStory {
+        discord_id: 1,
+        games: 187,
+        wins: 99,
+    };
+    for kind in PEOPLE_KINDS {
+        for name in NAMES {
+            copies.push(people_copy(kind, &pair, Some(name), 7));
+        }
+    }
+    for (key, direction) in RECORD_KEYS {
+        let display = match key {
+            "most_kills" => "99 kills",
+            "most_deaths" => "99 deaths",
+            "most_assists" => "99 assists",
+            "best_gpm" => "1,400 GPM",
+            "most_damage" => "123,400 damage",
+            "most_wards" => "99 wards",
+            "longest_game" | "fastest_win" => "123:59",
+            "first_bloods" => "99 first bloods",
+            _ => "99 Roshans",
+        };
+        let record = PersonalRecord {
+            key,
+            direction,
+            value: 99,
+            display: display.to_owned(),
+            hero_id: Some(1),
+            match_id: 1,
+            finished_at: Some(0),
+            won: Some(false),
+            score: 1.0,
+        };
+        copies.push(record_copy(&record, Some(HERO), Some("Sep 30"), 7));
+    }
+    let line = HeroLine {
+        hero_id: 1,
+        games: 187,
+        wins: 99,
+    };
+    for kind in &HERO_STORY_KINDS[..2] {
+        copies.push(hero_copy(kind, &line, Some(HERO), 7));
+    }
+    let split = HeroYear {
+        radiant: (187, 150),
+        dire: (187, 20),
+        ..HeroYear::default()
+    };
+    copies.extend(side_split_copy(&split, 7));
+    assert!(copies.len() > 100, "{} copies", copies.len());
+    // `Punch` mirrors `WrappedPunch` variant for variant.
+    let media = |copy: &crate::wrapped_story::roast_pools::StoryCopy| {
+        let name = format!("{:?}", copy.treatment);
+        WrappedPunch::ALL
+            .into_iter()
+            .find(|punch| format!("{punch:?}") == name)
+            .expect("a media twin")
+    };
+    let misfits = copies
+        .iter()
+        .filter(|copy| !two_beat_facts_fit(&copy.label, &copy.credit, media(copy)))
+        .map(|copy| format!("{:?} | {} | {}", copy.treatment, copy.label, copy.credit))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(misfits.is_empty(), "{misfits:#?}");
 }
 
 #[test]
@@ -318,36 +810,7 @@ fn cards_curve_points(slide: &WrappedSlideData) -> Vec<f64> {
 }
 
 #[test]
-fn malformed_avatar_is_fail_soft() {
-    let mut slide = WrappedSlideData::new("story_teammates", "Teammates");
-    slide.lines.push("Alice - 3 games".to_owned());
-    slide.avatars.push(WrappedAvatar {
-        discord_id: 1,
-        png: b"not png".to_vec(),
-    });
-    assert!(render_wrapped_slide(&slide).is_ok());
-}
-
-#[test]
-fn transparent_avatar_is_alpha_blended_and_clipped_to_a_circle() {
-    let mut avatar_canvas = Canvas::new(2, 2, Rgba([255, 0, 0, 128]));
-    avatar_canvas.set(1, 1, Rgba([0, 255, 0, 255]));
-    let mut slide = WrappedSlideData::new("story_teammates", "Teammates");
-    slide.rows.push(WrappedRow::new("Alice", "3 games"));
-    slide.avatars.push(WrappedAvatar {
-        discord_id: 1,
-        png: encode_png(&avatar_canvas),
-    });
-    let with_avatar = decode_png(&render_wrapped_slide(&slide).unwrap()).unwrap();
-    slide.avatars.clear();
-    slide.rows[0].primary = "Alice".to_owned();
-    let without = decode_png(&render_wrapped_slide(&slide).unwrap()).unwrap();
-    assert_ne!(with_avatar.pixels, without.pixels);
-    assert!(with_avatar.pixels.chunks_exact(4).all(|p| p[3] == 255));
-}
-
-#[test]
-fn authored_art_decodes_with_alpha_without_relaxing_avatar_limits() {
+fn authored_art_decodes_with_alpha_within_the_art_size_limit() {
     assert!(decode_png(&encode_png(&Canvas::new(1025, 1, Rgba::rgb(0, 0, 0)))).is_none());
     for bytes in [
         include_bytes!("../../../../../assets/wrapped/ward.png").as_slice(),
@@ -411,6 +874,47 @@ fn top_heroes_show_portraits_and_keep_slots_for_missing_ones() {
         row.image_png = None;
     }
     assert_eq!(count(&slide), 0);
+}
+
+#[test]
+fn top_heroes_stand_the_main_hero_render_beside_the_heading() {
+    let mut slide = WrappedSlideData::new("story_hero", "Your heroes");
+    slide.stat_label = "12 heroes across 120 recorded picks".to_owned();
+    slide.badge = "#1 by Anti-Mage games (40 players)".to_owned();
+    slide.rows = (1..=5)
+        .map(|index| WrappedRow::new(format!("Hero {index}"), "10 games · 60% wins"))
+        .collect();
+    let green = encode_png(&Canvas::new(256, 144, Rgba::rgb(0, 200, 0)));
+    slide.rows[0].image_png = Some(green);
+    let plain = stage::render_still(&slide);
+    slide.art_png = Some(full_render());
+    let prepared = stage::Stage::new(&slide);
+    let art = prepared.art.as_ref().expect("the full render decodes");
+    assert_eq!(
+        (art.width, art.height),
+        super::artwork::TOP_HERO_FRAME,
+        "one head-and-shoulders tile"
+    );
+    let framed = stage::render_still(&slide);
+    // The tile sits in the top-right corner, clear of the left text column.
+    let changed = |left: usize, top: usize, right: usize, bottom: usize| {
+        (top..bottom)
+            .flat_map(|y| (left..right).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let offset = (y * framed.width + x) * 4;
+                framed.pixels[offset..offset + 4] != plain.pixels[offset..offset + 4]
+            })
+            .count()
+    };
+    assert!(changed(470, 90, 670, 280) > 200 * 190 / 2);
+    // The portrait rows still have room for their pictures.
+    let portrait = framed
+        .pixels
+        .chunks_exact(4)
+        .filter(|pixel| pixel[..3] == [0, 200, 0])
+        .count();
+    assert!(portrait > 128 * 72 * 9 / 10, "{portrait}");
+    assert!(render_wrapped_media(&slide, true).is_ok());
 }
 
 #[test]
@@ -573,7 +1077,6 @@ fn story_cards_have_one_heading_without_losing_their_data() {
         WrappedLayout::BigNumber,
         WrappedLayout::TopList,
         WrappedLayout::Bars,
-        WrappedLayout::People,
         WrappedLayout::Curve,
         WrappedLayout::Tiles,
     ] {
@@ -596,7 +1099,9 @@ fn story_cards_have_one_heading_without_losing_their_data() {
         );
     }
 
-    let mut slide = busy("story_identity");
+    let mut slide = busy("story_persona");
+    slide.layout = WrappedLayout::Persona;
+    slide.theme = WrappedTheme::Persona;
     slide.stat_value = "Dota regular".into();
     slide.rows = vec![WrappedRow::new("42", "games")];
     let first = stage::render_still(&slide);
@@ -650,4 +1155,237 @@ fn cover_and_recap_remove_repeated_labels_but_keep_sparse_disclosure() {
         stage::render_still(&spotlight).pixels,
         "the named spotlight needs no category subtitle"
     );
+}
+
+#[test]
+fn neighboring_cards_never_share_a_background() {
+    // Four popoffs in a row, a fixed card that matches the default popoff
+    // punchline, and roasts on both sides of a cobalt card.
+    let mut deck = vec![WrappedSlideData::new("story_hero", "Your heroes")];
+    for punch in [WrappedPunch::Plain; 4] {
+        deck.push(two_beat(punch));
+        deck.last_mut().unwrap().theme = WrappedTheme::BeatPopoff;
+    }
+    let mut yellow = WrappedSlideData::new("story_persona", "Your Cama type");
+    yellow.layout = WrappedLayout::Persona;
+    yellow.theme = WrappedTheme::Persona;
+    deck.push(yellow);
+    for punch in [
+        WrappedPunch::Plain,
+        WrappedPunch::Cinema,
+        WrappedPunch::Plain,
+    ] {
+        deck.push(two_beat(punch));
+        deck.last_mut().unwrap().theme = WrappedTheme::BeatRoast;
+    }
+    deck.push(WrappedSlideData::new("story_games", "Your Year"));
+    deck.push(two_beat(WrappedPunch::Plain));
+    deck.last_mut().unwrap().theme = WrappedTheme::BeatRoast;
+    // A late-night clock and a gold graph end near-black, so the plain
+    // popoff between them must not end on ink.
+    for (punch, theme) in [
+        (WrappedPunch::Clock, WrappedTheme::BeatRoastRed),
+        (WrappedPunch::Plain, WrappedTheme::BeatPopoffLime),
+        (WrappedPunch::GoldGraph, WrappedTheme::BeatRoastViolet),
+    ] {
+        deck.push(two_beat(punch));
+        deck.last_mut().unwrap().theme = theme;
+    }
+    let kinds = deck
+        .iter()
+        .map(|slide| slide.theme.is_roast_beat())
+        .collect::<Vec<_>>();
+
+    vary_beat_palettes(&mut deck);
+
+    for pair in deck.windows(2) {
+        let (before, after) = (slide_backgrounds(&pair[0]), slide_backgrounds(&pair[1]));
+        assert!(
+            before
+                .iter()
+                .all(|color| after.iter().all(|other| !backgrounds_alike(*color, *other))),
+            "{:?} then {:?} look alike: {before:?} {after:?}",
+            pair[0].theme,
+            pair[1].theme
+        );
+    }
+    // Roasts stay roasts and popoffs stay popoffs, and a run of popoffs
+    // rotates colors.
+    assert_eq!(
+        deck.iter()
+            .map(|slide| slide.theme.is_roast_beat())
+            .collect::<Vec<_>>(),
+        kinds
+    );
+    let popoffs = deck[1..5]
+        .iter()
+        .map(|slide| slide.theme)
+        .collect::<Vec<_>>();
+    for (index, theme) in popoffs.iter().enumerate() {
+        assert!(!popoffs[..index].contains(theme), "{popoffs:?}");
+    }
+    // The same deck always gets the same colors.
+    let mut again = deck.clone();
+    vary_beat_palettes(&mut again);
+    assert_eq!(
+        again.iter().map(|slide| slide.theme).collect::<Vec<_>>(),
+        deck.iter().map(|slide| slide.theme).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn near_black_backgrounds_count_as_alike() {
+    let black = [0, 0, 0];
+    let clock = beats::look(WrappedTheme::BeatRoast, WrappedPunch::Clock).bg;
+    let graph = beats::look(WrappedTheme::BeatRoast, WrappedPunch::GoldGraph).bg;
+    let ink = beats::look(WrappedTheme::BeatRoast, WrappedPunch::Plain).bg;
+    // Black, a near-black clock face, a navy graph and ink all read as black.
+    for pair in [
+        (black, rgb(clock)),
+        (rgb(clock), rgb(graph)),
+        (rgb(graph), rgb(ink)),
+    ] {
+        assert!(backgrounds_alike(pair.0, pair.1), "{pair:?}");
+    }
+    // Small RGB steps between brighter colors look alike too; real contrast
+    // does not.
+    assert!(backgrounds_alike([200, 255, 60], [198, 244, 50]));
+    assert!(!backgrounds_alike([255, 90, 54], [45, 70, 185]));
+    assert!(!backgrounds_alike(black, [92, 33, 240]));
+    assert!(!backgrounds_alike(rgb(graph), [62, 34, 18]));
+    // Dark colors that are not quite black still read alike when their hue
+    // is close: an ink ending beside a plum one. A dark green and a dark
+    // brown stay apart.
+    assert!(
+        backgrounds_alike([20, 10, 46], [60, 12, 80]),
+        "ink and plum"
+    );
+    assert!(
+        !backgrounds_alike([11, 43, 29], [62, 34, 18]),
+        "green and brown"
+    );
+    // A calculated bar's indigo beside a gold graph's navy read alike too:
+    // the dark-meme spacing in the deck relies on it.
+    assert!(
+        backgrounds_alike([27, 17, 64], [15, 20, 32]),
+        "indigo and navy"
+    );
+    // Two yellows read as one: the persona card and a yellow punchline.
+    assert!(backgrounds_alike([255, 210, 30], [255, 225, 77]));
+}
+
+/// Whether a background reads as yellow: a bright, saturated hue between
+/// orange and lime.
+fn looks_yellow(color: [u8; 3]) -> bool {
+    let [red, green, blue] = color.map(f32::from);
+    let (high, low) = (red.max(green).max(blue), red.min(green).min(blue));
+    if high < 200.0 || (high - low) / high < 0.5 {
+        return false;
+    }
+    let hue = if high == red {
+        60.0 * ((green - blue) / (high - low))
+    } else if high == green {
+        60.0 * ((blue - red) / (high - low) + 2.0)
+    } else {
+        60.0 * ((red - green) / (high - low) + 4.0)
+    };
+    (42.0..=64.0).contains(&hue)
+}
+
+#[test]
+fn no_more_than_two_cards_end_on_yellow() {
+    // A popoff-heavy deck with the yellow persona card in the middle: the
+    // default popoff and the plum roast both end on yellow.
+    let mut deck = vec![WrappedSlideData::new("story_hero", "Your heroes")];
+    for index in 0..9 {
+        deck.push(two_beat(WrappedPunch::Plain));
+        deck.last_mut().unwrap().theme = if index % 3 == 2 {
+            WrappedTheme::BeatRoastPlum
+        } else {
+            WrappedTheme::BeatPopoff
+        };
+        if index == 4 {
+            let mut persona = WrappedSlideData::new("story_persona", "Your Cama type");
+            persona.layout = WrappedLayout::Persona;
+            persona.theme = WrappedTheme::Persona;
+            deck.push(persona);
+        }
+    }
+    vary_beat_palettes(&mut deck);
+    let yellow = deck
+        .iter()
+        .filter(|slide| {
+            slide_backgrounds(slide)
+                .last()
+                .copied()
+                .is_some_and(looks_yellow)
+        })
+        .count();
+    assert!(yellow <= 2, "{yellow} cards end on yellow");
+    for pair in deck.windows(2) {
+        let (before, after) = (slide_backgrounds(&pair[0]), slide_backgrounds(&pair[1]));
+        assert!(
+            !any_backgrounds_alike(&before, &after),
+            "{before:?} {after:?}"
+        );
+    }
+    assert!(looks_yellow([255, 225, 77]) && looks_yellow([255, 210, 30]));
+    assert!(!looks_yellow([200, 255, 60]) && !looks_yellow([255, 245, 225]));
+    assert!(!looks_yellow([255, 90, 54]) && !looks_yellow([255, 157, 230]));
+}
+
+#[test]
+fn missing_portraits_leave_no_empty_box() {
+    // A row without a cached portrait keeps its place in line but draws
+    // nothing there, exactly as an invisible portrait would.
+    let invisible = encode_png(&Canvas::new(256, 144, Rgba([0, 0, 0, 0])));
+    for (kind, layout) in [
+        ("story_finale", WrappedLayout::Recap),
+        ("story_hero", WrappedLayout::TopList),
+    ] {
+        let mut slide = busy(kind);
+        slide.layout = layout;
+        slide.rows = (1..=3)
+            .map(|index| WrappedRow::new(format!("Hero {index}"), "3 games"))
+            .collect();
+        slide.rows[0].image_png = Some(encode_png(&Canvas::new(256, 144, Rgba::rgb(0, 200, 0))));
+        let missing = render_wrapped_slide(&slide).unwrap();
+        slide.rows[1].image_png = Some(invisible.clone());
+        slide.rows[2].image_png = Some(invisible.clone());
+        assert!(
+            missing == render_wrapped_slide(&slide).unwrap(),
+            "{kind}: a missing portrait drew something"
+        );
+    }
+}
+
+#[test]
+fn two_beat_cards_hold_each_beat_long_enough_to_read() {
+    let frames = motion::frame_count(WrappedLayout::TwoBeat);
+    let at = |seconds: f32| {
+        let index = (seconds * 25.0).round() as usize;
+        motion::frame_time(WrappedLayout::TwoBeat, index, frames)
+    };
+    // Setup fully in by 1 s and still showing at 5.5 s: four and a half
+    // seconds to read it.
+    assert!((at(1.0) - 0.30).abs() < 1e-4);
+    assert!(at(5.5) < 0.48);
+    // The wipe runs 5.6 s to 6.08 s, and the punchline settles by 7.2 s.
+    assert!((at(5.6) - 0.48).abs() < 1e-4);
+    assert!((at(6.08) - 0.56).abs() < 1e-4);
+    assert!((at(7.2) - 0.92).abs() < 1e-4);
+    assert_eq!(
+        motion::frame_time(WrappedLayout::TwoBeat, frames - 1, frames),
+        1.0
+    );
+    // Other cards keep their even pace.
+    assert_eq!(motion::frame_time(WrappedLayout::BigNumber, 15, 31), 0.5);
+    // The GIF plays about 7.5 s of reveal before its final hold.
+    let media = render_wrapped_media(&two_beat(WrappedPunch::Plain), true).unwrap();
+    let (_, delays) = play(&media.bytes);
+    let reveal = delays[..delays.len() - 1]
+        .iter()
+        .map(|delay| u32::from(*delay))
+        .sum::<u32>();
+    assert!((700..=760).contains(&reveal), "{reveal} hundredths");
 }

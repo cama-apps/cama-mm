@@ -1,6 +1,6 @@
 //! The card layouts: big type, one reveal at a time.
 
-use super::stage::{Align, Face, HEIGHT, Stage, WIDTH, count_up};
+use super::stage::{Align, FOOTER_NAME, Face, HEIGHT, Stage, WIDTH, count_up};
 use super::*;
 
 const MARGIN: i32 = 40;
@@ -17,7 +17,6 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         WrappedLayout::BigNumber => big_number(stage),
         WrappedLayout::TopList => top_list(stage),
         WrappedLayout::Bars => bars(stage),
-        WrappedLayout::People => people(stage),
         WrappedLayout::Curve => curve(stage),
         WrappedLayout::Tiles => tiles(stage),
         WrappedLayout::Spotlight => spotlight(stage),
@@ -25,13 +24,21 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         WrappedLayout::Award => super::awards::paint(stage),
         WrappedLayout::Recap => recap(stage),
         WrappedLayout::Details => details(stage),
+        WrappedLayout::TwoBeat => super::beats::paint(stage),
     }
     chrome(stage);
 }
 
 /// Story progress across the top, like the segments on a phone-sized story.
 fn chrome(stage: &mut Stage<'_>) {
-    let (slide, p) = (stage.slide, stage.palette);
+    let slide = stage.slide;
+    // A two-beat card changes color mid-reveal; each piece of chrome takes the
+    // ink of whichever beat is behind it.
+    let ink = |stage: &Stage<'_>, y: i32| match slide.layout {
+        WrappedLayout::TwoBeat => super::beats::chrome_ink(stage, y),
+        _ => stage.palette.fg,
+    };
+    let (bar_ink, label_ink, name_ink) = (ink(stage, 32), ink(stage, 62), ink(stage, HEIGHT - 32));
     let count = slide.chapter_count.clamp(1, 40);
     let current = slide.chapter_index.min(count - 1);
     let gap = 5.0;
@@ -39,9 +46,9 @@ fn chrome(stage: &mut Stage<'_>) {
     for index in 0..count {
         let left = MARGIN as f32 + index as f32 * (width + gap);
         let track = if index < current {
-            p.fg
+            bar_ink
         } else {
-            p.fg.scaled_alpha(0.28)
+            bar_ink.scaled_alpha(0.28)
         };
         stage
             .canvas
@@ -50,7 +57,7 @@ fn chrome(stage: &mut Stage<'_>) {
             let filled = stage.ease(0.0, 1.0);
             stage
                 .canvas
-                .rounded_rect((left, 28.0, left + width * filled, 36.0), 4.0, p.fg);
+                .rounded_rect((left, 28.0, left + width * filled, 36.0), 4.0, bar_ink);
         }
     }
     let label = if slide.year_label.is_empty() {
@@ -63,17 +70,18 @@ fn chrome(stage: &mut Stage<'_>) {
         (MARGIN, 44, COLUMN, 36),
         23.0,
         Face::Bold,
-        p.fg,
+        label_ink,
         Align::Left,
         (0.0, 0.0),
     );
     if slide.layout != WrappedLayout::Cover {
+        let (top, height, size) = FOOTER_NAME;
         stage.block(
             &slide.username,
-            (MARGIN, HEIGHT - 50, COLUMN, 36),
-            23.0,
+            (MARGIN, top, COLUMN, height),
+            size,
             Face::Bold,
-            p.fg,
+            name_ink,
             Align::Left,
             (0.0, 0.0),
         );
@@ -172,6 +180,10 @@ fn cover(stage: &mut Stage<'_>) {
 
 /// A card gets one heading; its statistics carry the rest of the story.
 fn heading(stage: &mut Stage<'_>) -> i32 {
+    heading_within(stage, COLUMN)
+}
+
+fn heading_within(stage: &mut Stage<'_>, width: i32) -> i32 {
     let slide = stage.slide;
     let value = if slide.title.is_empty() {
         &slide.headline
@@ -180,7 +192,7 @@ fn heading(stage: &mut Stage<'_>) -> i32 {
     };
     stage.block(
         value,
-        (MARGIN, TOP, COLUMN, 146),
+        (MARGIN, TOP, width, 146),
         66.0,
         Face::Black,
         stage.palette.fg,
@@ -254,10 +266,34 @@ fn big_number(stage: &mut Stage<'_>) {
 
 fn top_list(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
-    let mut y = heading(stage);
+    // The main hero's render stands in a tile beside the heading, which
+    // narrows to make room.
+    let art = stage
+        .art
+        .as_ref()
+        .map(|art| (art.width as i32, art.height as i32));
+    let (width, mut art_bottom) = (
+        art.map_or(COLUMN, |(art_width, _)| COLUMN - art_width - 16),
+        0,
+    );
+    if let Some((art_width, art_height)) = art {
+        let enter = stage.ease(0.0, 0.3);
+        let left =
+            WIDTH - MARGIN - art_width + ((1.0 - enter) * (art_width + MARGIN) as f32) as i32;
+        let top = TOP - 12;
+        let tile = (left, top, left + art_width, top + art_height);
+        stage.canvas.rounded_rect(
+            (tile.0 as f32, tile.1 as f32, tile.2 as f32, tile.3 as f32),
+            26.0,
+            p.soft,
+        );
+        super::artwork::draw(stage, left, top, tile, 26.0);
+        art_bottom = top + art_height + 16;
+    }
+    let mut y = heading_within(stage, width);
     y = stage.block(
         &slide.stat_label,
-        (MARGIN, y, COLUMN, 44),
+        (MARGIN, y, width, if art.is_some() { 76 } else { 44 }),
         28.0,
         Face::Medium,
         p.fg,
@@ -265,8 +301,9 @@ fn top_list(stage: &mut Stage<'_>) {
         (0.1, 0.34),
     ) + 12;
     if !slide.badge.is_empty() {
-        y = stage.pill(&slide.badge, MARGIN, y, COLUMN, 26.0, p.fg, p.bg, 0.8) + 14;
+        y = stage.pill(&slide.badge, MARGIN, y, width, 26.0, p.fg, p.bg, 0.8) + 14;
     }
+    y = y.max(art_bottom);
     let rows = card_rows(slide);
     let rows = &rows[..rows.len().min(5)];
     if rows.is_empty() {
@@ -300,24 +337,13 @@ fn top_list(stage: &mut Stage<'_>) {
         let mut text = MARGIN + number_width + 6 + x;
         if portraits {
             let (left, art_top) = (text, top + (height - frame_height) / 2);
-            // A hero without a cached portrait keeps its slot, so names line up.
-            match stage.row_art.get_mut(index).and_then(Option::take) {
-                Some(art) => {
-                    let (width, art_height) = (art.width as i32, art.height as i32);
-                    let frame = (left, art_top, left + width, art_top + art_height);
-                    super::artwork::paint(&mut stage.canvas, &art, left, art_top, frame, 12.0);
-                    stage.row_art[index] = Some(art);
-                }
-                None => stage.canvas.rounded_rect(
-                    (
-                        left as f32,
-                        art_top as f32,
-                        (left + frame_width) as f32,
-                        (art_top + frame_height) as f32,
-                    ),
-                    12.0,
-                    p.soft,
-                ),
+            // A hero without a cached portrait keeps its slot, so names line
+            // up, but the slot stays empty rather than showing a blank box.
+            if let Some(art) = stage.row_art.get_mut(index).and_then(Option::take) {
+                let (width, art_height) = (art.width as i32, art.height as i32);
+                let frame = (left, art_top, left + width, art_top + art_height);
+                super::artwork::paint(&mut stage.canvas, &art, left, art_top, frame, 12.0);
+                stage.row_art[index] = Some(art);
             }
             text += frame_width + 18;
         }
@@ -426,74 +452,6 @@ fn bars(stage: &mut Stage<'_>) {
             } else {
                 Align::Left
             },
-            (0.0, 0.0),
-        );
-    }
-}
-
-fn people(stage: &mut Stage<'_>) {
-    let (slide, p) = (stage.slide, stage.palette);
-    let y = heading(stage);
-    let rows = card_rows(slide);
-    let rows = &rows[..rows.len().min(5)];
-    if rows.is_empty() {
-        return;
-    }
-    let height = ((BOTTOM - y) / rows.len() as i32).min(170);
-    let size = (height - 22).clamp(60, 118);
-    for (index, row) in rows.iter().enumerate() {
-        let top = y + index as i32 * height;
-        let start = 0.2 + index as f32 * 0.12;
-        let enter = stage.pop(start, start + 0.3);
-        if stage.t < start {
-            continue;
-        }
-        let center = ((MARGIN + size / 2) as f32, (top + size / 2) as f32);
-        let avatar_drawn = match stage.avatars.get(index).and_then(Option::as_ref) {
-            Some(avatar) if enter >= 0.98 => {
-                let avatar = avatar.clone();
-                stage
-                    .canvas
-                    .blit_scaled(&avatar, MARGIN, top, size as usize, size as usize);
-                true
-            }
-            _ => false,
-        };
-        if !avatar_drawn {
-            stage
-                .canvas
-                .disc(center, size as f32 / 2.0 * enter.max(0.0), p.accent);
-            if enter >= 0.98 {
-                let number = (index + 1).to_string();
-                stage.stat(
-                    &number,
-                    &number,
-                    (MARGIN, top + size / 6, size, size * 2 / 3),
-                    size as f32 * 0.5,
-                    p.on_accent,
-                    Align::Center,
-                    (0.0, 0.0),
-                );
-            }
-        }
-        let shift = ((1.0 - stage.ease(start, start + 0.3)) * 60.0) as i32;
-        let (left, width) = (MARGIN + size + 20 + shift, COLUMN - size - 20);
-        let bottom = stage.block(
-            &row.primary,
-            (left, top, width, height * 11 / 20),
-            40.0,
-            Face::Black,
-            p.fg,
-            Align::Left,
-            (0.0, 0.0),
-        );
-        stage.block(
-            &row.secondary,
-            (left, bottom - 2, width, top + height - 8 - bottom),
-            26.0,
-            Face::Medium,
-            p.fg,
-            Align::Left,
             (0.0, 0.0),
         );
     }
@@ -896,6 +854,7 @@ fn recap(stage: &mut Stage<'_>) {
             let enter = stage.ease(start, start + 0.2);
             let left = MARGIN - ((1.0 - enter) * 400.0) as i32;
             let art_top = top + (row_height - frame_height as i32) / 2;
+            // A missing portrait leaves its slot empty; the names stay aligned.
             if let Some(art) = stage.row_art.get(index).and_then(Option::as_ref) {
                 let frame = (
                     left,
@@ -904,17 +863,6 @@ fn recap(stage: &mut Stage<'_>) {
                     art_top + art.height as i32,
                 );
                 super::artwork::paint(&mut stage.canvas, art, left, art_top, frame, 6.0);
-            } else {
-                stage.canvas.rounded_rect(
-                    (
-                        left as f32,
-                        art_top as f32,
-                        (left + frame_width as i32) as f32,
-                        (art_top + frame_height as i32) as f32,
-                    ),
-                    6.0,
-                    p.soft,
-                );
             }
             text += frame_width as i32 + 12;
         }

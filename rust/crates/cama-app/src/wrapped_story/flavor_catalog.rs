@@ -1,4 +1,5 @@
-// Exact flavor catalog shared with the Python Wrapped implementation.
+// Flavor lines for Wrapped summaries and the Server records awards. They roast
+// play only, never life outside the game.
 
 pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
     (
@@ -8,10 +9,8 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
             "Dota is your full-time job and it doesn't even pay",
             "You have played more Dota than some people have worked",
             "The client remembers you by name at this point",
-            "We checked, you have no other hobbies",
             "Your matchmaking queue has its own reserved parking spot",
             "The ancient personally asked you to take a break",
-            "Even Gaben thinks you should go outside",
             "Your Steam profile says 'Last Online: Never Offline'",
             "More games than a TI group stage",
             "Roshan respawns faster than you re-queue",
@@ -25,10 +24,9 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
             "Not a casual, not yet a degenerate",
             "The sweet spot between fun and concerning",
             "Balanced, as all things should be",
-            "Your social life still has a pulse",
             "You haven't lost yourself. Yet.",
             "Enough games to have opinions, not enough to be insufferable",
-            "The Goldilocks zone of Dota addiction",
+            "The Goldilocks zone of Dota",
             "Like a Midas — steady and reliable",
             "Your queue discipline rivals a pos 5 player",
         ],
@@ -38,7 +36,7 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
         &[
             "Did you even play this year?",
             "The lobby barely knows you exist",
-            "Touching grass is NOT a legitimate strategy",
+            "Skipping the queue is NOT a legitimate strategy",
             "Casual? Or just scared?",
             "Your absence was noted. And appreciated.",
             "You came, you saw, you queued... once",
@@ -100,7 +98,6 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
             "Your carry and your crutch",
             "The duo queue energy is unmistakable",
             "Win together, lose apart",
-            "Package deal material right here",
             "When you're on the same team, it's just not fair",
             "Better synergy than Tiny-Io",
             "The Wisp to your Chaos Knight",
@@ -129,7 +126,7 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
             "The rivalry that writes itself",
             "You owe them at least one keyboard replacement",
             "Matchmaking's favorite comedy duo",
-            "They counter-pick you in real life",
+            "They counter-pick you before the draft starts",
             "Your personal Viper lane matchup",
             "Even Roshan respects this rivalry",
             "You two are like Radiant and Dire — eternally opposed",
@@ -179,21 +176,6 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
             "The ultimate flex pick teammate",
             "Draft phase doesn't scare you — it excites you",
             "You've touched more heroes than a Rubick main",
-        ],
-    ),
-    (
-        "package_deal",
-        &[
-            "Friendship has a price. You paid it.",
-            "Contractually obligated to play together",
-            "The ultimate duo queue energy",
-            "Your bond has been legally notarized",
-            "Bound by JC and shuffler RNG",
-            "A sacred pact sealed in Jopacoins",
-            "Friendship isn't free — it costs exactly this much",
-            "The shuffler recognizes this arrangement",
-            "Duo lane? More like duo LIFE.",
-            "Even Io's tether isn't this committed",
         ],
     ),
     (
@@ -247,7 +229,7 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
             "Vision wins games",
             "The real MVP wears a support badge",
             "If wards gave frequent flyer miles...",
-            "Their minimap is brighter than their future",
+            "Their minimap is brighter than their KDA",
             "Observer wards cost 0 gold and they STILL outspend everyone",
             "Dewarding is their love language",
             "They see everything — like Zeus ult but permanent",
@@ -289,7 +271,7 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
         &[
             "The house hates them",
             "Even the bookie tips their hat",
-            "Professional gambler (don't tell HR)",
+            "Professional gambler, Jopacoin division",
             "Printing JC like it's Alchemist's passive",
             "Better market reads than a Chen with Aghs",
             "Their portfolio is more stacked than a Medusa at 50 min",
@@ -339,14 +321,13 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
     (
         "award_no_life",
         &[
-            "Touch grass? What's that?",
-            "The queue button has PTSD from you",
-            "Do you have a job? Genuine question",
+            "One more game? Every game.",
+            "The queue timer never cooled down",
             "More games than TI has prize pool dollars",
             "They queue like Axe spins — constantly",
             "Their Steam hours would make a speedrunner blush",
             "Even the Ancients ask for a break",
-            "Dota IS the social life",
+            "The lobby's longest-running resident",
         ],
     ),
     (
@@ -417,7 +398,7 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
     (
         "award_touched_grass",
         &[
-            "Has a life outside Dota",
+            "Queues only on special occasions",
             "The rare casual sighting",
             "Quality over quantity, apparently",
             "They play Dota like it's a seasonal event",
@@ -430,7 +411,7 @@ pub const FLAVOR_POOLS: &[(&str, &[&str])] = &[
     (
         "award_xp_vacuum",
         &[
-            "Levels ahead, brain behind",
+            "Levels ahead of the whole lobby",
             "Outleveling everyone including their own team",
             "Tome of Knowledge in human form",
             "They absorb XP like a Black Hole",

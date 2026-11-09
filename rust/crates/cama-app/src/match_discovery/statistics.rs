@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::opendota_http::{field_bool, field_f64, field_i64, value_f64};
+use cama_db::json_numeric::coerce_integral_i64;
 use cama_domain::role_derivation::FARM_PRIORITY_MINUTE;
 use serde_json::Value;
 
@@ -47,12 +48,12 @@ fn project_match_player(value: &Value) -> Option<OpenDotaPlayer> {
     let purchase_keys = object
         .get("purchase_log")
         .and_then(Value::as_array)
-        .map_or_else(Vec::new, |entries| {
+        .map(|entries| {
             entries
                 .iter()
                 .filter_map(|entry| entry.get("key").and_then(Value::as_str))
                 .map(ToOwned::to_owned)
-                .collect()
+                .collect::<Vec<_>>()
         });
     Some(OpenDotaPlayer {
         account_id: field_i64(object, "account_id").map(SteamId),
@@ -118,6 +119,7 @@ fn project_match_player(value: &Value) -> Option<OpenDotaPlayer> {
             courier_kills: field_i64(object, "courier_kills"),
             pings: field_i64(object, "pings"),
             lane_role: field_i64(object, "lane_role"),
+            buyback_count: object.get("buyback_count").and_then(coerce_integral_i64),
             purchase_keys,
         },
     })

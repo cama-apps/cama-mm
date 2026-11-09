@@ -8,6 +8,41 @@
 
 use serde_json::Value;
 
+/// What one OpenDota player object's `purchase_log` gives the
+/// `wrapped_enrichment_facts` row, read in one pass. Shared by every writer of
+/// the facts table that reads raw match JSON.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WrappedPurchaseFacts {
+    /// Divine Rapiers bought; zero without a purchase log.
+    pub rapier_count: i64,
+    /// A JSON object of tracked-item purchase counts, or `None` (SQL NULL)
+    /// when the player has no `purchase_log`.
+    pub item_counts: Option<String>,
+}
+
+pub fn wrapped_purchase_facts(
+    player: Option<&serde_json::Map<String, Value>>,
+) -> Result<WrappedPurchaseFacts, serde_json::Error> {
+    let Some(purchases) = player
+        .and_then(|fields| fields.get("purchase_log"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(WrappedPurchaseFacts {
+            rapier_count: 0,
+            item_counts: None,
+        });
+    };
+    let counts = cama_domain::wrapped_distinct::tracked_item_counts(
+        purchases
+            .iter()
+            .filter_map(|purchase| purchase.get("key").and_then(Value::as_str)),
+    );
+    Ok(WrappedPurchaseFacts {
+        rapier_count: counts.get("rapier").copied().unwrap_or_default(),
+        item_counts: Some(serde_json::to_string(&counts)?),
+    })
+}
+
 /// Apply Python's useful `int(value)` semantics while staying inside `i64`.
 ///
 /// Values outside SQLite's signed-integer range are rejected instead of being
@@ -113,6 +148,37 @@ mod tests {
         assert_eq!(coerce_i64_like_python(&unsigned), None);
         assert_eq!(checked_truncate_f64(9_223_372_036_854_775_808.0), None);
         assert_eq!(checked_truncate_f64(f64::INFINITY), None);
+    }
+
+    #[test]
+    fn purchase_facts_come_from_one_read_of_the_log() {
+        let player = json!({"purchase_log": [
+            {"key": "rapier"}, {"key": "magic_wand"}, {"key": "rapier"}, {"key": "tango"}
+        ]});
+        assert_eq!(
+            wrapped_purchase_facts(player.as_object()).unwrap(),
+            WrappedPurchaseFacts {
+                rapier_count: 2,
+                item_counts: Some(r#"{"magic_wand":1,"rapier":2}"#.to_owned()),
+            }
+        );
+        let empty = json!({"purchase_log": []});
+        assert_eq!(
+            wrapped_purchase_facts(empty.as_object()).unwrap(),
+            WrappedPurchaseFacts {
+                rapier_count: 0,
+                item_counts: Some("{}".to_owned()),
+            }
+        );
+        for unknown in [None, json!({}).as_object()] {
+            assert_eq!(
+                wrapped_purchase_facts(unknown).unwrap(),
+                WrappedPurchaseFacts {
+                    rapier_count: 0,
+                    item_counts: None,
+                }
+            );
+        }
     }
 
     #[test]

@@ -57,7 +57,7 @@ const REQUIRED_MIGRATIONS: [&str; 16] = [
     "recompute_symmetric_glicko_predictions",
 ];
 
-const REQUIRED_COLUMNS: [(&str, &str); 20] = [
+const REQUIRED_COLUMNS: [(&str, &str); 22] = [
     ("players", "preferred_region"),
     ("players", "inferred_region"),
     ("rating_history", "streak_multiplier_per_game"),
@@ -74,6 +74,8 @@ const REQUIRED_COLUMNS: [(&str, &str); 20] = [
     ("wrapped_enrichment_facts", "lane_role"),
     ("wrapped_enrichment_facts", "comeback"),
     ("wrapped_enrichment_facts", "throw"),
+    ("wrapped_enrichment_facts", "buybacks"),
+    ("wrapped_enrichment_facts", "item_counts"),
     ("match_predictions", "radiant_rating"),
     ("match_predictions", "dire_rating"),
     ("match_predictions", "radiant_rd"),

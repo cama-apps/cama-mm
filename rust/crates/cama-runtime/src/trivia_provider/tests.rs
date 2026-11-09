@@ -1288,3 +1288,101 @@ async fn account_recovery_waits_for_classic_trivia_timeout_to_record_the_streak(
     assert_eq!(row, (replacement, 1));
     assert!(recovery.player(replacement).try_read_owned().is_err());
 }
+
+#[test]
+fn render_urls_follow_catalog_hero_slugs() {
+    let hero = |image_url: Option<&str>| HeroData {
+        image_url: image_url.map(str::to_owned),
+        ..HeroData::default()
+    };
+    let catalog = TriviaCatalog {
+        heroes: vec![
+            hero(Some(
+                "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/queenofpain.png",
+            )),
+            hero(None),
+        ],
+        ..TriviaCatalog::default()
+    };
+    assert_eq!(
+        hero_render_urls(&catalog, &hero_render_url),
+        BTreeSet::from([
+            "https://cdn.cloudflare.steamstatic.com/apps/dota2/videos/dota_react/heroes/renders/queenofpain.png"
+                .to_owned()
+        ])
+    );
+}
+
+/// Serves `count` requests with one small PNG each and records their paths,
+/// in the order they arrive.
+fn recording_image_server(
+    count: usize,
+) -> (String, Arc<Mutex<Vec<String>>>, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind image server");
+    let base = format!("http://{}", listener.local_addr().expect("server address"));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let body = cama_app::png_encoder::encode_rgba_png(1, 1, &[255, 0, 0, 255]);
+    let handle = std::thread::spawn(move || {
+        for _ in 0..count {
+            let (mut stream, _) = listener.accept().expect("accept image request");
+            let mut request = [0_u8; 4_096];
+            let read = stream.read(&mut request).expect("read image request");
+            let line = String::from_utf8_lossy(&request[..read]);
+            let path = line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned();
+            seen.lock().expect("request log").push(path);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write image headers");
+            stream.write_all(&body).expect("write image body");
+        }
+    });
+    (base, requests, handle)
+}
+
+#[test]
+fn warm_caches_catalog_art_before_hero_renders() {
+    let (base, requests, server) = recording_image_server(2);
+    let catalog = TriviaCatalog {
+        heroes: vec![HeroData {
+            image_url: Some(format!(
+                "{base}/apps/dota2/images/dota_react/heroes/queenofpain.png"
+            )),
+            ..HeroData::default()
+        }],
+        ..TriviaCatalog::default()
+    };
+    let render_base = base.clone();
+    let render_url = move |slug: &str| {
+        format!("{render_base}/apps/dota2/videos/dota_react/heroes/renders/{slug}.png")
+    };
+    let cache_dir = tempfile::tempdir().expect("cache directory");
+    let cache = TriviaImageCache::new(cache_dir.path()).expect("cache");
+
+    let report = warm_image_cache(&cache, &catalog, &render_url).expect("warm the cache");
+    server.join().expect("image server");
+
+    assert_eq!((report.newly_cached, report.total_urls), (2, 2));
+    assert_eq!(
+        *requests.lock().expect("request log"),
+        [
+            "/apps/dota2/images/dota_react/heroes/queenofpain.png",
+            "/apps/dota2/videos/dota_react/heroes/renders/queenofpain.png",
+        ]
+    );
+    assert!(cache_dir.path().join("heroes/queenofpain.png").is_file());
+    assert!(
+        cache_dir
+            .path()
+            .join("heroes/renders/queenofpain.png")
+            .is_file()
+    );
+}
