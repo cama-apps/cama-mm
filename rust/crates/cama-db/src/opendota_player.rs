@@ -607,25 +607,7 @@ fn refresh_wrapped_enrichment_facts(
                     })
             });
             let player = player.and_then(JsonValue::as_object);
-            let rapier_count = player
-                .and_then(|fields| fields.get("purchase_log"))
-                .and_then(JsonValue::as_array)
-                .map(|purchases| {
-                    purchases
-                        .iter()
-                        .filter(|purchase| {
-                            purchase
-                                .as_object()
-                                .and_then(|fields| fields.get("key"))
-                                .and_then(JsonValue::as_str)
-                                == Some("rapier")
-                        })
-                        .count()
-                })
-                .and_then(|count| i64::try_from(count).ok())
-                .unwrap_or_default();
-
-            let item_counts = crate::json_numeric::wrapped_item_counts_json(player)
+            let purchases = crate::json_numeric::wrapped_purchase_facts(player)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             transaction.execute(
                 "INSERT INTO wrapped_enrichment_facts (
@@ -646,7 +628,7 @@ fn refresh_wrapped_enrichment_facts(
                     player
                         .and_then(|fields| fields.get("pings"))
                         .and_then(JsonValue::as_i64),
-                    rapier_count,
+                    purchases.rapier_count,
                     player
                         .and_then(|fields| fields.get("lane_role"))
                         .and_then(JsonValue::as_i64),
@@ -655,7 +637,7 @@ fn refresh_wrapped_enrichment_facts(
                     player
                         .and_then(|fields| fields.get("buyback_count"))
                         .and_then(coerce_integral_i64),
-                    item_counts,
+                    purchases.item_counts,
                 ],
             )?;
         }

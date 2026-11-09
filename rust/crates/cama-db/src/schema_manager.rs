@@ -2105,23 +2105,8 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
                         .and_then(JsonValue::as_i64)
                         .is_some_and(|account_id| ids.contains(&account_id))
                 });
-            let item_counts = crate::json_numeric::wrapped_item_counts_json(player)
+            let purchases = crate::json_numeric::wrapped_purchase_facts(player)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            let rapier_count = player
-                .and_then(|fields| fields.get("purchase_log"))
-                .and_then(JsonValue::as_array)
-                .map_or(0_i64, |purchases| {
-                    i64::try_from(
-                        purchases
-                            .iter()
-                            .filter_map(JsonValue::as_object)
-                            .filter(|item| {
-                                item.get("key").and_then(JsonValue::as_str) == Some("rapier")
-                            })
-                            .count(),
-                    )
-                    .unwrap_or(i64::MAX)
-                });
             transaction.execute(
                 "INSERT INTO wrapped_enrichment_facts(
                    guild_id,match_id,discord_id,actions_per_min,courier_kills,
@@ -2141,14 +2126,14 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
                     json_number_f64(player.and_then(|fields| fields.get("actions_per_min"))),
                     json_number_i64(player.and_then(|fields| fields.get("courier_kills"))),
                     json_number_i64(player.and_then(|fields| fields.get("pings"))),
-                    rapier_count,
+                    purchases.rapier_count,
                     json_number_i64(player.and_then(|fields| fields.get("lane_role"))),
                     json_number_f64(payload.get("comeback")),
                     json_number_f64(payload.get("throw")),
                     player
                         .and_then(|fields| fields.get("buyback_count"))
                         .and_then(coerce_integral_i64),
-                    item_counts,
+                    purchases.item_counts,
                 ],
             )?;
         }
