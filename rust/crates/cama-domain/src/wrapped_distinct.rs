@@ -2,12 +2,13 @@
 //! stand out against everyone else's, and who they shared the year with.
 //!
 //! Pure policy over rows the caller has already loaded. Unknown data is never
-//! zero: a missing field drops the game from that metric, and a player who
-//! lacks the metric's sample is absent from its population.
+//! zero: a missing or non-finite field drops the game from that metric, and a
+//! player who lacks the metric's sample is absent from its population.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use chrono::{DateTime, Timelike, Utc};
 use chrono_tz::Tz;
@@ -219,22 +220,23 @@ pub struct PairStory {
     pub wins: i64,
 }
 
-/// The directions stories under `key` can take; empty for an unknown key.
+/// The directions stories under `key` can take, read off the catalog; empty
+/// for an unknown key.
 #[must_use]
 pub fn metric_directions(key: &str) -> &'static [Direction] {
-    match key {
-        "win_rate" | "gpm" | "wards" | "rapiers" | "rating_swing" | "hero_loyal" | "hero_pool" => {
-            &[Popoff, Roast]
+    static DIRECTIONS: LazyLock<BTreeMap<&'static str, Vec<Direction>>> = LazyLock::new(|| {
+        let mut directions: BTreeMap<&'static str, Vec<Direction>> = BTreeMap::new();
+        for row in CATALOG.iter().copied().chain([item_row("")]) {
+            let known = directions.entry(row.key).or_default();
+            for direction in [Some(row.high), row.low, row.turns].into_iter().flatten() {
+                if !known.contains(&direction) {
+                    known.push(direction);
+                }
+            }
         }
-        "deaths_per_game" => &[Roast, Popoff],
-        "kills_per_game" | "best_game" | "last_hits" | "hero_damage" | "healing" | "stuns"
-        | "stacks" | "runes" | "couriers" | "apm" | "comeback" | "upset_win" | "win_streak" => {
-            &[Popoff]
-        }
-        "kill_loss" | "pings" | "throw" | "upset_loss" | "loss_streak" | "night_owl"
-        | "marathon_day" | "buybacks" | "item" => &[Roast],
-        _ => &[],
-    }
+        directions
+    });
+    DIRECTIONS.get(key).map_or(&[], Vec::as_slice)
 }
 
 struct Measure {
@@ -243,7 +245,8 @@ struct Measure {
     hero_id: Option<i64>,
     match_id: Option<i64>,
     item: Option<String>,
-    /// Replaces the row's high-side direction for this player.
+    /// Replaces the row's high-side direction for this player; only the
+    /// row's declared `turns` direction takes effect.
     direction: Option<Direction>,
 }
 
@@ -284,6 +287,9 @@ struct Row {
     theme: Theme,
     high: Direction,
     low: Option<Direction>,
+    /// The direction a player's measure may turn the high side to, such as
+    /// a Rapier popoff that becomes a roast when one was lost.
+    turns: Option<Direction>,
     /// Single-game records still tell a story in a small population.
     record: bool,
     /// Which item, for `"item"` rows; empty otherwise.
@@ -305,10 +311,16 @@ impl Row {
             theme,
             high,
             low,
+            turns: None,
             record,
             param: "",
             measure,
         }
+    }
+
+    const fn turning(mut self, direction: Direction) -> Self {
+        self.turns = Some(direction);
+        self
     }
 }
 
@@ -368,7 +380,10 @@ impl Player<'_> {
         enriched_only: bool,
         field: impl Fn(&DistinctMatch) -> Option<f64>,
     ) -> Vec<f64> {
-        self.sample(enriched_only).filter_map(field).collect()
+        self.sample(enriched_only)
+            .filter_map(field)
+            .filter(|value| value.is_finite())
+            .collect()
     }
 
     fn average(
@@ -451,8 +466,8 @@ impl Player<'_> {
                         best_match = Some(game.match_id);
                     }
                 }
-                Some(_) => run = 0,
-                None => {}
+                // An unknown result could have been either, so it ends the run.
+                _ => run = 0,
             }
         }
         (best >= 3).then(|| {
@@ -684,7 +699,7 @@ const CATALOG: &[Row] = &[
             commas,
         )
     }),
-    Row::new("rapiers", Chaos, Popoff, None, true, |p, _| p.rapiers()),
+    Row::new("rapiers", Chaos, Popoff, None, true, |p, _| p.rapiers()).turning(Roast),
     Row::new("upset_win", Clutch, Popoff, None, true, |p, _| {
         let (value, game) = p.best(|game| {
             game.expected_win
@@ -717,7 +732,8 @@ const CATALOG: &[Row] = &[
     }),
     Row::new("hero_loyal", Heroes, Popoff, None, false, |p, _| {
         p.hero_loyal()
-    }),
+    })
+    .turning(Roast),
     Row::new("hero_pool", Heroes, Popoff, Some(Roast), false, |p, _| {
         p.hero_pool()
     }),
@@ -790,9 +806,13 @@ fn place(row: &Row, high: Direction, value: f64, population: &[f64]) -> Option<P
     } else {
         return None;
     };
+    // A top shared with anyone is strong at most.
     let shared_extreme = beyond == 0 && equal > 1;
     if shared_extreme {
-        tier = tier.max(Tier::Strong);
+        tier = match tier {
+            Tier::Extreme => Tier::Strong,
+            other => other,
+        };
     }
     let rank = (equal == 1).then(|| ServerRank {
         rank: beyond as i64 + 1,
@@ -870,7 +890,10 @@ pub fn distinct_stories(
         let Some(mine) = measures.get(&target) else {
             continue;
         };
-        let high = mine.direction.unwrap_or(row.high);
+        let high = mine
+            .direction
+            .filter(|turn| row.turns == Some(*turn))
+            .unwrap_or(row.high);
         let story = if measures.len() < SMALL_POPULATION {
             if !row.record {
                 continue;

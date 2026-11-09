@@ -228,6 +228,51 @@ fn stories_know_which_end_of_the_table_they_rank_from() {
 }
 
 #[test]
+fn non_finite_values_are_skipped_like_unknowns() {
+    let rows = population(20, 6, |player, index, row| {
+        row.enriched = true;
+        row.stuns = Some((2 + player % 3) as f64);
+        row.actions_per_min = Some((150 + player) as f64);
+        if player == 1 {
+            row.stuns = Some(if index == 5 { f64::NAN } else { 9.0 });
+            row.actions_per_min = Some(if index == 5 { f64::INFINITY } else { 400.0 });
+        }
+    });
+    let stories = distinct_stories(&rows, &players(20), 1, 3);
+
+    let stuns = story_for(&stories, "stuns").expect("stuns story");
+    assert_eq!((stuns.value, stuns.display.as_str()), (9.0, "9.0"));
+    let apm = story_for(&stories, "apm").expect("APM story");
+    assert_eq!((apm.value, apm.display.as_str()), (400.0, "400"));
+}
+
+#[test]
+fn an_unknown_result_breaks_a_streak() {
+    // Three wins, a game with no result, then two more wins.
+    let results = [
+        Some(true),
+        Some(true),
+        Some(true),
+        None,
+        Some(true),
+        Some(true),
+        Some(false),
+    ];
+    let mut rows = population(6, 6, |_, _, _| {});
+    rows.retain(|row| row.discord_id != 1);
+    for (index, won) in results.into_iter().enumerate() {
+        let mut row = game(100 + index as i64, 1, "radiant", true);
+        row.won = won;
+        rows.push(row);
+    }
+    let stories = distinct_stories(&rows, &players(6), 1, 3);
+
+    let streak = story_for(&stories, "win_streak").expect("win streak story");
+    assert_eq!(streak.value, 3.0);
+    assert_eq!(streak.match_id, Some(102));
+}
+
+#[test]
 fn small_population_uses_records_only() {
     let rows = population(6, 8, |player, index, row| {
         row.enriched = true;
