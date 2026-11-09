@@ -15,18 +15,19 @@ pub(super) const FRAMES: usize = 30;
 /// that clients honor rather than slow down.
 const FRAME_DELAY: u16 = 4;
 /// Seconds into a two-beat card at which its timeline reaches each mark: the
-/// setup is in by 1 s and holds to 3 s, the wipe takes 0.4 s, and the
-/// punchline settles by 4.5 s. Unchanged frames merge, so holds are cheap.
+/// setup is in by 1 s and holds to 5.6 s so a person can read it, the wipe
+/// takes about half a second, and the punchline settles by 7.2 s. Marks sit
+/// on frame boundaries. Unchanged frames merge, so holds are cheap.
 const TWO_BEAT_PACE: [(f32, f32); 6] = [
     (0.0, 0.0),
     (1.0, 0.30),
-    (3.0, 0.48),
-    (3.4, 0.56),
-    (4.5, 0.92),
-    (4.8, 1.0),
+    (5.6, 0.48),
+    (6.08, 0.56),
+    (7.2, 0.92),
+    (7.52, 1.0),
 ];
 /// One frame every `FRAME_DELAY`, start to end of the paced timeline.
-const TWO_BEAT_FRAMES: usize = 121;
+const TWO_BEAT_FRAMES: usize = 189;
 /// No loop extension: one reveal, then the finished card. If a client replays it
 /// anyway, a long hold keeps the card readable between plays.
 const FINAL_HOLD: u16 = 600;

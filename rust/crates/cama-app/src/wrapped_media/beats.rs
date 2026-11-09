@@ -5,7 +5,7 @@
 //! Timeline: the setup reveals over 0.00-0.30 and holds to 0.48, the wipe
 //! runs 0.48-0.56, the punchline animates over 0.56-0.92, and the card holds
 //! on the finished punchline, which is the still. The GIF plays those marks
-//! at 1.0 s, 3.0 s, 3.4 s, and 4.5 s (`motion::TWO_BEAT_PACE`).
+//! at 1.0 s, 5.6 s, 6.08 s, and 7.2 s (`motion::TWO_BEAT_PACE`).
 
 use super::stage::{
     Align, DESCENT, FIRST_BASELINE, FOOTER_NAME, Face, HEIGHT, PILL_HEIGHT, Stage, WIDTH,

@@ -1244,26 +1244,26 @@ fn two_beat_cards_hold_each_beat_long_enough_to_read() {
         let index = (seconds * 25.0).round() as usize;
         motion::frame_time(WrappedLayout::TwoBeat, index, frames)
     };
-    // Setup fully in by 1 s and still showing at 2.9 s.
+    // Setup fully in by 1 s and still showing at 5.5 s: four and a half
+    // seconds to read it.
     assert!((at(1.0) - 0.30).abs() < 1e-4);
-    assert!(at(2.9) < 0.48);
-    // The wipe runs 3.0 s to 3.4 s, and the punchline settles by 4.5 s.
-    assert!((at(3.0) - 0.48).abs() < 1e-4);
-    assert!((at(3.4) - 0.56).abs() < 1e-4);
-    // Frames fall every 0.04 s, so 4.5 s sits between two of them.
-    assert!(at(4.48) < 0.92 && at(4.52) >= 0.92);
+    assert!(at(5.5) < 0.48);
+    // The wipe runs 5.6 s to 6.08 s, and the punchline settles by 7.2 s.
+    assert!((at(5.6) - 0.48).abs() < 1e-4);
+    assert!((at(6.08) - 0.56).abs() < 1e-4);
+    assert!((at(7.2) - 0.92).abs() < 1e-4);
     assert_eq!(
         motion::frame_time(WrappedLayout::TwoBeat, frames - 1, frames),
         1.0
     );
     // Other cards keep their even pace.
     assert_eq!(motion::frame_time(WrappedLayout::BigNumber, 15, 31), 0.5);
-    // The GIF plays about 4.8 s of reveal before its final hold.
+    // The GIF plays about 7.5 s of reveal before its final hold.
     let media = render_wrapped_media(&two_beat(WrappedPunch::Plain), true).unwrap();
     let (_, delays) = play(&media.bytes);
     let reveal = delays[..delays.len() - 1]
         .iter()
         .map(|delay| u32::from(*delay))
         .sum::<u32>();
-    assert!((440..=490).contains(&reveal), "{reveal} hundredths");
+    assert!((700..=760).contains(&reveal), "{reveal} hundredths");
 }
