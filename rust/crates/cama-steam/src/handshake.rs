@@ -46,7 +46,12 @@ async fn await_admission<T>(
             result = &mut handshake => return result.map_err(Into::into),
             () = &mut deadline => return Err(DotaSteamError::HandshakeTimeout { last_status }),
             message = messages.next() => {
-                let FromGc(message) = message.ok_or(NetworkError::EOF)??;
+                // steam-vent reports a lagged subscription as EOF; dropped
+                // status messages are diagnostic only, so keep waiting.
+                let FromGc(message) = match message.ok_or(NetworkError::EOF)? {
+                    Err(NetworkError::EOF) => continue,
+                    message => message?,
+                };
                 if let Some(status) = admission_status(&message)? {
                     last_status = Some(status);
                 }
@@ -236,6 +241,17 @@ mod tests {
             matches!(result, Err(DotaSteamError::HandshakeTimeout { last_status: Some(value) }) if value == queue as i32)
         );
         assert_eq!(start.elapsed(), HANDSHAKE_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn lagged_status_subscription_does_not_fail_admission() {
+        let messages = stream::iter([Err(NetworkError::EOF)]).chain(stream::pending());
+        let welcome = async {
+            tokio::task::yield_now().await;
+            Ok(42)
+        };
+        let result = await_admission(welcome, messages, HANDSHAKE_TIMEOUT).await;
+        assert_eq!(result.unwrap(), 42);
     }
 
     #[tokio::test]

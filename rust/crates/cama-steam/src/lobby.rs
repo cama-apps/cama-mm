@@ -613,6 +613,9 @@ struct ClientState {
     lobby_refresh_requested_at: Option<Instant>,
     welcome_generation: u64,
     welcome_observed_at: Option<tokio::time::Instant>,
+    // Set when GC messages were dropped; the next hydrating Welcome is the
+    // authoritative resync, including lobby absence.
+    resync_pending: bool,
 }
 
 impl ClientState {
@@ -680,6 +683,7 @@ pub struct DotaSteamClient {
     state: Arc<RwLock<ClientState>>,
     events: broadcast::Sender<DotaSteamEvent>,
     _watcher: Arc<WatcherTask>,
+    _pump: Arc<WatcherTask>,
     own_steam_id: u64,
     own_account_id: u32,
     command_timeout: Duration,
@@ -730,8 +734,11 @@ impl DotaSteamClient {
         let own_steam_id = steam_id.steam64();
         let own_account_id = steam_id.account_id();
         // One envelope subscription preserves ordering across GC message kinds.
-        // Register before admission so updates adjacent to Welcome are retained.
-        let messages = auth.connection.on::<crate::handshake::FromGc>();
+        // Register before admission so updates adjacent to Welcome are retained,
+        // and drain it immediately: steam-vent buffers only 16 messages per
+        // kind and reports overflow as EOF, so an unread subscription across
+        // the handshake would otherwise lose the Welcome or initial caches.
+        let (messages, pump) = buffer_gc_messages(auth.connection.on::<crate::handshake::FromGc>());
         let (gc, _welcome) = crate::handshake::connect(&auth.connection).await?;
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let state = Arc::new(RwLock::new(ClientState {
@@ -744,15 +751,29 @@ impl DotaSteamClient {
             welcome_observed_at: None,
             lobby_observed_at: None,
             lobby_refresh_requested_at: None,
+            resync_pending: false,
         }));
         let gc = Arc::new(Mutex::new(gc));
-        let watcher = spawn_watchers(messages, &state, &events);
+        let resync_gc = Arc::downgrade(&gc);
+        let watcher = spawn_watchers(messages, &state, &events, move || {
+            // Hello makes the GC answer with a Welcome carrying every cache.
+            // Send off the watcher so a held GC mutex cannot stall updates.
+            let Some(gc) = resync_gc.upgrade() else {
+                return;
+            };
+            tokio::spawn(async move {
+                if let Err(error) = gc.lock().await.send(CMsgClientHello::new()).await {
+                    warn!(%error, "Dota coordinator resync request failed");
+                }
+            });
+        });
         let client = Self {
             _connection: auth.connection,
             gc,
             state,
             events,
             _watcher: Arc::new(watcher),
+            _pump: Arc::new(pump),
             own_steam_id,
             own_account_id,
             command_timeout: INITIAL_CACHE_TIMEOUT,
@@ -1277,10 +1298,32 @@ fn lobby_config_matches(config: &LobbyConfig, snapshot: &LobbySnapshot) -> bool 
         && (config.league_id == 0 || snapshot.league_id == Some(config.league_id))
 }
 
+type GcMessage = Result<crate::handshake::FromGc, NetworkError>;
+
+/// Forward a steam-vent subscription into an unbounded queue as soon as each
+/// message arrives. The forwarder does no other work, so the bounded upstream
+/// broadcast cannot overflow while the consumer waits on handshake or locks.
+fn buffer_gc_messages(
+    messages: impl Stream<Item = GcMessage> + Send + 'static,
+) -> (impl Stream<Item = GcMessage> + Send + 'static, WatcherTask) {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        futures_util::pin_mut!(messages);
+        while let Some(message) = messages.next().await {
+            if sender.send(message).is_err() {
+                return;
+            }
+        }
+    });
+    let stream = futures_util::stream::poll_fn(move |cx| receiver.poll_recv(cx));
+    (stream, WatcherTask(task))
+}
+
 fn spawn_watchers(
-    messages: impl Stream<Item = Result<crate::handshake::FromGc, NetworkError>> + Send + 'static,
+    messages: impl Stream<Item = GcMessage> + Send + 'static,
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
+    request_resync: impl Fn() + Send + 'static,
 ) -> WatcherTask {
     let state = Arc::clone(state);
     let events = events.clone();
@@ -1289,6 +1332,14 @@ fn spawn_watchers(
         let reason = loop {
             let message = match messages.next().await {
                 Some(Ok(message)) => message.0,
+                // steam-vent maps a lagged broadcast to EOF; a closed one ends
+                // the stream. Lost messages make the cache unverified, not the
+                // session dead: resync instead of reconnecting mid-lobby.
+                Some(Err(NetworkError::EOF)) => {
+                    begin_resync(&state).await;
+                    request_resync();
+                    continue;
+                }
                 Some(Err(error)) => break error.to_string(),
                 None => break "Dota coordinator message stream closed".to_owned(),
             };
@@ -1381,6 +1432,16 @@ fn lost_session_reason(message: &CMsgConnectionStatus) -> Option<String> {
         .then(|| format!("Dota coordinator session unavailable (status: {status:?})"))
 }
 
+async fn begin_resync(state: &Arc<RwLock<ClientState>>) {
+    let mut state = state.write().await;
+    // Keep the last snapshot for identity, but no action may rely on it until
+    // the GC resends caches: a lost update may have changed or removed it.
+    state.lobby_observed_at = None;
+    state.lobby_refresh_requested_at = None;
+    state.resync_pending = true;
+    warn!("Dota coordinator messages were dropped; resynchronizing caches");
+}
+
 async fn emit_disconnect(
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
@@ -1469,6 +1530,16 @@ async fn apply_welcome(
 ) -> bool {
     let hydrated = !welcome.outofdate_subscribed_caches.is_empty()
         || !welcome.uptodate_subscribed_caches.is_empty();
+    let lobby_cache_present = welcome.outofdate_subscribed_caches.iter().any(|cache| {
+        cache.owner_soid.type_ == Some(SO_OWNER_LOBBY)
+            || cache
+                .objects
+                .iter()
+                .any(|objects| objects.type_id() == SO_TYPE_LOBBY)
+    }) || welcome
+        .uptodate_subscribed_caches
+        .iter()
+        .any(|cache| cache.owner_soid.type_ == Some(SO_OWNER_LOBBY));
     for cache in welcome.outofdate_subscribed_caches {
         if !apply_subscribed(cache, state, events).await {
             return false;
@@ -1485,7 +1556,18 @@ async fn apply_welcome(
         let mut state = state.write().await;
         state.welcome_generation = state.welcome_generation.wrapping_add(1);
         state.welcome_observed_at = Some(tokio::time::Instant::now());
+        // A resync Welcome without a lobby cache is authoritative absence: the
+        // removal was among the dropped messages.
+        let cleared = if std::mem::take(&mut state.resync_pending) && !lobby_cache_present {
+            state.lobby_observed_at = None;
+            state.lobby.take().map(|lobby| lobby.lobby_id)
+        } else {
+            None
+        };
         drop(state);
+        if cleared.is_some() {
+            let _ = events.send(DotaSteamEvent::LobbyCleared { lobby_id: cleared });
+        }
         let _ = events.send(DotaSteamEvent::CacheHydrated);
     }
     true
@@ -2171,6 +2253,7 @@ mod tests {
             welcome_observed_at: None,
             lobby_observed_at: Some(Instant::now()),
             lobby_refresh_requested_at: None,
+            resync_pending: false,
         }))
     }
 
@@ -2244,6 +2327,7 @@ mod tests {
             ]),
             &state,
             &events,
+            || {},
         );
         let (stages, reason) = timeout(Duration::from_secs(1), async {
             let mut stages = Vec::new();
@@ -2268,6 +2352,139 @@ mod tests {
         assert_eq!(current.state, LobbyState::Ui);
         assert!(current.launch_history.allocation_observed);
         assert_eq!(current.launch_history.match_id, Some(888));
+    }
+
+    use steam_vent_proto_steam::steammessages_clientserver_2::CMsgGCClient;
+
+    /// Mirror steam-vent's per-kind subscription: a 16-slot broadcast whose
+    /// lag is reported as EOF and whose closure ends the stream.
+    fn steam_vent_subscription(
+        receiver: broadcast::Receiver<CMsgGCClient>,
+    ) -> impl Stream<Item = GcMessage> + Send + 'static {
+        futures_util::stream::unfold(receiver, |mut receiver| async move {
+            match receiver.recv().await {
+                Ok(message) => Some((Ok(crate::handshake::FromGc(message)), receiver)),
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    Some((Err(NetworkError::EOF), receiver))
+                }
+                Err(broadcast::error::RecvError::Closed) => None,
+            }
+        })
+    }
+
+    async fn burst_through(
+        stream: impl Stream<Item = GcMessage> + Send + 'static,
+        sender: broadcast::Sender<CMsgGCClient>,
+    ) -> Vec<GcMessage> {
+        // Like a 30s handshake: GC traffic arrives while nobody reads the stream.
+        for _ in 0..100 {
+            sender
+                .send(gc_envelope(CMsgSOCacheSubscribedUpToDate::new()).0)
+                .unwrap();
+            tokio::task::yield_now().await;
+        }
+        drop(sender);
+        stream.collect().await
+    }
+
+    #[tokio::test]
+    async fn unread_subscription_across_handshake_burst_keeps_every_message() {
+        let (sender, receiver) = broadcast::channel(16);
+        let unbuffered = burst_through(steam_vent_subscription(receiver), sender).await;
+        assert!(
+            unbuffered
+                .iter()
+                .any(|item| matches!(item, Err(NetworkError::EOF))),
+            "fixture must reproduce steam-vent's 16-message overflow"
+        );
+
+        let (sender, receiver) = broadcast::channel(16);
+        let (buffered, _pump) = buffer_gc_messages(steam_vent_subscription(receiver));
+        let buffered = burst_through(buffered, sender).await;
+        assert_eq!(buffered.len(), 100);
+        assert!(buffered.iter().all(Result::is_ok));
+    }
+
+    #[tokio::test]
+    async fn dropped_gc_messages_resync_instead_of_disconnecting() {
+        let state = ready_lobby_state();
+        let (events, mut receiver) = broadcast::channel(EVENT_BUFFER);
+        let resyncs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&resyncs);
+        let mut lobby = CSODOTALobby::new();
+        lobby.set_lobby_id(7001);
+        lobby.set_state(csodotalobby::State::RUN);
+        let mut welcome = CMsgClientWelcome::new();
+        welcome
+            .outofdate_subscribed_caches
+            .push(lobby_subscription(&lobby, 5));
+        let (input, messages) = tokio::sync::mpsc::unbounded_channel();
+        let mut messages = messages;
+        let _watcher = spawn_watchers(
+            futures_util::stream::poll_fn(move |cx| messages.poll_recv(cx)),
+            &state,
+            &events,
+            move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        );
+
+        input.send(Err(NetworkError::EOF)).unwrap();
+        timeout(Duration::from_secs(1), async {
+            while resyncs.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        {
+            let state = state.read().await;
+            assert_eq!(state.status, CacheStatus::Ready);
+            assert_eq!(state.lobby.as_ref().map(|l| l.lobby_id), Some(7001));
+            // Nothing may act on the pre-loss observation until the GC resends.
+            assert!(!state.lobby_observation_is_fresh(Duration::from_secs(60)));
+        }
+
+        input.send(Ok(gc_envelope(welcome))).unwrap();
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if let DotaSteamEvent::LobbyUpdated(lobby) = receiver.recv().await.unwrap() {
+                    break lobby;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let state = state.read().await;
+        assert_eq!(state.status, CacheStatus::Ready);
+        assert_eq!(state.lobby.as_ref().unwrap().state, LobbyState::Run);
+        assert!(state.lobby_observation_is_fresh(Duration::from_secs(60)));
+        assert!(!state.resync_pending);
+    }
+
+    #[tokio::test]
+    async fn resync_welcome_without_lobby_cache_clears_a_lobby_removed_while_lagged() {
+        let state = ready_lobby_state();
+        let (events, _receiver) = broadcast::channel(EVENT_BUFFER);
+        let mut account = CMsgSOCacheSubscribed::new();
+        account.owner_soid = MessageField::some(CMsgSOIDOwner {
+            type_: Some(SO_OWNER_ACCOUNT),
+            id: Some(TEST_STEAM_ID),
+            ..Default::default()
+        });
+        let mut welcome = CMsgClientWelcome::new();
+        welcome.outofdate_subscribed_caches.push(account);
+
+        // An ordinary Welcome never infers absence from a missing lobby cache.
+        assert!(apply_welcome(welcome.clone(), &state, &events).await);
+        assert!(state.read().await.lobby.is_some());
+
+        begin_resync(&state).await;
+        assert!(apply_welcome(welcome, &state, &events).await);
+        let state = state.read().await;
+        assert_eq!(state.status, CacheStatus::Ready);
+        assert!(state.lobby.is_none());
+        assert!(!state.resync_pending);
     }
 
     #[tokio::test]
@@ -3058,6 +3275,7 @@ mod tests {
             welcome_observed_at: None,
             lobby_observed_at: None,
             lobby_refresh_requested_at: None,
+            resync_pending: false,
         }));
         let (events, _events_rx) = broadcast::channel(EVENT_BUFFER);
 
