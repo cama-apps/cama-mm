@@ -11,6 +11,7 @@
 mod auth;
 pub mod deadlock;
 pub mod deadlock_metadata;
+mod gc_stream;
 mod handshake;
 mod lobby;
 pub mod metadata;

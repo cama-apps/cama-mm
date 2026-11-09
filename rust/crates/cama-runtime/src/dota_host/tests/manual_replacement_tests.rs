@@ -50,6 +50,36 @@ async fn replaced_host_never_records_or_launches_old_game_even_after_pending_cle
 }
 
 #[tokio::test]
+async fn replaced_failed_launch_that_returned_with_its_match_id_is_released() {
+    for durable_evidence in [false, true] {
+        let f = replaced().await;
+        {
+            // Allocated, failed, and returned to the lobby keeping match 888.
+            let mut lobby = f.port.lobby.lock().unwrap();
+            let lobby = lobby.as_mut().unwrap();
+            lobby.stage = LobbyStage::Gathering;
+            lobby.game_state = Some(0);
+            lobby.server_id = None;
+            lobby.launch_history.allocation_observed = !durable_evidence;
+        }
+        if durable_evidence {
+            // Restarted worker: in-memory GC history is gone, the saved one is not.
+            f.update_state(|_, state| state.allocation_observed_at = Some(115));
+        }
+
+        f.worker.tick(&f.port, 130).await.unwrap();
+        assert_eq!(
+            *f.port.calls.lock().unwrap(),
+            vec!["destroy"],
+            "durable: {durable_evidence}"
+        );
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+        f.worker.tick(&f.port, 140).await.unwrap();
+        assert_eq!(f.session().phase, Phase::Cancelled);
+    }
+}
+
+#[tokio::test]
 async fn replaced_lobby_cleanup_requires_fresh_owned_matching_old_game() {
     for changed in ["owner", "lobby", "match", "stale"] {
         let f = replaced().await;
@@ -103,5 +133,37 @@ async fn old_host_controls_cannot_resume_or_void_the_manual_replacement() {
         .unwrap();
     assert!(status.contains("Manual replacement Dota 9999"));
     assert!(status.contains("automatic recording is disabled"));
+    assert!(f.port.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn replaced_lobby_that_never_got_a_server_is_released_after_a_bounded_wait() {
+    for stage in [LobbyStage::Gathering, LobbyStage::Allocating] {
+        let f = replaced().await;
+        f.port.lobby.lock().unwrap().as_mut().unwrap().stage = stage;
+        // Never allocated: otherwise a returned lobby is released at once.
+        f.update_state(|_, state| state.allocation_observed_at = None);
+        // Override requested at 120: still waiting well past a short pause.
+        f.worker.tick(&f.port, 600).await.unwrap();
+        assert!(f.port.calls.lock().unwrap().is_empty(), "{stage:?}");
+
+        f.worker.tick(&f.port, 720).await.unwrap();
+        assert_eq!(*f.port.calls.lock().unwrap(), vec!["destroy"], "{stage:?}");
+        f.worker.tick(&f.port, 730).await.unwrap();
+        assert_eq!(f.session().phase, Phase::Cancelled);
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn replaced_lobby_with_an_assigned_server_is_never_released_by_the_timeout() {
+    let f = replaced().await;
+    {
+        let mut lobby = f.port.lobby.lock().unwrap();
+        let lobby = lobby.as_mut().unwrap();
+        lobby.stage = LobbyStage::Gathering;
+        lobby.server_id = Some(999);
+    }
+    f.worker.tick(&f.port, 5000).await.unwrap();
     assert!(f.port.calls.lock().unwrap().is_empty());
 }

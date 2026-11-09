@@ -15,6 +15,16 @@ pub(super) struct LobbyRecreation {
     last_destroy_at: Option<i64>,
 }
 
+impl LobbyRecreation {
+    /// An operator resume retries cleanup of the same retired lobby; its
+    /// identity and the consumed replacement budget are kept.
+    pub(super) fn restart(&mut self, now: i64) {
+        self.requested_at = now;
+        self.destroy_attempts = 0;
+        self.last_destroy_at = None;
+    }
+}
+
 pub(super) fn returned_to_lobby(lobby: &HostLobby) -> bool {
     lobby.stage == LobbyStage::Gathering
         && lobby.server_id.is_none()
@@ -44,16 +54,27 @@ impl DotaHostWorker {
             return Ok(true);
         }
         let pending = self.pending(record).await?;
-        let gameplay_started = state.betting_closed
+        let known_match_id: Option<u64> = record
+            .valve_match_id
+            .as_deref()
+            .and_then(|id| id.parse().ok());
+        let mut gameplay_started = state.betting_closed
             || pending.as_ref().is_some_and(|p| p.state.betting_closed())
-            || record
-                .valve_match_id
-                .as_deref()
-                .and_then(|id| id.parse().ok())
-                .is_some_and(|id| {
-                    self.live
-                        .gameplay_started(record.guild_id, record.pending_match_id, id)
-                });
+            || known_match_id.is_some_and(|id| {
+                self.live
+                    .gameplay_started(record.guild_id, record.pending_match_id, id)
+            });
+        // Launch history and the live feed are lost when the worker is down
+        // for a whole game. Before destroying a lobby, ask Valve whether its
+        // match actually finished; an unavailable answer keeps prior behavior.
+        if !gameplay_started
+            && let Some(id) = known_match_id
+            && let Ok(details) = port.match_details(id).await
+            && details.match_id == id
+            && details.finished
+        {
+            gameplay_started = true;
+        }
         if gameplay_started
             && settings_match(&state.settings, lobby)
             && let Some(match_id) = record

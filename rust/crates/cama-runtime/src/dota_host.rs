@@ -23,6 +23,7 @@ use cama_db::{
     core_repositories::MatchRepository,
     dota_session_repository::{
         DotaSessionClaim, DotaSessionPhase as Phase, DotaSessionRecord, DotaSessionRepository,
+        DotaSessionRepositoryError,
     },
     guild_config_repository::GuildConfigRepository,
     match_runtime::{PendingMatchRecord, PendingMatchRepository, PendingMatchRepositoryError},
@@ -65,6 +66,16 @@ const PUBLIC_LOBBY_VISIBILITY: i32 = 0;
 // newer than the launch timeout. Keep the observation window strictly shorter.
 const GC_OBSERVATION_MAX_AGE: Duration = Duration::from_secs(45);
 const LAUNCH_CONFIRMATION_TIMEOUT_SECONDS: i64 = 90;
+/// Same bound as server allocation: a launch never identified by Valve
+/// after this long needs an operator.
+const UNIDENTIFIED_LAUNCH_REVIEW_SECONDS: i64 = 300;
+/// After a manual replacement, an old lobby that never got a server is
+/// released once this long has passed since the override.
+const REPLACED_LOBBY_ABANDON_SECONDS: i64 = 600;
+/// An operator command saved the session while a tick held the older
+/// revision. Nothing was written; the next tick re-reads and continues.
+const STALE_SESSION_SAVE: &str =
+    "Dota session changed during this tick; retrying with the newer revision";
 
 fn legacy_lobby_visibility() -> i32 {
     2
@@ -463,6 +474,20 @@ impl DotaHostWorker {
             if state.recorded_match_id.is_none() && record.valve_match_id.is_none() {
                 state.create_requested_at = None;
                 state.launch_requested_at = None;
+                // A prelaunch lobby that vanished would otherwise be reviewed
+                // again at once. If it still exists, ownership re-adopts it.
+                if state.allocation_observed_at.is_none()
+                    && state.server_id.is_none()
+                    && !state.betting_closed
+                    && state.lobby_recreation.is_none()
+                {
+                    record.lobby_id = None;
+                }
+            }
+            // Give failed-launch cleanup a fresh window; its timeout and
+            // destroy budget otherwise still count from the first attempt.
+            if let Some(recreation) = &mut state.lobby_recreation {
+                recreation.restart(now);
             }
             self.save(&mut record, &state, now).await?;
         } else if record.phase == Phase::NeedsReview
@@ -865,6 +890,20 @@ impl DotaHostWorker {
                 return self
                     .finish(port, &mut record, &mut state, match_id, now)
                     .await;
+            }
+            // Launch evidence without any match ID cannot be finished or
+            // safely relaunched; bound the wait instead of holding the
+            // account silently.
+            if state
+                .launch_requested_at
+                .or(state.allocation_observed_at)
+                .is_some_and(|since| {
+                    now.saturating_sub(since) >= UNIDENTIFIED_LAUNCH_REVIEW_SECONDS
+                })
+            {
+                return self.review(&mut record, &mut state,
+                    "Dota shows a launched lobby but never reported its match ID; inspect the lobby, then resume, cancel, or /record the actual game",
+                    now).await;
             }
             return Ok(());
         }
@@ -1410,10 +1449,17 @@ impl DotaHostWorker {
             // Valve game so final identity can be reconciled.
             if self.recorded_id(record).await?.is_none() {
                 let repo = PendingMatchRepository::new(&self.path);
-                blocking(move || {
-                    repo.close_betting_now(guild, pending)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
+                // An abort or recording may have removed the pending match
+                // since launch. Nothing is left to close; record gameplay and
+                // let the tick review the removal instead of failing the
+                // worker into a reconnect loop.
+                blocking(move || match repo.close_betting_now(guild, pending) {
+                    Ok(_)
+                    | Err(
+                        PendingMatchRepositoryError::PendingMatchNotFound(_)
+                        | PendingMatchRepositoryError::MatchAlreadyRecorded(_),
+                    ) => Ok(()),
+                    Err(error) => Err(error.to_string()),
                 })
                 .await?;
             }
@@ -1617,7 +1663,28 @@ impl DotaHostWorker {
             {
                 return Ok(());
             }
+            // A failed launch can return to the lobby still carrying the old
+            // match ID (checked equal above). Once it has demonstrably left
+            // allocation and come back, nothing else will ever release it.
+            let failed_launch_returned = failed_launch::returned_to_lobby(&lobby)
+                && (lobby.launch_history.allocation_observed
+                    || state.allocation_observed_at.is_some());
+            // A launch that never got a server (still gathering or
+            // allocating) is abandoned once the replacement has long been
+            // recorded; without this bound nothing would ever release it.
+            let abandoned_unstarted =
+                matches!(lobby.stage, LobbyStage::Gathering | LobbyStage::Allocating)
+                    && lobby.server_id.is_none()
+                    && lobby.winner.is_none()
+                    && state
+                        .manual_record_override
+                        .as_ref()
+                        .and_then(|o| o.get("requested_at"))
+                        .and_then(serde_json::Value::as_i64)
+                        .is_some_and(|at| now.saturating_sub(at) >= REPLACED_LOBBY_ABANDON_SECONDS);
             if lobby.stage == LobbyStage::Postgame
+                || failed_launch_returned
+                || abandoned_unstarted
                 || (lobby.stage == LobbyStage::Gathering
                     && lobby.match_id.is_none()
                     && lobby.server_id.is_none())
@@ -1647,7 +1714,12 @@ impl DotaHostWorker {
         let update = record.clone();
         *record = blocking(move || {
             repo.update(&update, update.revision, now)
-                .map_err(|e| e.to_string())
+                .map_err(|error| match error {
+                    DotaSessionRepositoryError::StaleRevision { .. } => {
+                        STALE_SESSION_SAVE.to_owned()
+                    }
+                    error => error.to_string(),
+                })
         })
         .await?;
         Ok(())
@@ -1672,12 +1744,21 @@ impl DotaHostWorker {
                     || pending.state.extra.get("draft_setup_complete") == Some(&serde_json::Value::Bool(false))
                     || pending.state.extra.get("dota_host_account_key").and_then(serde_json::Value::as_str) != Some(key.as_str())
                     || sessions.session(pending.guild_id, pending.pending_match_id).map_err(|e| e.to_string())?.is_some() { continue; }
+                // One match's invalid options must not stall hosting for every
+                // other match and guild; skip it and leave it to manual handling.
                 let options = if pending.state.extra.contains_key("dota_hosting") {
-                    DotaHostingOptions::from_extra(&pending.state.extra)?
+                    DotaHostingOptions::from_extra(&pending.state.extra)
                 } else {
-                    guilds.dota_hosting_options(pending.guild_id).map_err(|e| e.to_string())?
+                    guilds.dota_hosting_options(pending.guild_id).map_err(|e| e.to_string())
+                }
+                .and_then(|options| options.validate().map(|()| options));
+                let options = match options {
+                    Ok(options) => options,
+                    Err(reason) => {
+                        tracing::warn!(guild_id=pending.guild_id,pending_match_id=pending.pending_match_id,%reason,"Dota hosting skipped a match with invalid hosting options");
+                        continue;
+                    }
                 };
-                options.validate()?;
                 if options.hosting == Some(HostingMode::Manual) { continue; }
                 let Some(league) = options.league_id.or(guilds.get_league_id(pending.guild_id).map_err(|e| e.to_string())?
                     .and_then(|id| u32::try_from(id).ok()).filter(|id| *id > 0)) else {
@@ -1884,6 +1965,21 @@ impl DotaHostWorker {
         Ok(())
     }
 
+    async fn run_once(&self, port: &dyn DotaHostPort, now: i64) -> Result<(), String> {
+        match self.tick(port, now).await {
+            // A concurrent operator command is not a transport failure;
+            // reconnecting would also discard in-memory GC launch history.
+            Err(error) if error == STALE_SESSION_SAVE => {
+                tracing::debug!("{STALE_SESSION_SAVE}");
+            }
+            result => result?,
+        }
+        // Idle and held sessions can return before reading Steam. A closed
+        // transport must restart the worker even without a new match
+        // triggering an external command.
+        port.snapshot().await.map(|_| ())
+    }
+
     async fn run_connected(
         &self,
         port: &dyn DotaHostPort,
@@ -1892,13 +1988,7 @@ impl DotaHostWorker {
         loop {
             tokio::select! {
                 _ = context.cancelled() => return Ok(()),
-                result = async {
-                    self.tick(port, chrono::Utc::now().timestamp()).await?;
-                    // Idle and held sessions can return before reading Steam.
-                    // A closed transport must restart the worker even without
-                    // a new match triggering an external command.
-                    port.snapshot().await.map(|_| ())
-                } => result?,
+                result = self.run_once(port, chrono::Utc::now().timestamp()) => result?,
             }
             if !context.sleep(Duration::from_secs(5)).await {
                 return Ok(());

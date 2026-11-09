@@ -678,6 +678,28 @@ async fn manual_hosting_snapshot_skips_discovery_and_steam_entirely() {
 }
 
 #[tokio::test]
+async fn invalid_hosting_options_on_one_match_do_not_block_discovery_of_others() {
+    let f = Fixture::preview(DotaHostTestMode::Simulated, true);
+    let repo = PendingMatchRepository::new(&f.worker.path);
+    let mut bad = repo.pending_match(1, f.pending).unwrap().unwrap().state;
+    // Sorted ahead of the valid match. Creation validates options, but a row
+    // saved before that validation (or since tightened) can still hold them.
+    bad.shuffle_timestamp = Some(1);
+    let bad_id = repo.create_pending_match(1, &bad).unwrap().pending_match_id;
+    bad.extra
+        .insert("dota_hosting".into(), serde_json::json!({"region": 500}));
+    repo.replace_pending_match_for_tests(1, bad_id, &bad)
+        .unwrap();
+    let bad = bad_id;
+
+    f.worker.tick(&f.port, 100).await.unwrap();
+
+    let sessions = DotaSessionRepository::new(&f.worker.path);
+    assert!(sessions.session(1, bad).unwrap().is_none());
+    assert!(sessions.session(1, f.pending).unwrap().is_some());
+}
+
+#[tokio::test]
 async fn hosting_options_are_frozen_and_override_environment_defaults() {
     let f = Fixture::preview(DotaHostTestMode::Simulated, true);
     let repo = PendingMatchRepository::new(&f.worker.path);
@@ -1874,6 +1896,23 @@ async fn manual_handoff_during_coordinator_preflight_prevents_creation() {
 }
 
 #[tokio::test]
+async fn concurrent_operator_command_retries_without_restarting_the_transport() {
+    let f = Fixture::new(false);
+    f.port.manual_during_prepare.store(true, Ordering::SeqCst);
+    // The tick itself stops at its stale save, before creating anything ...
+    f.worker.run_once(&f.port, 100).await.unwrap();
+    assert!(f.port.calls.lock().unwrap().is_empty());
+    assert_eq!(f.state().create_requested_at, None);
+    // ... and the next iteration honours the newer revision.
+    f.worker.run_once(&f.port, 105).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Cancelled);
+
+    // Real failures still restart the worker.
+    *f.port.snapshot_error.lock().unwrap() = Some("GC disconnected".into());
+    assert!(f.worker.run_once(&f.port, 110).await.is_err());
+}
+
+#[tokio::test]
 async fn real_lobby_preview_preflight_failure_does_not_save_creation_intent() {
     let f = Fixture::preview(DotaHostTestMode::RealLobby, true);
     *f.port.prepare_create_error.lock().unwrap() = Some("GC session unavailable".into());
@@ -2020,6 +2059,37 @@ async fn manual_abort_after_launch_preserves_the_game_for_review() {
     f.complete(Some("radiant"));
     f.worker.tick(&f.port, 150).await.unwrap();
     assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+    assert!(!f.port.calls.lock().unwrap().iter().any(|s| s == "destroy"));
+}
+
+#[tokio::test]
+async fn abort_before_observed_gameplay_is_reviewed_instead_of_failing_every_tick() {
+    let f = Fixture::new(false);
+    f.launch().await;
+    // Players abort during the draft; the game then starts before the next tick.
+    PendingMatchRepository::new(&f.worker.path)
+        .delete_pending_match(1, f.pending)
+        .unwrap();
+    f.running(Some(5));
+    f.port
+        .lobby
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .launch_history
+        .gameplay_observed = true;
+
+    f.worker.tick(&f.port, 150).await.unwrap();
+    assert!(f.state().betting_closed);
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert!(
+        f.session()
+            .last_error
+            .unwrap_or_default()
+            .contains("removed without a recorded result")
+    );
     assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
     assert!(!f.port.calls.lock().unwrap().iter().any(|s| s == "destroy"));
 }

@@ -396,3 +396,96 @@ async fn cleanup_rechecks_lobby_that_changed_while_refreshing() {
     f.worker.tick(&f.port, 210).await.unwrap();
     assert_eq!(f.session().phase, Phase::Recorded);
 }
+
+#[tokio::test]
+async fn resume_recreates_a_prelaunch_lobby_that_disappeared() {
+    let f = Fixture::new(false);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.worker.tick(&f.port, 101).await.unwrap();
+    assert!(f.session().lobby_id.is_some());
+    assert!(f.state().allocation_observed_at.is_none());
+    // The GC drops the lobby before launch (e.g. the leader disconnected).
+    *f.port.lobby.lock().unwrap() = None;
+    f.update_state(|_, state| state.launch_requested_at = None);
+    f.worker.tick(&f.port, 102).await.unwrap();
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+
+    guild_operator_command(f.worker.path.clone(), "resume", 1, Some(f.pending))
+        .await
+        .unwrap();
+    f.worker.tick(&f.port, 103).await.unwrap();
+    assert_ne!(f.session().phase, Phase::NeedsReview);
+    assert_eq!(
+        f.port
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| *c == "create")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn resume_keeps_the_lobby_identity_once_allocation_was_observed() {
+    let f = Fixture::new(false);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.worker.tick(&f.port, 101).await.unwrap();
+    *f.port.lobby.lock().unwrap() = None;
+    f.update_state(|record, state| {
+        record.phase = Phase::NeedsReview;
+        state.allocation_observed_at = Some(101);
+    });
+    guild_operator_command(f.worker.path.clone(), "resume", 1, Some(f.pending))
+        .await
+        .unwrap();
+    f.worker.tick(&f.port, 103).await.unwrap();
+    assert!(f.session().lobby_id.is_some());
+    assert!(
+        !f.port
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(1)
+            .any(|c| c == "create")
+    );
+}
+
+#[tokio::test]
+async fn launched_lobby_without_any_match_id_is_reviewed_after_a_bounded_wait() {
+    let f = Fixture::new(false);
+    f.launch().await;
+    let launched_at = f.state().launch_requested_at.unwrap();
+    {
+        // Back in the lobby UI with a leftover server and no match ID.
+        let mut lobby = f.port.lobby.lock().unwrap();
+        let lobby = lobby.as_mut().unwrap();
+        lobby.stage = LobbyStage::Gathering;
+        lobby.server_id = Some(999);
+        lobby.match_id = None;
+    }
+    f.worker.tick(&f.port, launched_at + 120).await.unwrap();
+    assert_ne!(f.session().phase, Phase::NeedsReview);
+
+    f.worker.tick(&f.port, launched_at + 300).await.unwrap();
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert!(
+        f.session()
+            .last_error
+            .unwrap_or_default()
+            .contains("never reported its match ID")
+    );
+    assert_eq!(
+        f.port
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| *c == "launch")
+            .count(),
+        1
+    );
+    assert!(!f.port.calls.lock().unwrap().iter().any(|c| c == "destroy"));
+}
