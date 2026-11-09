@@ -34,6 +34,7 @@ use cama_db::wrapped_live::{
     WrappedRatingPoint, WrappedServerSummary, WrappedYearMatch,
 };
 use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
+use cama_domain::formatting::count_noun;
 use cama_domain::hero_catalog::hero_name;
 use cama_domain::wrapped_distinct::{
     DistinctMatch, DistinctPlayer, PeopleYear, people_year, personal_records,
@@ -62,7 +63,7 @@ use activity::{
     recap_numbers,
 };
 use distinct::{MIN_STORIES, cave_in_slide, distinct_slides, people_slides, stonks};
-use personal::{hero_story_slides, record_count, record_story_slides};
+use personal::{fresh_records, hero_story_slides, record_count, record_story_slides};
 
 const COMPONENT_PREFIX: &str = "wrapped:";
 const STORY_TIMEOUT: Duration = Duration::from_secs(600);
@@ -1176,9 +1177,9 @@ fn build_slides(
     }
     if let Some(hero) = raw.hero_stats.first() {
         server.lines.push(format!(
-            "MOST PLAYED - {} - {} picks ({:.0}% WR)",
+            "MOST PLAYED - {} - {} ({:.0}% WR)",
             hero_name(hero.hero_id),
-            hero.picks,
+            count_noun(hero.picks, "pick", "picks"),
             if hero.picks == 0 {
                 0.0
             } else {
@@ -1191,10 +1192,10 @@ fn build_slides(
         |hero| hero.wins as f64 / hero.picks as f64,
     ) {
         server.lines.push(format!(
-            "BEST WIN RATE - {} - {:.0}% ({} games)",
+            "BEST WIN RATE - {} - {:.0}% ({})",
             hero_name(hero.hero_id),
             hero.wins as f64 / hero.picks as f64 * 100.0,
-            hero.picks,
+            count_noun(hero.picks, "game", "games"),
         ));
     }
     server.lines.push(format!(
@@ -1414,15 +1415,17 @@ fn build_slides(
         );
         slide.headline = "Where you played".to_owned();
         slide.stat_label = format!(
-            "Lane data recorded in {} of {} games",
+            "Lane data recorded in {} of {}",
             roles.total_games,
-            raw.matches.len()
+            count_noun(raw.matches.len() as i64, "game", "games")
         );
         for role in [1, 2, 3] {
             if let Some(count) = roles.lane_freq.get(&role) {
-                slide
-                    .lines
-                    .push(format!("{} - {} games", lane_name(role), count));
+                slide.lines.push(format!(
+                    "{} - {}",
+                    lane_name(role),
+                    count_noun(*count as i64, "game", "games")
+                ));
                 slide.series.push(*count as f64);
             }
         }
@@ -1556,33 +1559,41 @@ fn build_slides(
     };
 
     // Distinct stories take what the other sections leave, up to eight.
+    // Records hold their slots first, but a record that repeats a distinct
+    // story gives way to the next record; when none is left, its slot goes
+    // back to the distinct stories, which are then picked again. The record
+    // count only falls, so this settles in a few rounds.
     let fixed = slides
         .iter()
         .filter(|slide| deck::FIXED_KINDS.contains(&slide.kind.as_str()))
         .count();
-    let slots = deck::distinct_slots(
-        fixed
-            + record_count(&record_candidates)
-            + hero_stories.len()
-            + people.len()
-            + side_cards
-            + deck::PERSONA_SLOTS,
-    );
-    let distinct = distinct_slides(
-        &raw.year_rows,
-        &raw.year_players,
-        target_id,
-        minimum_games,
-        slots,
-        &raw.art,
-        &*raw.gold,
-        seed,
-        target_display_name,
-        &year_label,
-    );
+    let mut held = record_count(&record_candidates);
+    let (slots, distinct, fresh) = loop {
+        let slots = deck::distinct_slots(
+            fixed + held + hero_stories.len() + people.len() + side_cards + deck::PERSONA_SLOTS,
+        );
+        let distinct = distinct_slides(
+            &raw.year_rows,
+            &raw.year_players,
+            target_id,
+            minimum_games,
+            slots,
+            &raw.art,
+            &*raw.gold,
+            seed,
+            target_display_name,
+            &year_label,
+        );
+        let fresh = fresh_records(&record_candidates, &distinct.games, &distinct.metrics);
+        let fits = record_count(&fresh).min(held);
+        if fits == held {
+            break (slots, distinct, fresh);
+        }
+        held = fits;
+    };
     let records = record_story_slides(
-        &record_candidates,
-        &distinct.games,
+        &fresh,
+        held,
         &raw.year_players,
         target_id,
         &raw.art,
@@ -1748,8 +1759,8 @@ fn hero_slide(
         .map(|row| {
             let name = hero_name(row.hero_id);
             let mut detail = format!(
-                "{} games · {:.0}% wins",
-                row.picks,
+                "{} · {:.0}% wins",
+                count_noun(row.picks, "game", "games"),
                 row.wins as f64 / row.picks.max(1) as f64 * 100.0
             );
             let samples = matches
@@ -1852,14 +1863,17 @@ fn push_personal_slides(
     let mut stats = base_slide("story_summary", "Your stats", target_name, year_label);
     stats.headline = "Your yearly totals".to_owned();
     stats.lines.push(format!(
-        "{} games · {} wins · {} losses",
-        personal.games_played, personal.wins, personal.losses
+        "{} · {} · {}",
+        count_noun(personal.games_played, "game", "games"),
+        count_noun(personal.wins, "win", "wins"),
+        count_noun(personal.losses, "loss", "losses")
     ));
     let decided = personal.wins + personal.losses;
     if decided > 0 {
         stats.lines.push(format!(
-            "{:.0}% win rate in {decided} decided games",
-            personal.wins as f64 / decided as f64 * 100.0
+            "{:.0}% win rate in {}",
+            personal.wins as f64 / decided as f64 * 100.0,
+            count_noun(decided, "decided game", "decided games")
         ));
     }
     let combat = raw
@@ -1877,8 +1891,8 @@ fn push_personal_slides(
             });
         let kda = (kills + assists) as f64 / deaths.max(1) as f64;
         stats.lines.push(format!(
-            "{kills}/{deaths}/{assists} K/D/A · {kda:.1} aggregate KDA across {} recorded games",
-            combat.len()
+            "{kills}/{deaths}/{assists} K/D/A · {kda:.1} aggregate KDA across {}",
+            count_noun(combat.len() as i64, "recorded game", "recorded games")
         ));
     }
     if personal.avg_game_duration > 0 {
@@ -2054,13 +2068,15 @@ fn record_slides(
     let (wins, losses, win_breaker, loss_breaker) = longest_streaks(rows);
     if wins > 0 {
         endurance.push(format!(
-            "Longest Win Streak - {wins} wins - {}",
+            "Longest Win Streak - {} - {}",
+            count_noun(wins as i64, "win", "wins"),
             hero_name_or_na(win_breaker)
         ));
     }
     if losses > 0 {
         endurance.push(format!(
-            "Longest loss streak - {losses} losses - {}",
+            "Longest loss streak - {} - {}",
+            count_noun(losses as i64, "loss", "losses"),
             hero_name_or_na(loss_breaker)
         ));
     }
@@ -2434,8 +2450,8 @@ fn generate_awards(
             username: candidate.username.clone(),
             title: "Most focused hero pool",
             stat: format!(
-                "{} games on {}",
-                candidate.picks,
+                "{} on {}",
+                count_noun(candidate.picks, "game", "games"),
                 hero_name(candidate.hero_id)
             ),
             flavor: random_flavor("award_one_trick"),
@@ -2448,7 +2464,7 @@ fn generate_awards(
             discord_id: candidate.discord_id,
             username: candidate.username.clone(),
             title: "Most heroes played",
-            stat: format!("{} heroes", candidate.unique_heroes),
+            stat: count_noun(candidate.unique_heroes as i64, "hero", "heroes"),
             flavor: random_flavor("award_jack_of_all_trades"),
         });
     }
@@ -2459,7 +2475,7 @@ fn generate_awards(
             &mut awards,
             row,
             "Most games played",
-            format!("{} games", row.games_played),
+            count_noun(row.games_played, "game", "games"),
             "award_no_life",
         );
     }
@@ -2470,7 +2486,7 @@ fn generate_awards(
             &mut awards,
             row,
             "Fewest games played",
-            format!("{} games", row.games_played),
+            count_noun(row.games_played, "game", "games"),
             "award_touched_grass",
         );
     }

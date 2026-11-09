@@ -8,8 +8,8 @@
 //! at 1.0 s, 3.0 s, 3.4 s, and 4.5 s (`motion::TWO_BEAT_PACE`).
 
 use super::stage::{
-    Align, DESCENT, FIRST_BASELINE, Face, HEIGHT, Stage, WIDTH, block_height, count_up, fit_text,
-    ink_height, pill_size, text_width,
+    Align, DESCENT, FIRST_BASELINE, FOOTER_NAME, Face, HEIGHT, PILL_HEIGHT, Stage, WIDTH,
+    block_height, count_up, fit_text, ink_height, pill_extent, text_width,
 };
 use super::*;
 
@@ -32,8 +32,6 @@ const CHIP_SIZE: f32 = 30.0;
 /// A Plain punchline starts here when the hero stands beside it, leaving
 /// the lower card to the hero.
 const BESIDE_TYPE_TOP: i32 = TOP + 12;
-/// The footer name, which the chrome draws over the card.
-const NAME_BOX: (i32, i32, f32) = (HEIGHT - 50, HEIGHT - 14, 23.0);
 
 const WHITE: Rgba = Rgba::rgb(255, 255, 255);
 const INK: Rgba = Rgba::rgb(20, 10, 46);
@@ -344,15 +342,14 @@ pub(super) fn punch_art_clearance(slide: &WrappedSlideData) -> Option<Vec<(i32, 
         .collect::<Vec<_>>();
     if !beat.credit.trim().is_empty() {
         let top = BESIDE_TYPE_TOP + text_height(&beat.punch, style) + CHIP_GAP;
-        let fitted = pill_size(&beat.credit, COLUMN, CHIP_SIZE);
-        let width = text_width(&beat.credit, fitted, Face::Bold) + CHIP_SIZE * 1.5;
-        let height = (fitted * 1.9).ceil() as i32;
-        boxes.push((MARGIN, top, MARGIN + width.ceil() as i32, top + height));
+        let (width, height) = pill_extent(&beat.credit, COLUMN, CHIP_SIZE);
+        let (right, bottom) = (MARGIN + width.ceil() as i32, top + height.ceil() as i32);
+        boxes.push((MARGIN, top, right, bottom));
     }
     if !slide.username.trim().is_empty() {
-        let (top, bottom, size) = NAME_BOX;
+        let (top, height, size) = FOOTER_NAME;
         let width = text_width(&slide.username, size, Face::Bold).min(COLUMN as f32);
-        boxes.push((MARGIN, top, MARGIN + width.ceil() as i32, bottom));
+        boxes.push((MARGIN, top, MARGIN + width.ceil() as i32, top + height));
     }
     Some(boxes)
 }
@@ -563,7 +560,7 @@ fn plain(stage: &mut Stage<'_>, beat: &WrappedBeat, look: Look) {
     let chip = if beat.credit.trim().is_empty() {
         0
     } else {
-        CHIP_GAP + (CHIP_SIZE * 1.9) as i32
+        CHIP_GAP + (CHIP_SIZE * PILL_HEIGHT) as i32
     };
     // With the hero standing below and beside it, the type keeps to the top.
     let y = if stage.punch_art.is_some() {

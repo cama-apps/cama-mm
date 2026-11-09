@@ -1,6 +1,6 @@
 //! The card layouts: big type, one reveal at a time.
 
-use super::stage::{Align, Face, HEIGHT, Stage, WIDTH, count_up};
+use super::stage::{Align, FOOTER_NAME, Face, HEIGHT, Stage, WIDTH, count_up};
 use super::*;
 
 const MARGIN: i32 = 40;
@@ -75,10 +75,11 @@ fn chrome(stage: &mut Stage<'_>) {
         (0.0, 0.0),
     );
     if slide.layout != WrappedLayout::Cover {
+        let (top, height, size) = FOOTER_NAME;
         stage.block(
             &slide.username,
-            (MARGIN, HEIGHT - 50, COLUMN, 36),
-            23.0,
+            (MARGIN, top, COLUMN, height),
+            size,
             Face::Bold,
             name_ink,
             Align::Left,
@@ -336,24 +337,13 @@ fn top_list(stage: &mut Stage<'_>) {
         let mut text = MARGIN + number_width + 6 + x;
         if portraits {
             let (left, art_top) = (text, top + (height - frame_height) / 2);
-            // A hero without a cached portrait keeps its slot, so names line up.
-            match stage.row_art.get_mut(index).and_then(Option::take) {
-                Some(art) => {
-                    let (width, art_height) = (art.width as i32, art.height as i32);
-                    let frame = (left, art_top, left + width, art_top + art_height);
-                    super::artwork::paint(&mut stage.canvas, &art, left, art_top, frame, 12.0);
-                    stage.row_art[index] = Some(art);
-                }
-                None => stage.canvas.rounded_rect(
-                    (
-                        left as f32,
-                        art_top as f32,
-                        (left + frame_width) as f32,
-                        (art_top + frame_height) as f32,
-                    ),
-                    12.0,
-                    p.soft,
-                ),
+            // A hero without a cached portrait keeps its slot, so names line
+            // up, but the slot stays empty rather than showing a blank box.
+            if let Some(art) = stage.row_art.get_mut(index).and_then(Option::take) {
+                let (width, art_height) = (art.width as i32, art.height as i32);
+                let frame = (left, art_top, left + width, art_top + art_height);
+                super::artwork::paint(&mut stage.canvas, &art, left, art_top, frame, 12.0);
+                stage.row_art[index] = Some(art);
             }
             text += frame_width + 18;
         }
@@ -864,6 +854,7 @@ fn recap(stage: &mut Stage<'_>) {
             let enter = stage.ease(start, start + 0.2);
             let left = MARGIN - ((1.0 - enter) * 400.0) as i32;
             let art_top = top + (row_height - frame_height as i32) / 2;
+            // A missing portrait leaves its slot empty; the names stay aligned.
             if let Some(art) = stage.row_art.get(index).and_then(Option::as_ref) {
                 let frame = (
                     left,
@@ -872,17 +863,6 @@ fn recap(stage: &mut Stage<'_>) {
                     art_top + art.height as i32,
                 );
                 super::artwork::paint(&mut stage.canvas, art, left, art_top, frame, 6.0);
-            } else {
-                stage.canvas.rounded_rect(
-                    (
-                        left as f32,
-                        art_top as f32,
-                        (left + frame_width as i32) as f32,
-                        (art_top + frame_height as i32) as f32,
-                    ),
-                    6.0,
-                    p.soft,
-                );
             }
             text += frame_width as i32 + 12;
         }

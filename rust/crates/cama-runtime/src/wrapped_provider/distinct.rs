@@ -38,9 +38,10 @@ pub(super) struct DistinctDeck {
     pub best_roast: Option<String>,
     /// The best popoff's fact line, which the recap wears as its badge.
     pub badge: Option<String>,
-    /// The games the stories are about, so other cards can avoid repeating
-    /// one.
+    /// The games and metric keys the stories are about, so other cards can
+    /// avoid repeating one.
     pub games: Vec<i64>,
+    pub metrics: Vec<&'static str>,
 }
 
 pub(super) struct Persona {
@@ -114,6 +115,7 @@ pub(super) fn distinct_slides(
         best_roast,
         badge,
         games: selected.iter().filter_map(|story| story.match_id).collect(),
+        metrics: selected.iter().map(|story| story.metric).collect(),
     }
 }
 

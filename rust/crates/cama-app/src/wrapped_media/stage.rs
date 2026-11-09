@@ -698,10 +698,9 @@ impl<'a> Stage<'a> {
         if value.trim().is_empty() {
             return y;
         }
-        let padding = size * 0.75;
+        let (width, height) = pill_extent(value, maximum_width, size);
+        let padding = size * PILL_PADDING;
         let size = pill_size(value, maximum_width, size);
-        let width = text_width(value, size, Face::Bold) + padding * 2.0;
-        let height = size * 1.9;
         let scale = self.pop(start, start + 0.2);
         if self.t >= start && scale > 0.01 {
             let (cx, cy) = (x as f32 + width / 2.0, y as f32 + height / 2.0);
@@ -732,9 +731,15 @@ impl<'a> Stage<'a> {
     }
 }
 
+/// A pill's padding on each side and its height, in multiples of its type.
+const PILL_PADDING: f32 = 0.75;
+pub(super) const PILL_HEIGHT: f32 = 1.9;
+/// The footer name under every card: its box top, box height and type size.
+pub(super) const FOOTER_NAME: (i32, i32, f32) = (HEIGHT - 50, 36, 23.0);
+
 /// Shrink a pill's type until it fits, keeping its padding.
 pub(super) fn pill_size(value: &str, maximum_width: i32, size: f32) -> f32 {
-    let available = maximum_width as f32 - size * 1.5;
+    let available = maximum_width as f32 - size * PILL_PADDING * 2.0;
     let width = text_width(value, size, Face::Bold);
     if width > available {
         size * available / width
@@ -743,10 +748,19 @@ pub(super) fn pill_size(value: &str, maximum_width: i32, size: f32) -> f32 {
     }
 }
 
+/// The width and height of a pill holding `value` at `size`, its type
+/// shrunk to fit `maximum_width`.
+pub(super) fn pill_extent(value: &str, maximum_width: i32, size: f32) -> (f32, f32) {
+    let fitted = pill_size(value, maximum_width, size);
+    (
+        text_width(value, fitted, Face::Bold) + size * PILL_PADDING * 2.0,
+        fitted * PILL_HEIGHT,
+    )
+}
+
 impl Stage<'_> {
     pub(super) fn pill_width(&self, value: &str, maximum_width: i32, size: f32) -> i32 {
-        let fitted = pill_size(value, maximum_width, size);
-        (text_width(value, fitted, Face::Bold) + size * 1.5).ceil() as i32
+        pill_extent(value, maximum_width, size).0.ceil() as i32
     }
 }
 

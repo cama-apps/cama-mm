@@ -3,11 +3,13 @@
 //! Every card is a two-beat roast or popoff that wears the hero's render.
 
 use cama_app::wrapped_media::WrappedSlideData;
-use cama_app::wrapped_story::roast_pools::{hero_copy, record_copy, side_split_copy};
+use cama_app::wrapped_story::roast_pools::{
+    HERO_STORY_KINDS, hero_copy, record_copy, side_split_copy,
+};
 use cama_domain::hero_catalog::bundled_hero_name;
 use cama_domain::wrapped_distinct::{
     COUNT_RECORDS, Direction, DistinctMatch, DistinctPlayer, PersonalRecord, hero_year, month_day,
-    select_records,
+    record_twin, select_records,
 };
 
 use super::activity::ArtSources;
@@ -20,13 +22,29 @@ pub(super) fn record_count(candidates: &[PersonalRecord]) -> usize {
     select_records(candidates, MOST_RECORDS).len()
 }
 
-/// The strongest of `target`'s personal records, a roast and a popoff when
-/// both exist, dated in the player's time zone. A game another story already
-/// shows (`shown`) is not repeated; the next record takes its place.
+/// The records that tell the deck something new: none about a game a
+/// distinct story already shows (`games`), or about a measure one already
+/// covers (`metrics`), such as a peak-GPM game beside the GPM story. A count
+/// spans many games, so only its measure matters.
+pub(super) fn fresh_records(
+    candidates: &[PersonalRecord],
+    games: &[i64],
+    metrics: &[&str],
+) -> Vec<PersonalRecord> {
+    candidates
+        .iter()
+        .filter(|record| COUNT_RECORDS.contains(&record.key) || !games.contains(&record.match_id))
+        .filter(|record| record_twin(record.key).is_none_or(|twin| !metrics.contains(&twin)))
+        .cloned()
+        .collect()
+}
+
+/// Up to `limit` of the strongest `records`, a roast and a popoff when both
+/// exist, dated in the player's time zone.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn record_story_slides(
-    candidates: &[PersonalRecord],
-    shown: &[i64],
+    records: &[PersonalRecord],
+    limit: usize,
     players: &[DistinctPlayer],
     target: i64,
     art: &ArtSources,
@@ -38,12 +56,7 @@ pub(super) fn record_story_slides(
         .iter()
         .find(|player| player.discord_id == target)
         .and_then(|player| player.timezone.as_deref());
-    let fresh = candidates
-        .iter()
-        .filter(|record| COUNT_RECORDS.contains(&record.key) || !shown.contains(&record.match_id))
-        .cloned()
-        .collect::<Vec<_>>();
-    select_records(&fresh, MOST_RECORDS)
+    select_records(records, limit.min(MOST_RECORDS))
         .iter()
         .map(|record| {
             let hero = record.hero_id.and_then(bundled_hero_name);
@@ -70,10 +83,11 @@ pub(super) fn hero_story_slides(
     year_label: &str,
 ) -> Vec<WrappedSlideData> {
     let year = hero_year(rows, target);
+    let [best, nemesis, _] = HERO_STORY_KINDS;
     let heroes = [
-        ("hero_best", "Your best hero", Direction::Popoff, &year.best),
+        (best, "Your best hero", Direction::Popoff, &year.best),
         (
-            "hero_nemesis",
+            nemesis,
             "The hero that hates you",
             Direction::Roast,
             &year.nemesis_hero,

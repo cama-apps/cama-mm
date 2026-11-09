@@ -425,10 +425,10 @@ fn plain_punchline_keeps_the_hero_clear_of_its_type() {
             let mut slide = two_beat(WrappedPunch::Plain);
             slide.beat.as_mut().unwrap().punch = punch.to_owned();
             slide.art_png = Some(art);
-            let stage = stage::Stage::new(&slide);
+            let mut stage = stage::Stage::new(&slide);
             let placed = stage
                 .punch_art
-                .as_ref()
+                .take()
                 .unwrap_or_else(|| panic!("no room for the {name} beside {punch:?}"));
             // The finished still carries the hero: the middle of its visible
             // part lands on the card exactly.
@@ -440,21 +440,62 @@ fn plain_punchline_keeps_the_hero_clear_of_its_type() {
             assert_eq!(solid[3], 255, "{name}: the middle of the hero is solid");
             let (x, y) = (placed.left as usize + column, placed.top as usize + row);
             assert_eq!(pixel(&still, x, y)[..3], solid[..3], "{name} on the still");
-            // Not one visible pixel of the hero reaches the type, the credit
-            // chip or the footer name.
+
+            // The same layout with an invisible hero shows where the type,
+            // its chip and the footer name actually ink the card.
+            stage.punch_art = Some(stage::PlacedArt {
+                art: stage::PreparedArt {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 4],
+                },
+                left: placed.left,
+                top: placed.top,
+                radius: 0.0,
+            });
+            let typed = stage.paint(1.0).pixels.clone();
+            let background = beats::look(slide.theme, WrappedPunch::Plain).bg.0;
+            let (card_width, card_height) = (WRAPPED_SLIDE_WIDTH, WRAPPED_SLIDE_HEIGHT);
+            // Below the progress bar and year label.
+            let inked = |x: usize, y: usize| {
+                y >= 90 && typed[(y * card_width + x) * 4..][..3] != background[..3]
+            };
+            // Every inked pixel sits inside the boxes placement keeps clear.
             let taken = beats::punch_art_clearance(&slide).unwrap();
-            for (index, pixel) in placed.art.pixels.chunks_exact(4).enumerate() {
-                let (x, y) = (
-                    placed.left + (index % width) as i32,
-                    placed.top + (index / width) as i32,
-                );
-                if pixel[3] < 32 || y >= stage::HEIGHT {
+            for y in 0..card_height {
+                for x in (0..card_width).filter(|x| inked(*x, y)) {
+                    let (x, y) = (x as i32, y as i32);
+                    let covered = taken.iter().any(|(left, top, right, bottom)| {
+                        x >= left - 3 && x < right + 3 && y >= top - 3 && y < bottom + 3
+                    });
+                    assert!(
+                        covered,
+                        "{punch:?}: ink at ({x}, {y}) outside the clearance"
+                    );
+                }
+            }
+            // No visible pixel of the hero lands on or beside any ink.
+            const NEAR: usize = 3;
+            let mut near_ink = vec![false; card_width * card_height];
+            for y in 0..card_height {
+                for x in (0..card_width).filter(|x| inked(*x, y)) {
+                    for ny in y.saturating_sub(NEAR)..(y + NEAR + 1).min(card_height) {
+                        for nx in x.saturating_sub(NEAR)..(x + NEAR + 1).min(card_width) {
+                            near_ink[ny * card_width + nx] = true;
+                        }
+                    }
+                }
+            }
+            for (index, hero) in placed.art.pixels.chunks_exact(4).enumerate() {
+                let x = placed.left + (index % width) as i32;
+                let y = placed.top + (index / width) as i32;
+                if hero[3] < 32 || !(0..card_width as i32).contains(&x) || y >= card_height as i32 {
                     continue;
                 }
-                for (left, top, right, bottom) in &taken {
-                    let inside = x >= *left && x < *right && y >= *top && y < *bottom;
-                    assert!(!inside, "{punch:?}: hero at ({x}, {y}) covers the type");
-                }
+                assert!(
+                    !near_ink[y as usize * card_width + x as usize],
+                    "{punch:?}: the {name} touches the type at ({x}, {y})"
+                );
             }
         }
     }
@@ -1090,6 +1131,110 @@ fn near_black_backgrounds_count_as_alike() {
     assert!(!backgrounds_alike([255, 90, 54], [45, 70, 185]));
     assert!(!backgrounds_alike(black, [92, 33, 240]));
     assert!(!backgrounds_alike(rgb(graph), [62, 34, 18]));
+    // Dark colors that are not quite black still read alike when their hue
+    // is close: an ink ending beside a plum one. A dark green and a dark
+    // brown stay apart.
+    assert!(
+        backgrounds_alike([20, 10, 46], [60, 12, 80]),
+        "ink and plum"
+    );
+    assert!(
+        !backgrounds_alike([11, 43, 29], [62, 34, 18]),
+        "green and brown"
+    );
+    // A calculated bar's indigo beside a gold graph's navy read alike too:
+    // the dark-meme spacing in the deck relies on it.
+    assert!(
+        backgrounds_alike([27, 17, 64], [15, 20, 32]),
+        "indigo and navy"
+    );
+    // Two yellows read as one: the persona card and a yellow punchline.
+    assert!(backgrounds_alike([255, 210, 30], [255, 225, 77]));
+}
+
+/// Whether a background reads as yellow: a bright, saturated hue between
+/// orange and lime.
+fn looks_yellow(color: [u8; 3]) -> bool {
+    let [red, green, blue] = color.map(f32::from);
+    let (high, low) = (red.max(green).max(blue), red.min(green).min(blue));
+    if high < 200.0 || (high - low) / high < 0.5 {
+        return false;
+    }
+    let hue = if high == red {
+        60.0 * ((green - blue) / (high - low))
+    } else if high == green {
+        60.0 * ((blue - red) / (high - low) + 2.0)
+    } else {
+        60.0 * ((red - green) / (high - low) + 4.0)
+    };
+    (42.0..=64.0).contains(&hue)
+}
+
+#[test]
+fn no_more_than_two_cards_end_on_yellow() {
+    // A popoff-heavy deck with the yellow persona card in the middle: the
+    // default popoff and the plum roast both end on yellow.
+    let mut deck = vec![WrappedSlideData::new("story_hero", "Your heroes")];
+    for index in 0..9 {
+        deck.push(two_beat(WrappedPunch::Plain));
+        deck.last_mut().unwrap().theme = if index % 3 == 2 {
+            WrappedTheme::BeatRoastPlum
+        } else {
+            WrappedTheme::BeatPopoff
+        };
+        if index == 4 {
+            let mut persona = WrappedSlideData::new("story_persona", "Your Cama type");
+            persona.layout = WrappedLayout::Persona;
+            persona.theme = WrappedTheme::Persona;
+            deck.push(persona);
+        }
+    }
+    vary_beat_palettes(&mut deck);
+    let yellow = deck
+        .iter()
+        .filter(|slide| {
+            slide_backgrounds(slide)
+                .last()
+                .copied()
+                .is_some_and(looks_yellow)
+        })
+        .count();
+    assert!(yellow <= 2, "{yellow} cards end on yellow");
+    for pair in deck.windows(2) {
+        let (before, after) = (slide_backgrounds(&pair[0]), slide_backgrounds(&pair[1]));
+        assert!(
+            !any_backgrounds_alike(&before, &after),
+            "{before:?} {after:?}"
+        );
+    }
+    assert!(looks_yellow([255, 225, 77]) && looks_yellow([255, 210, 30]));
+    assert!(!looks_yellow([200, 255, 60]) && !looks_yellow([255, 245, 225]));
+    assert!(!looks_yellow([255, 90, 54]) && !looks_yellow([255, 157, 230]));
+}
+
+#[test]
+fn missing_portraits_leave_no_empty_box() {
+    // A row without a cached portrait keeps its place in line but draws
+    // nothing there, exactly as an invisible portrait would.
+    let invisible = encode_png(&Canvas::new(256, 144, Rgba([0, 0, 0, 0])));
+    for (kind, layout) in [
+        ("story_finale", WrappedLayout::Recap),
+        ("story_hero", WrappedLayout::TopList),
+    ] {
+        let mut slide = busy(kind);
+        slide.layout = layout;
+        slide.rows = (1..=3)
+            .map(|index| WrappedRow::new(format!("Hero {index}"), "3 games"))
+            .collect();
+        slide.rows[0].image_png = Some(encode_png(&Canvas::new(256, 144, Rgba::rgb(0, 200, 0))));
+        let missing = render_wrapped_slide(&slide).unwrap();
+        slide.rows[1].image_png = Some(invisible.clone());
+        slide.rows[2].image_png = Some(invisible.clone());
+        assert!(
+            missing == render_wrapped_slide(&slide).unwrap(),
+            "{kind}: a missing portrait drew something"
+        );
+    }
 }
 
 #[test]

@@ -792,3 +792,70 @@ fn side_split_requires_gap_and_sample() {
     assert_eq!(sides((10, 7), (10, 6)).side_split(), None);
     assert_eq!(sides((0, 0), (0, 0)).side_split(), None);
 }
+
+#[test]
+fn records_name_their_distinct_twins() {
+    for (record, metric) in [
+        ("most_kills", "kills_per_game"),
+        ("most_deaths", "deaths_per_game"),
+        ("best_gpm", "gpm"),
+        ("most_damage", "hero_damage"),
+        ("most_wards", "wards"),
+    ] {
+        assert_eq!(record_twin(record), Some(metric), "{record}");
+        assert!(METRIC_KEYS.contains(&metric), "{metric}");
+    }
+    for key in [
+        "most_assists",
+        "longest_game",
+        "fastest_win",
+        "first_bloods",
+        "roshans",
+        "nope",
+    ] {
+        assert_eq!(record_twin(key), None, "{key}");
+    }
+}
+
+#[test]
+fn records_meet_their_floors() {
+    // One standout game among two quiet ones, at a given ward and damage count.
+    let standout = |wards: i64, damage: i64| {
+        let rows = (1..=3)
+            .map(|id| {
+                let mut row = mine(id, id as u32, 1, Some(true));
+                row.wards = Some(if id == 2 { wards } else { 2 });
+                row.hero_damage = Some(if id == 2 { damage } else { 5_000 });
+                row
+            })
+            .collect::<Vec<_>>();
+        let records = personal_records(&rows, 7);
+        (
+            record(&records, "most_wards").is_some(),
+            record(&records, "most_damage").is_some(),
+        )
+    };
+    assert_eq!(standout(9, 19_999), (false, false));
+    assert_eq!(standout(10, 20_000), (true, true));
+}
+
+#[test]
+fn hero_year_ties_go_to_more_games_then_the_lower_id() {
+    let mut rows = Vec::new();
+    hero_games(&mut rows, 9, 6, 4, 0); // 60% over ten
+    hero_games(&mut rows, 3, 3, 2, 0); // 60% over five
+    hero_games(&mut rows, 8, 2, 8, 0); // 20% over ten
+    hero_games(&mut rows, 4, 1, 4, 0); // 20% over five
+    let year = hero_year(&rows, 7);
+    assert_eq!(year.best.map(|line| line.hero_id), Some(9));
+    assert_eq!(year.nemesis_hero.map(|line| line.hero_id), Some(8));
+
+    let mut even = Vec::new();
+    hero_games(&mut even, 6, 3, 2, 0);
+    hero_games(&mut even, 2, 3, 2, 0);
+    hero_games(&mut even, 7, 1, 4, 0);
+    hero_games(&mut even, 5, 1, 4, 0);
+    let year = hero_year(&even, 7);
+    assert_eq!(year.best.map(|line| line.hero_id), Some(2));
+    assert_eq!(year.nemesis_hero.map(|line| line.hero_id), Some(5));
+}

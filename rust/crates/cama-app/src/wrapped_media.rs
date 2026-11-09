@@ -17,6 +17,7 @@ mod beats;
 mod cards;
 mod motifs;
 mod motion;
+mod placement;
 mod shapes;
 mod stage;
 
@@ -393,20 +394,69 @@ fn rgb(color: Rgba) -> [u8; 3] {
 
 /// Channels at or below this all read as black on a phone screen.
 const NEAR_BLACK: u8 = 48;
-/// Backgrounds closer than this in RGB look like one color side by side.
-const ALIKE_DISTANCE: i32 = 48;
+/// Backgrounds closer than this in CIELAB (ΔE*76) look like one color side by
+/// side. Lab spaces dark colors by how they look, so an ink and a plum
+/// (about 24) or a calculated bar's indigo and a gold graph's navy (about 27)
+/// read alike, while a Stonks green and a Dig brown (about 30) do not.
+const ALIKE_DELTA_E: f32 = 28.0;
+/// The most cards a story may end on a yellow background.
+const MOST_YELLOW_ENDINGS: usize = 2;
+
+/// sRGB to CIELAB under D65.
+fn lab(color: [u8; 3]) -> [f32; 3] {
+    let linear = |channel: u8| {
+        let value = f32::from(channel) / 255.0;
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let [red, green, blue] = color.map(linear);
+    let x = (0.4124 * red + 0.3576 * green + 0.1805 * blue) / 0.950_47;
+    let y = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    let z = (0.0193 * red + 0.1192 * green + 0.9505 * blue) / 1.088_83;
+    let f = |t: f32| {
+        if t > 0.008_856 {
+            t.cbrt()
+        } else {
+            7.787 * t + 16.0 / 116.0
+        }
+    };
+    let (fx, fy, fz) = (f(x), f(y), f(z));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
 
 /// Whether two backgrounds read as the same color next to each other: close
-/// in RGB, or both near-black, since black, ink and navy cards look alike.
+/// in CIELAB, or both near-black, since black, ink and navy cards look alike.
 #[must_use]
 pub fn backgrounds_alike(a: [u8; 3], b: [u8; 3]) -> bool {
     let near_black = |color: [u8; 3]| color.iter().all(|channel| *channel <= NEAR_BLACK);
-    let distance = a
+    let delta = lab(a)
         .iter()
-        .zip(b)
-        .map(|(first, second)| (i32::from(*first) - i32::from(second)).pow(2))
-        .sum::<i32>();
-    distance < ALIKE_DISTANCE.pow(2) || (near_black(a) && near_black(b))
+        .zip(lab(b))
+        .map(|(first, second)| (first - second).powi(2))
+        .sum::<f32>()
+        .sqrt();
+    delta < ALIKE_DELTA_E || (near_black(a) && near_black(b))
+}
+
+/// Whether a background reads as yellow: a bright, saturated hue between
+/// orange and lime.
+fn looks_yellow(color: [u8; 3]) -> bool {
+    let [red, green, blue] = color.map(f32::from);
+    let (high, low) = (red.max(green).max(blue), red.min(green).min(blue));
+    if high < 200.0 || (high - low) / high < 0.5 {
+        return false;
+    }
+    let hue = if high == red {
+        60.0 * ((green - blue) / (high - low))
+    } else if high == green {
+        60.0 * ((blue - red) / (high - low) + 2.0)
+    } else {
+        60.0 * ((red - green) / (high - low) + 4.0)
+    };
+    (42.0..=64.0).contains(&hue)
 }
 
 /// Whether any color of `a` is alike to any color of `b`.
@@ -421,29 +471,47 @@ pub fn any_backgrounds_alike(a: &[[u8; 3]], b: &[[u8; 3]]) -> bool {
 /// two-beat card can take any palette of its kind, so it has none.
 #[must_use]
 pub fn fixed_backgrounds(slide: &WrappedSlideData) -> Vec<[u8; 3]> {
-    let recolorable = slide.layout == WrappedLayout::TwoBeat && slide.theme.beat_family().is_some();
-    match slide.beat.as_ref().filter(|_| recolorable) {
+    match recolorable_beat(slide) {
         Some(beat) if beat.treatment == WrappedPunch::Plain => Vec::new(),
         Some(beat) => vec![rgb(beats::look(slide.theme, beat.treatment).bg)],
         None => slide_backgrounds(slide),
     }
 }
 
+/// A two-beat card's copy when its palette can still change.
+fn recolorable_beat(slide: &WrappedSlideData) -> Option<&WrappedBeat> {
+    let recolorable = slide.layout == WrappedLayout::TwoBeat && slide.theme.beat_family().is_some();
+    slide.beat.as_ref().filter(|_| recolorable)
+}
+
 /// Recolors a story's two-beat cards, in order, so that no two neighboring
-/// cards share a background or two that look alike. Each card keeps its kind
-/// (roast or popoff) and takes the next palette of that kind that clashes
-/// with neither the card before it nor a fixed card after it, so long runs
-/// also rotate colors.
+/// cards share a background or two that look alike, setup or final frame.
+/// Each card keeps its kind (roast or popoff) and takes the next palette of
+/// that kind that clashes with neither the card before it nor a fixed card
+/// after it, so long runs also rotate colors. At most two cards in the whole
+/// story end on yellow, fixed cards such as the persona included.
 pub fn vary_beat_palettes(slides: &mut [WrappedSlideData]) {
+    let mut yellow_left = MOST_YELLOW_ENDINGS.saturating_sub(
+        slides
+            .iter()
+            .filter(|slide| recolorable_beat(slide).is_none())
+            .filter(|slide| {
+                slide_backgrounds(slide)
+                    .last()
+                    .copied()
+                    .is_some_and(looks_yellow)
+            })
+            .count(),
+    );
     let mut next_turn = [0_usize; 2];
+    // The card index each palette was last given to, per kind.
+    let mut last_used: [std::collections::BTreeMap<usize, usize>; 2] = Default::default();
     for index in 0..slides.len() {
         let slide = &slides[index];
-        let (Some(beat), Some(family)) = (slide.beat.as_ref(), slide.theme.beat_family()) else {
+        let (Some(beat), Some(family)) = (recolorable_beat(slide), slide.theme.beat_family())
+        else {
             continue;
         };
-        if slide.layout != WrappedLayout::TwoBeat {
-            continue;
-        }
         let treatment = beat.treatment;
         let turn = usize::from(slide.theme.is_roast_beat());
         let before = index
@@ -457,21 +525,46 @@ pub fn vary_beat_palettes(slides: &mut [WrappedSlideData]) {
             .map(fixed_backgrounds)
             .unwrap_or_default();
         let start = next_turn[turn];
+        let ends_yellow =
+            |candidate: usize| looks_yellow(beat_backgrounds(family[candidate], treatment)[1]);
+        let allowed = |candidate: usize| yellow_left > 0 || !ends_yellow(candidate);
         let clear_of = |candidate: usize, neighbors: &[&[[u8; 3]]]| {
             let colors = beat_backgrounds(family[candidate], treatment);
             neighbors
                 .iter()
                 .all(|taken| !any_backgrounds_alike(&colors, taken))
         };
-        // When the card after is fixed in a like color, at least keep clear
-        // of the card before.
-        let order = || (0..family.len()).map(|offset| (start + offset) % family.len());
-        let pick = order()
-            .find(|candidate| clear_of(*candidate, &[&before, &after]))
-            .or_else(|| order().find(|candidate| clear_of(*candidate, &[&before])))
+        // Clear of both neighbors within the yellow budget; failing that,
+        // clear of the card before, within the budget if possible.
+        // Least recently used first, so a run of one kind rotates through
+        // its palettes; ties keep the rotation order.
+        let mut order = (0..family.len())
+            .map(|offset| (start + offset) % family.len())
+            .collect::<Vec<_>>();
+        order.sort_by_key(|candidate| last_used[turn].get(candidate).copied());
+        let pick = order
+            .iter()
+            .copied()
+            .find(|candidate| allowed(*candidate) && clear_of(*candidate, &[&before, &after]))
+            .or_else(|| {
+                order
+                    .iter()
+                    .copied()
+                    .find(|candidate| allowed(*candidate) && clear_of(*candidate, &[&before]))
+            })
+            .or_else(|| {
+                order
+                    .iter()
+                    .copied()
+                    .find(|candidate| clear_of(*candidate, &[&before]))
+            })
             .unwrap_or(start % family.len());
+        if ends_yellow(pick) {
+            yellow_left = yellow_left.saturating_sub(1);
+        }
         slides[index].theme = family[pick];
         next_turn[turn] = pick + 1;
+        last_used[turn].insert(pick, index);
     }
 }
 

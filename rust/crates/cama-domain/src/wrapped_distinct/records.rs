@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use chrono::DateTime;
 
 use super::{Direction, DistinctMatch, commas, zone_for};
+use crate::formatting::count_noun;
 
 use Direction::{Popoff, Roast};
 
@@ -26,6 +27,21 @@ pub const RECORD_KEYS: [(&str, Direction); 10] = [
     ("first_bloods", Popoff),
     ("roshans", Popoff),
 ];
+
+/// The distinct story that measures the same thing as a record, if any.
+/// The distinct story that measures the same thing as a record, if any: a
+/// deck that shows one should not show the other.
+#[must_use]
+pub fn record_twin(key: &str) -> Option<&'static str> {
+    match key {
+        "most_kills" => Some("kills_per_game"),
+        "most_deaths" => Some("deaths_per_game"),
+        "best_gpm" => Some("gpm"),
+        "most_damage" => Some("hero_damage"),
+        "most_wards" => Some("wards"),
+        _ => None,
+    }
+}
 
 /// Records counted across the year rather than read off one game.
 pub const COUNT_RECORDS: [&str; 2] = ["first_bloods", "roshans"];
@@ -97,14 +113,6 @@ impl HeroYear {
     }
 }
 
-fn plural(value: i64, one: &str, many: &str) -> String {
-    format!(
-        "{} {}",
-        commas(value as f64),
-        if value == 1 { one } else { many }
-    )
-}
-
 fn game_clock(seconds: i64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
@@ -116,8 +124,8 @@ fn notable(key: &str, value: i64) -> bool {
         "most_kills" | "most_deaths" => value >= 10,
         "most_assists" => value >= 15,
         "best_gpm" => value >= 400,
-        "most_damage" => value >= 10_000,
-        "most_wards" => value >= 5,
+        "most_damage" => value >= 20_000,
+        "most_wards" => value >= 10,
         "longest_game" => value >= 45 * 60,
         "fastest_win" => value <= 30 * 60,
         _ => value >= 2,
@@ -212,21 +220,21 @@ pub fn personal_records(rows: &[DistinctMatch], target: i64) -> Vec<PersonalReco
                 entry,
                 false,
                 |g| g.kills,
-                |v| plural(v, "kill", "kills"),
+                |v| count_noun(v, "kill", "kills"),
             ),
             "most_deaths" => peak(
                 &games,
                 entry,
                 false,
                 |g| g.deaths,
-                |v| plural(v, "death", "deaths"),
+                |v| count_noun(v, "death", "deaths"),
             ),
             "most_assists" => peak(
                 &games,
                 entry,
                 false,
                 |g| g.assists,
-                |v| plural(v, "assist", "assists"),
+                |v| count_noun(v, "assist", "assists"),
             ),
             "best_gpm" => peak(
                 &games,
@@ -247,7 +255,7 @@ pub fn personal_records(rows: &[DistinctMatch], target: i64) -> Vec<PersonalReco
                 entry,
                 false,
                 |g| g.wards,
-                |v| plural(v, "ward", "wards"),
+                |v| count_noun(v, "ward", "wards"),
             ),
             "longest_game" => peak(&games, entry, false, played, game_clock),
             "fastest_win" => peak(
@@ -261,13 +269,13 @@ pub fn personal_records(rows: &[DistinctMatch], target: i64) -> Vec<PersonalReco
                 &games,
                 entry,
                 |g| g.first_blood.map(i64::from),
-                |v| plural(v, "first blood", "first bloods"),
+                |v| count_noun(v, "first blood", "first bloods"),
             ),
             _ => count(
                 &games,
                 entry,
                 |g| g.roshans,
-                |v| plural(v, "Roshan", "Roshans"),
+                |v| count_noun(v, "Roshan", "Roshans"),
             ),
         };
         records.extend(record);

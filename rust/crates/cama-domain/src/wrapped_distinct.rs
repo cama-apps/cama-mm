@@ -23,7 +23,7 @@ mod records;
 
 pub use records::{
     COUNT_RECORDS, HeroLine, HeroYear, PersonalRecord, RECORD_KEYS, hero_year, month_day,
-    personal_records, select_records,
+    personal_records, record_twin, select_records,
 };
 
 /// Below this many eligible players a metric is too thin to rank.

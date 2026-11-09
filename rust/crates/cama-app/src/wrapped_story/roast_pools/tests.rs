@@ -639,11 +639,7 @@ fn placeholders(lines: &[Beat]) -> BTreeSet<String> {
 #[test]
 fn record_and_hero_pools_are_deep() {
     let every = all_beats();
-    let reaches_checks = |lines: &[Beat]| {
-        lines
-            .iter()
-            .all(|line| every.iter().any(|seen| std::ptr::eq(*seen, line)))
-    };
+    let reaches_checks = |lines: &[Beat]| lines.iter().all(|line| every.contains(&line));
     for (key, direction) in RECORD_KEYS {
         let lines = record_pool(key, direction);
         assert!(lines.len() >= 6, "{key}: {} lines", lines.len());
@@ -828,4 +824,90 @@ fn hero_copy_states_the_record() {
         ..HeroYear::default()
     };
     assert!(side_split_copy(&even, 3).is_none());
+}
+
+#[test]
+fn record_setups_leave_the_unit_to_the_number() {
+    // The big number already reads "27 kills" or "5 first bloods"; the line
+    // above it says it once, not twice.
+    for (key, unit) in [
+        ("most_kills", "kill"),
+        ("most_deaths", "death"),
+        ("most_assists", "assist"),
+        ("best_gpm", "gpm"),
+        ("most_damage", "damage"),
+        ("most_wards", "ward"),
+        ("first_bloods", "first blood"),
+        ("roshans", "roshan"),
+    ] {
+        let direction = RECORD_KEYS
+            .iter()
+            .find(|(record, _)| *record == key)
+            .map(|(_, direction)| *direction)
+            .expect("a record key");
+        for beat in record_pool(key, direction) {
+            let setup = beat.setup.to_lowercase();
+            assert!(!setup.contains(unit), "{key}: {:?}", beat.setup);
+        }
+    }
+}
+
+#[test]
+fn record_and_hero_lines_are_their_own() {
+    // No record or hero line repeats a line anywhere in the pools, setups
+    // included, so two cards in one deck never read the same.
+    let ours = RECORD_POOLS
+        .iter()
+        .flat_map(|(_, _, lines)| lines.iter())
+        .chain(HERO_POOLS.iter().flat_map(|(_, lines)| lines.iter()))
+        .flat_map(|beat| [beat.setup, beat.punch])
+        .collect::<Vec<_>>();
+    let every = all_beats()
+        .into_iter()
+        .flat_map(|beat| [beat.setup, beat.punch])
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    for line in ours {
+        let seen = every
+            .iter()
+            .filter(|other| **other == line.to_lowercase())
+            .count();
+        assert_eq!(seen, 1, "{line:?} appears {seen} times");
+    }
+}
+
+#[test]
+fn record_and_hero_punchlines_borrow_no_phrasing() {
+    // A punchline is the joke, so a record or hero punchline shares no run of
+    // three words with any other line: no "never stood a chance" twice.
+    fn runs(line: &str) -> Vec<String> {
+        let words = line
+            .to_lowercase()
+            .split(|c: char| !(c.is_alphanumeric() || "'{}".contains(c)))
+            .filter(|word| !word.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        words.windows(3).map(|run| run.join(" ")).collect()
+    }
+    let every = all_beats()
+        .into_iter()
+        .flat_map(|beat| [beat.setup, beat.punch])
+        .collect::<Vec<_>>();
+    let punches = RECORD_POOLS
+        .iter()
+        .flat_map(|(_, _, lines)| lines.iter())
+        .chain(HERO_POOLS.iter().flat_map(|(_, lines)| lines.iter()))
+        .map(|beat| beat.punch);
+    for punch in punches {
+        for run in runs(punch) {
+            let elsewhere = every
+                .iter()
+                .filter(|line| **line != punch && runs(line).contains(&run))
+                .collect::<Vec<_>>();
+            assert!(
+                elsewhere.is_empty(),
+                "{punch:?} shares {run:?} with {elsewhere:?}"
+            );
+        }
+    }
 }

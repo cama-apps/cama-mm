@@ -459,7 +459,8 @@ fn rate(wins: i64, games: i64) -> String {
 /// record. Other kinds get empty copy.
 #[must_use]
 pub fn hero_copy(kind: &str, line: &HeroLine, hero: Option<&str>, seed: u64) -> StoryCopy {
-    if !matches!(kind, "hero_best" | "hero_nemesis") {
+    let [best, nemesis, _] = HERO_STORY_KINDS;
+    if kind != best && kind != nemesis {
         return StoryCopy::default();
     }
     let (setup, punch) =
@@ -488,9 +489,9 @@ pub fn side_split_copy(year: &HeroYear, seed: u64) -> Option<StoryCopy> {
         rate(dire_wins, dire_games),
     );
     let (setup, punch) = choose(
-        hero_pool("side_split"),
+        hero_pool(HERO_STORY_KINDS[2]),
         seed,
-        mix_text(&["side_split"]),
+        mix_text(&[HERO_STORY_KINDS[2]]),
         &[],
     )
     .unwrap_or_default();

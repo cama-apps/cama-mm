@@ -2475,6 +2475,20 @@ fn seed_record_games(fixture: &Fixture) {
         .unwrap();
 }
 
+/// Parsed first-blood data for six of the player's games, two of them
+/// first bloods: a weak count record, but one that repeats no story.
+fn seed_first_bloods(fixture: &Fixture) {
+    Connection::open(&fixture.path)
+        .unwrap()
+        .execute_batch(
+            "UPDATE match_participants SET firstblood_claimed=0
+              WHERE discord_id=100 AND match_id IN (1,5,6,8);
+             UPDATE match_participants SET firstblood_claimed=1
+              WHERE discord_id=100 AND match_id IN (2,3);",
+        )
+        .unwrap();
+}
+
 /// Art sources whose warm cache holds one Anti-Mage render, and its bytes.
 fn anti_mage_art() -> (TempDir, ArtSources, Vec<u8>) {
     let heroes = tempfile::tempdir().unwrap();
@@ -2515,8 +2529,11 @@ fn deck_respects_twenty_card_budget_for_an_all_activity_player() {
         assert_eq!(count(kind), 1, "{kind}");
     }
     assert!((5..=8).contains(&count("story_distinct")));
-    // The player's own records and their best hero make the cut.
-    assert_eq!(count("story_record"), 2);
+    // The 78:12 game makes the cut; the peak GPM and kill games repeat
+    // stories the deck already tells, and their slot goes back to one more
+    // distinct story, so all twenty slots are used.
+    assert_eq!(count("story_record"), 1);
+    assert_eq!(story.len() - 1, 20);
     assert_eq!(count("story_hero_year"), 1);
     assert!(count("story_people") <= 2);
     assert_eq!(count("story_persona"), 1);
@@ -2551,6 +2568,7 @@ fn deck_respects_twenty_card_budget_for_an_all_activity_player() {
 fn record_cards_use_hero_render_and_credit_the_game() {
     let fixture = Fixture::league(12);
     seed_record_games(&fixture);
+    seed_first_bloods(&fixture);
     let (_heroes, art, render) = anti_mage_art();
     let raw = WrappedSources::with_art(&fixture.path, art)
         .load(GUILD as i64, OWNER as i64, 2026)
@@ -2570,9 +2588,10 @@ fn record_cards_use_hero_render_and_credit_the_game() {
         .iter()
         .filter(|slide| slide.kind == "story_record")
         .collect::<Vec<_>>();
-    // The strongest record of each kind: a roast and a popoff, each naming
-    // its hero, the day it finished in the player's time zone, and the result.
-    // The 31-kill game is already the Cinema card, so it is not repeated.
+    // The strongest record of each kind: the 78:12 roast, dated in the
+    // player's time zone with its result, and the two first bloods. The
+    // 31-kill game is already the Cinema card and the peak GPM repeats the
+    // GPM story, so neither comes back as a record.
     let beats = records
         .iter()
         .map(|slide| slide.beat.as_ref().expect("two-beat record copy"))
@@ -2584,12 +2603,12 @@ fn record_cards_use_hero_render_and_credit_the_game() {
             .collect::<Vec<_>>(),
         [
             "78:12 · Anti-Mage · Mar 7 · Won",
-            "1,400 GPM · Anti-Mage · Mar 9 · Won"
+            "2 first bloods in parsed games · latest on Anti-Mage"
         ]
     );
     assert_eq!(
-        (beats[1].value.as_str(), beats[1].setup_label.as_str()),
-        ("1,400 GPM", "Anti-Mage · Mar 9")
+        (beats[0].value.as_str(), beats[0].setup_label.as_str()),
+        ("78:12", "Anti-Mage · Mar 7")
     );
     let cinema = story
         .iter()
@@ -2620,6 +2639,97 @@ fn record_cards_use_hero_render_and_credit_the_game() {
         ("83%", "Won 10 of 12 on Anti-Mage")
     );
     assert_eq!(hero.art_png.as_deref(), Some(render.as_slice()));
+}
+
+#[test]
+fn records_never_repeat_a_shown_story() {
+    let fixture = Fixture::league(12);
+    seed_all_activity(&fixture);
+    seed_record_games(&fixture);
+    seed_first_bloods(&fixture);
+    let slides = league_deck(&fixture, &league_names());
+    let story = story_of(&slides);
+    let beats_of = |kind: &str| {
+        story
+            .iter()
+            .filter(|slide| slide.kind == kind)
+            .filter_map(|slide| slide.beat.as_ref())
+            .collect::<Vec<_>>()
+    };
+    let (records, distinct) = (beats_of("story_record"), beats_of("story_distinct"));
+    // A record's number and the distinct story about the same measure.
+    let twins = [
+        (" kills", "kills a game"),
+        (" deaths", "deaths a game"),
+        (" GPM", "gold a minute"),
+        (" damage", "hero damage a minute"),
+        (" wards", "wards a game"),
+    ];
+    for record in &records {
+        for (unit, label) in twins {
+            if record.value.ends_with(unit) {
+                assert!(
+                    distinct.iter().all(|story| story.setup_label != label),
+                    "{} repeats the {label} story",
+                    record.value
+                );
+            }
+        }
+    }
+    // The next record that repeats nothing takes the freed slot.
+    assert_eq!(
+        records
+            .iter()
+            .map(|beat| beat.credit.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "78:12 · Anti-Mage · Mar 7 · Won",
+            "2 first bloods in parsed games · latest on Anti-Mage"
+        ]
+    );
+    assert_eq!(story.len() - 1, 20);
+}
+
+#[test]
+fn single_counts_read_in_the_singular() {
+    let fixture = Fixture::league(12);
+    // One game on a second hero.
+    Connection::open(&fixture.path)
+        .unwrap()
+        .execute(
+            "UPDATE match_participants SET hero_id=14 WHERE match_id=7 AND discord_id=100",
+            [],
+        )
+        .unwrap();
+    let slides = league_deck(&fixture, &league_names());
+    let heroes = slides
+        .iter()
+        .find(|slide| slide.kind == "story_hero")
+        .expect("the top-heroes card");
+    let details = heroes
+        .rows
+        .iter()
+        .map(|row| row.secondary.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        details.iter().any(|detail| detail.starts_with("1 game · ")),
+        "{details:?}"
+    );
+    // "1 games" or "1 heroes" anywhere, but not "11 games" or "1,204 games".
+    let singular_slip = |text: &str| {
+        let words = text
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+        words
+            .windows(2)
+            .any(|pair| pair[0] == "1" && matches!(pair[1], "games" | "heroes" | "wins" | "losses"))
+    };
+    for slide in &slides {
+        for text in slide_texts(slide) {
+            assert!(!singular_slip(&text), "{}: {text}", slide.kind);
+        }
+    }
 }
 
 #[test]
@@ -2783,7 +2893,34 @@ fn neighboring_story_cards_never_share_a_background() {
                 pair[1].theme
             );
         }
+        // The owner asked for fewer all-yellow cards: two at most end there.
+        let yellow = story
+            .iter()
+            .filter(|slide| {
+                slide_backgrounds(slide)
+                    .last()
+                    .is_some_and(|color| looks_yellow(*color))
+            })
+            .count();
+        assert!(yellow <= 2, "{yellow} cards end on yellow in {sequence:#?}");
     }
+}
+
+/// A bright, saturated background between orange and lime.
+fn looks_yellow(color: [u8; 3]) -> bool {
+    let [red, green, blue] = color.map(f32::from);
+    let (high, low) = (red.max(green).max(blue), red.min(green).min(blue));
+    if high < 200.0 || (high - low) / high < 0.5 {
+        return false;
+    }
+    let hue = if high == red {
+        60.0 * ((green - blue) / (high - low))
+    } else if high == green {
+        60.0 * ((blue - red) / (high - low) + 2.0)
+    } else {
+        60.0 * ((red - green) / (high - low) + 4.0)
+    };
+    (42.0..=64.0).contains(&hue)
 }
 
 #[test]
