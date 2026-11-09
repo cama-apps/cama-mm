@@ -911,3 +911,15 @@ fn record_and_hero_punchlines_borrow_no_phrasing() {
         }
     }
 }
+
+#[test]
+fn night_owl_credit_counts_one_game_in_the_singular() {
+    let mut owl = story("night_owl", Theme::Time, Direction::Roast, Tier::Strong);
+    owl.display = "4:12 AM".to_owned();
+    owl.value = 1.0;
+    let one = story_copy(&owl, &vars(), 1);
+    assert_eq!(one.credit, "1 game finished after midnight");
+    owl.value = 12.0;
+    let many = story_copy(&owl, &vars(), 1);
+    assert_eq!(many.credit, "12 games finished after midnight");
+}

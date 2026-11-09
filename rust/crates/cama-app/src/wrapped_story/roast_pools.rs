@@ -8,6 +8,7 @@
 //! pools themselves live in `roast_pools/lines.rs`.
 
 use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
+use cama_domain::formatting::count_noun;
 use cama_domain::wrapped_activity::ServerRank;
 use cama_domain::wrapped_distinct::{
     COUNT_RECORDS, Direction, DistinctStory, HeroLine, HeroYear, PairStory, PersonalRecord, Theme,
@@ -255,7 +256,10 @@ fn facts(story: &DistinctStory, hero: Option<&str>, item: &str) -> (String, Stri
         "rating_swing" => simple("rating in one game"),
         "night_owl" => (
             "latest game finish".to_owned(),
-            format!("{} games finished after midnight", story.value.round()),
+            format!(
+                "{} finished after midnight",
+                count_noun(story.value.round() as i64, "game", "games")
+            ),
         ),
         "marathon_day" => simple("games in one day"),
         "hero_loyal" => {
