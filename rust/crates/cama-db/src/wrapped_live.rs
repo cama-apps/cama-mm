@@ -479,7 +479,8 @@ impl WrappedLiveRepository {
             "SELECT le.account_id, p.discord_username, COUNT(*) AS events
                FROM economy_ledger_entries AS le
                JOIN players AS p ON p.discord_id = le.account_id AND p.guild_id = ?1
-              WHERE le.guild_id = ?1 AND le.related_type = 'bankruptcy'
+              WHERE le.guild_id = ?1 AND le.account_type = 'player'
+                AND le.related_type = 'bankruptcy'
                 AND le.created_at >= ?2 AND le.created_at < ?3
            GROUP BY le.account_id
            ORDER BY events DESC, le.account_id ASC",
@@ -1083,7 +1084,8 @@ mod tests {
     fn bankruptcies_count_this_years_events_only() {
         let (file, db) = year_fixture();
         db.execute_batch(&format!(
-            "INSERT INTO players(discord_id,guild_id,discord_username) VALUES(7,42,'Seven'),(8,42,'Eight');
+            "INSERT INTO players(discord_id,guild_id,discord_username)
+                VALUES(7,42,'Seven'),(8,42,'Eight'),(42,42,'FortyTwo');
              INSERT INTO bankruptcy_state(discord_id,guild_id,last_bankruptcy_at,penalty_games_remaining,bankruptcy_count)
                 VALUES(7,42,{m},0,3),(8,42,{p},0,2);
              INSERT INTO economy_ledger_entries(guild_id,account_type,account_id,delta,balance_before,
@@ -1093,7 +1095,9 @@ mod tests {
                     (42,'player',7,500,-500,0,'bankruptcy','bankruptcy','7',{m}),
                     (42,'player',7,-20,100,80,'pet','pet','7',{m}),
                     (99,'player',7,500,-500,0,'bankruptcy','bankruptcy','7',{m}),
-                    (42,'player',8,500,-500,0,'bankruptcy','bankruptcy','8',{p});",
+                    (42,'player',8,500,-500,0,'bankruptcy','bankruptcy','8',{p}),
+                    -- The guild's nonprofit account shares its id with player 42.
+                    (42,'nonprofit',42,500,0,500,'bankruptcy','bankruptcy','42',{m});",
             m = START + 86_400,
             p = START - 86_400,
             p2 = START - 2 * 86_400,
