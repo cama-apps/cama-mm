@@ -265,7 +265,7 @@ const KILLS_EXTREME: &[Beat] = &[
     b("The kill feed was your blog.", "Updated every fight."),
     b("Your kill count", "Has its own kill count."),
     b("Kill-steal allegations:", "All true. No regrets."),
-    b("Beyond Godlike, regularly.", "The announcer needs a break."),
+    b("Enemy respawn timers:", "Mostly your fault."),
     b("Your supports sent a memo.", "Leave some for us."),
     b("You saw a hero. It died.", "That's the whole strategy."),
     b("Bloodseeker took notes.", "Thirst: unquenched."),
@@ -275,7 +275,7 @@ const KILLS_STRONG: &[Beat] = &[
     b("You found the kills.", "Or stole them. Same thing."),
     b("Violence, often.", "Diplomacy, never."),
     b("Last hits on heroes, mostly.", "Supports remember."),
-    b("The announcer knew you.", "Double kill. Triple kill."),
+    b("Enemies saw you coming.", "Then a grey screen."),
     b("You took fights.", "The fights didn't take you."),
     b("Your support had to ask:", "Can I have one?"),
     b("Kill participation: yes.", "Assists are for others."),
@@ -792,7 +792,7 @@ const RAPIERS_ROAST_STRONG: &[Beat] = &[
 ];
 
 const RAPIERS_ROAST_NOTABLE: &[Beat] = &[
-    b("One sword, one loss.", "Balanced, technically."),
+    b("Sword in, game out.", "Balanced, technically."),
     b("A Rapier happened.", "So did a loss."),
     b("You tried the sword.", "The sword tried back."),
     b("Rapier, then a loss.", "Classic Dota."),

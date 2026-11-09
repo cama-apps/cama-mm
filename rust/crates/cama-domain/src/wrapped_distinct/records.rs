@@ -28,7 +28,6 @@ pub const RECORD_KEYS: [(&str, Direction); 10] = [
     ("roshans", Popoff),
 ];
 
-/// The distinct story that measures the same thing as a record, if any.
 /// The distinct story that measures the same thing as a record, if any: a
 /// deck that shows one should not show the other.
 #[must_use]

@@ -11,8 +11,8 @@
 //!
 //! The record's number, hero and date sit on the card around these lines,
 //! so the lines land the joke about that game instead of restating it.
-//! Count records (first bloods, Roshans) span many games and never name a
-//! hero.
+//! Count records (first bloods, Roshans) span many games, so their lines
+//! never name a hero; only the credit does, for the latest game counted.
 
 use cama_domain::wrapped_distinct::Direction;
 
@@ -127,7 +127,7 @@ const FIRST_BLOODS: &[Beat] = &[
 
 const ROSHANS: &[Beat] = &[
     b("The pit went quiet:", "Roshan wants a new pit."),
-    b("Rosh had a bad year:", "It was a you problem."),
+    b("Rosh had a bad year:", "Aegis on speed dial."),
     b("The big guy fell:", "He takes it personally now."),
     b("Who keeps killing him?", "No contest. It's you."),
     b("Your boss-fight record:", "He dreads the respawn."),
