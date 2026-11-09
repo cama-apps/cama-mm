@@ -54,16 +54,27 @@ impl DotaHostWorker {
             return Ok(true);
         }
         let pending = self.pending(record).await?;
-        let gameplay_started = state.betting_closed
+        let known_match_id: Option<u64> = record
+            .valve_match_id
+            .as_deref()
+            .and_then(|id| id.parse().ok());
+        let mut gameplay_started = state.betting_closed
             || pending.as_ref().is_some_and(|p| p.state.betting_closed())
-            || record
-                .valve_match_id
-                .as_deref()
-                .and_then(|id| id.parse().ok())
-                .is_some_and(|id| {
-                    self.live
-                        .gameplay_started(record.guild_id, record.pending_match_id, id)
-                });
+            || known_match_id.is_some_and(|id| {
+                self.live
+                    .gameplay_started(record.guild_id, record.pending_match_id, id)
+            });
+        // Launch history and the live feed are lost when the worker is down
+        // for a whole game. Before destroying a lobby, ask Valve whether its
+        // match actually finished; an unavailable answer keeps prior behavior.
+        if !gameplay_started
+            && let Some(id) = known_match_id
+            && let Ok(details) = port.match_details(id).await
+            && details.match_id == id
+            && details.finished
+        {
+            gameplay_started = true;
+        }
         if gameplay_started
             && settings_match(&state.settings, lobby)
             && let Some(match_id) = record

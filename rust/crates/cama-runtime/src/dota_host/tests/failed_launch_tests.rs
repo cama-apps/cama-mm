@@ -627,3 +627,37 @@ async fn resume_restarts_timed_out_failed_launch_cleanup() {
     assert!(f.state().lobby_recreation.is_none());
     assert_eq!(f.state().failed_launches.len(), 1);
 }
+
+#[tokio::test]
+async fn returned_lobby_whose_match_finished_unobserved_is_recorded_not_recreated() {
+    let f = loading_match().await;
+    // The worker missed the whole game: no gameplay was persisted, and the
+    // GC now shows the lobby back in its UI state with no server or winner.
+    f.complete(Some("radiant"));
+    return_to_lobby(&f);
+    f.port.lobby.lock().unwrap().as_mut().unwrap().winner = None;
+    *f.port.details_error.lock().unwrap() = None;
+    assert!(!f.state().betting_closed);
+
+    restarted(&f).tick(&f.port, 155).await.unwrap();
+
+    assert!(f.state().failed_launches.is_empty());
+    assert!(f.state().lobby_recreation.is_none());
+    assert!(f.state().betting_closed);
+    assert_eq!(f.session().phase, Phase::Finishing);
+    restarted(&f).tick(&f.port, 190).await.unwrap(); // next 30s result poll
+    assert_eq!(f.recorder.count.load(Ordering::SeqCst), 1);
+    assert_eq!(f.state().recorded_match_id, Some(123));
+    // Only the original lobby was ever created; a destroy now is the normal
+    // post-recording cleanup, not failed-launch recreation.
+    let creates = f
+        .port
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| *c == "create")
+        .count();
+    assert_eq!(creates, 1);
+    assert!(f.state().failed_launches.is_empty());
+}
