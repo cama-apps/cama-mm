@@ -463,7 +463,10 @@ fn item_stories_name_the_item() {
     let rows = population(20, 6, |player, _, row| {
         row.enriched = true;
         let wands = if player == 1 { 4 } else { 1 + player % 3 };
-        row.items = vec![("magic_wand".to_string(), wands), ("blink".to_string(), 1)];
+        row.items = Some(vec![
+            ("magic_wand".to_string(), wands),
+            ("blink".to_string(), 1),
+        ]);
     });
     let stories = distinct_stories(&rows, &players(20), 1, 3);
     let items: Vec<_> = stories
@@ -474,6 +477,34 @@ fn item_stories_name_the_item() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].item.as_deref(), Some("magic_wand"));
     assert_eq!(items[0].direction, Direction::Roast);
+}
+
+#[test]
+fn parsed_games_without_tracked_items_lower_the_rate() {
+    // Player 1 bought four wands in each of four games, none in a fifth that
+    // was parsed, and has a sixth whose purchase log is unknown.
+    let rows = population(20, 6, |player, index, row| {
+        row.enriched = true;
+        row.items = Some(vec![("magic_wand".to_string(), 1 + player % 3)]);
+        if player == 1 {
+            row.items = match index {
+                4 => Some(Vec::new()),
+                5 => None,
+                _ => Some(vec![("magic_wand".to_string(), 4)]),
+            };
+        }
+    });
+    let stories = distinct_stories(&rows, &players(20), 1, 3);
+    let wands = story_for(&stories, "item").expect("wand story");
+
+    assert_eq!(wands.item.as_deref(), Some("magic_wand"));
+    // Sixteen wands over five known logs; the unknown log is left out.
+    assert_eq!(wands.value, 3.2);
+
+    // The empty log is the fifth known game; without it the minimum fails.
+    let mut short = rows.clone();
+    short.retain(|row| row.discord_id != 1 || row.match_id % 100 != 4);
+    assert!(story_for(&distinct_stories(&short, &players(20), 1, 3), "item").is_none());
 }
 
 /// One of player 7's games, finished on `day` of March 2026 at 20:00 UTC.

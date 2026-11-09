@@ -155,11 +155,12 @@ fn parse_match_date(raw: &str) -> Option<i64> {
         .ok()
 }
 
-/// `{"blink":1,"magic_wand":2}` sorted by key; malformed text is empty.
-fn parse_item_counts(raw: &str) -> Vec<(String, i64)> {
+/// `{"blink":1,"magic_wand":2}` sorted by key; `{}` is a parsed log with no
+/// tracked purchase, and malformed text is unknown.
+fn parse_item_counts(raw: &str) -> Option<Vec<(String, i64)>> {
     serde_json::from_str::<BTreeMap<String, i64>>(raw)
         .map(|counts| counts.into_iter().collect())
-        .unwrap_or_default()
+        .ok()
 }
 
 #[derive(Clone, Debug)]
@@ -668,10 +669,7 @@ impl WrappedLiveRepository {
                 actions_per_min: row.get(22)?,
                 rapiers: row.get(23)?,
                 buybacks: row.get(24)?,
-                items: item_counts
-                    .as_deref()
-                    .map(parse_item_counts)
-                    .unwrap_or_default(),
+                items: item_counts.as_deref().and_then(parse_item_counts),
                 comeback: row.get(26)?,
                 throw: row.get(27)?,
                 expected_win: row.get(28)?,
@@ -966,7 +964,7 @@ mod tests {
         let bare = matches.iter().find(|m| m.discord_id == 7).unwrap();
         assert!(!bare.enriched);
         assert_eq!(bare.wards, None);
-        assert!(bare.items.is_empty());
+        assert_eq!(bare.items, None);
         assert_eq!(
             (
                 bare.rapiers,
@@ -981,7 +979,7 @@ mod tests {
         assert_eq!(full.wards, Some(3));
         assert_eq!(
             full.items,
-            [("blink".to_owned(), 1), ("magic_wand".to_owned(), 2)]
+            Some(vec![("blink".to_owned(), 1), ("magic_wand".to_owned(), 2)])
         );
         assert_eq!((full.rapiers, full.buybacks), (Some(2), Some(3)));
         assert_eq!((full.courier_kills, full.pings), (Some(1), Some(9)));
@@ -997,7 +995,15 @@ mod tests {
             .guild_year_rows(42, START, END)
             .unwrap();
         let malformed = matches.iter().find(|m| m.discord_id == 8).unwrap();
-        assert!(malformed.enriched && malformed.items.is_empty());
+        assert!(malformed.enriched);
+        assert_eq!(malformed.items, None, "malformed counts are unknown");
+        db.execute("UPDATE wrapped_enrichment_facts SET item_counts='{}'", [])
+            .unwrap();
+        let (matches, _) = WrappedLiveRepository::new(file.path())
+            .guild_year_rows(42, START, END)
+            .unwrap();
+        let empty = matches.iter().find(|m| m.discord_id == 8).unwrap();
+        assert_eq!(empty.items, Some(Vec::new()), "a parsed log bought nothing");
     }
 
     #[test]

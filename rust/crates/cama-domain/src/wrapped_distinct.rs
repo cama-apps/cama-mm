@@ -123,8 +123,9 @@ pub struct DistinctMatch {
     pub actions_per_min: Option<f64>,
     pub rapiers: Option<i64>,
     pub buybacks: Option<i64>,
-    /// Purchase counts by OpenDota item key; empty when unknown.
-    pub items: Vec<(String, i64)>,
+    /// Purchase counts by OpenDota item key: `None` when the purchase log is
+    /// unknown, empty when it was parsed and no tracked item was bought.
+    pub items: Option<Vec<(String, i64)>>,
     /// Match-wide team gold figures.
     pub comeback: Option<f64>,
     pub throw: Option<f64>,
@@ -550,14 +551,14 @@ impl Player<'_> {
             .games
             .iter()
             .copied()
-            .filter(|game| game.enriched && !game.items.is_empty())
+            .filter(|game| game.enriched && game.items.is_some())
             .collect();
         if stocked.len() < 5 {
             return None;
         }
         let bought: i64 = stocked
             .iter()
-            .flat_map(|game| &game.items)
+            .flat_map(|game| game.items.iter().flatten())
             .filter(|(key, _)| key == item)
             .map(|(_, count)| count)
             .sum();
