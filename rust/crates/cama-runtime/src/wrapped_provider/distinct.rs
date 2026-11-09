@@ -15,10 +15,7 @@ use cama_app::wrapped_story::roast_pools::{
 use cama_domain::formatting::format_grouped;
 use cama_domain::hero_catalog::bundled_hero_name;
 use cama_domain::wrapped_activity::{DigYear, GambaYear};
-use cama_domain::wrapped_distinct::{
-    Direction, DistinctMatch, DistinctPlayer, DistinctStory, PeopleYear, Theme, distinct_stories,
-    select_stories,
-};
+use cama_domain::wrapped_distinct::{Direction, DistinctMatch, DistinctStory, PeopleYear, Theme};
 
 use super::activity::ArtSources;
 use super::base_slide;
@@ -38,10 +35,6 @@ pub(super) struct DistinctDeck {
     pub best_roast: Option<String>,
     /// The best popoff's fact line, which the recap wears as its badge.
     pub badge: Option<String>,
-    /// The games and metric keys the stories are about, so other cards can
-    /// avoid repeating one.
-    pub games: Vec<i64>,
-    pub metrics: Vec<&'static str>,
 }
 
 pub(super) struct Persona {
@@ -51,28 +44,23 @@ pub(super) struct Persona {
     pub evidence: Vec<(String, String)>,
 }
 
-/// Up to `max_stories` distinct cards for `target`, ranked against everyone
-/// in `rows` with at least `minimum_games` games. `gold` returns a match's
-/// radiant gold advantage per minute when it was parsed.
+/// The distinct cards for `target`'s `selected` stories, best first. `gold`
+/// returns a match's radiant gold advantage per minute when it was parsed.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn distinct_slides(
+    selected: &[DistinctStory],
     rows: &[DistinctMatch],
-    players: &[DistinctPlayer],
     target: i64,
-    minimum_games: usize,
-    max_stories: usize,
     art: &ArtSources,
     gold: &dyn Fn(i64) -> Option<Vec<f64>>,
     seed: u64,
     username: &str,
     year_label: &str,
 ) -> DistinctDeck {
-    let candidates = distinct_stories(rows, players, target, minimum_games);
-    let selected = select_stories(&candidates, max_stories);
     let (mut best_popoff, mut best_roast, mut badge) = (None, None, None);
     let mut evidence = Vec::new();
     let mut cards = Vec::with_capacity(selected.len());
-    for story in &selected {
+    for story in selected {
         let vars = CopyVars {
             hero: story.hero_id.and_then(bundled_hero_name).map(str::to_owned),
             ..CopyVars::default()
@@ -104,7 +92,7 @@ pub(super) fn distinct_slides(
     DistinctDeck {
         stories: alternate(cards),
         persona: (!selected.is_empty()).then(|| {
-            let (title, subtitle) = persona_title(&selected, seed);
+            let (title, subtitle) = persona_title(selected, seed);
             Persona {
                 title: title.to_owned(),
                 subtitle: subtitle.to_owned(),
@@ -114,8 +102,6 @@ pub(super) fn distinct_slides(
         best_popoff,
         best_roast,
         badge,
-        games: selected.iter().filter_map(|story| story.match_id).collect(),
-        metrics: selected.iter().map(|story| story.metric).collect(),
     }
 }
 

@@ -8,8 +8,8 @@ use cama_app::wrapped_story::roast_pools::{
 };
 use cama_domain::hero_catalog::bundled_hero_name;
 use cama_domain::wrapped_distinct::{
-    COUNT_RECORDS, Direction, DistinctMatch, DistinctPlayer, PersonalRecord, hero_year, month_day,
-    record_twin, select_records,
+    COUNT_RECORDS, Direction, DistinctMatch, DistinctPlayer, DistinctStory, PersonalRecord,
+    hero_year, month_day, record_twin, select_records,
 };
 
 use super::activity::ArtSources;
@@ -23,14 +23,15 @@ pub(super) fn record_count(candidates: &[PersonalRecord]) -> usize {
 }
 
 /// The records that tell the deck something new: none about a game a
-/// distinct story already shows (`games`), or about a measure one already
-/// covers (`metrics`), such as a peak-GPM game beside the GPM story. A count
-/// spans many games, so only its measure matters.
+/// `shown` distinct story is about, or about a measure one already covers,
+/// such as a peak-GPM game beside the GPM story. A count spans many games,
+/// so only its measure matters.
 pub(super) fn fresh_records(
     candidates: &[PersonalRecord],
-    games: &[i64],
-    metrics: &[&str],
+    shown: &[DistinctStory],
 ) -> Vec<PersonalRecord> {
+    let games: Vec<i64> = shown.iter().filter_map(|story| story.match_id).collect();
+    let metrics: Vec<&str> = shown.iter().map(|story| story.metric).collect();
     candidates
         .iter()
         .filter(|record| COUNT_RECORDS.contains(&record.key) || !games.contains(&record.match_id))

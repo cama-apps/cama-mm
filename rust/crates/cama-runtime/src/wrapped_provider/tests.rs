@@ -663,13 +663,16 @@ async fn personal_story_offers_still_mode_recap_and_separate_details() {
         .find(|slide| slide.kind == "chart_rating")
         .expect("fixture produces a rating chart detail page");
     assert_eq!(rating_chart.year_label, "Cama Wrapped 2026");
-    assert!(
-        session
-            .slides
-            .iter()
-            .filter(|slide| slide.kind.starts_with("chart_gamba") || slide.kind == "story_gamba")
-            .all(|slide| slide.year_label == "Cama Wrapped 2026")
-    );
+    let gamba = session
+        .slides
+        .iter()
+        .chain(&session.details)
+        .filter(|slide| slide.kind.contains("gamba"))
+        .collect::<Vec<_>>();
+    assert!(!gamba.is_empty(), "the fixture's bets make a gamba card");
+    for slide in gamba {
+        assert_eq!(slide.year_label, "Cama Wrapped 2026", "{}", slide.kind);
+    }
     assert!(!session.animated);
     assert!(
         session
@@ -679,6 +682,30 @@ async fn personal_story_offers_still_mode_recap_and_separate_details() {
             .sum::<usize>()
             <= MAX_CACHED_MEDIA_BYTES
     );
+}
+
+#[test]
+fn an_unreadable_year_row_leaves_the_rest_of_wrapped_standing() {
+    let fixture = Fixture::migrated();
+    // A buyback count stored as text cannot be read back as a number.
+    Connection::open(&fixture.path)
+        .unwrap()
+        .execute(
+            "UPDATE wrapped_enrichment_facts SET buybacks='x' WHERE match_id=1",
+            [],
+        )
+        .unwrap();
+    let raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .expect("the bad row does not fail the deck")
+        .expect("the year still has games");
+    assert!(raw.year_rows.is_empty() && raw.year_players.is_empty());
+    assert_eq!(raw.people, PeopleYear::default());
+    assert_eq!(raw.matches.len(), 3);
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    let story = story_of(&slides);
+    assert_eq!(story.first().unwrap().kind, "story_intro");
+    assert_eq!(story.last().unwrap().kind, "story_finale");
 }
 
 #[test]

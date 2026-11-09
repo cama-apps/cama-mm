@@ -37,7 +37,8 @@ use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::formatting::count_noun;
 use cama_domain::hero_catalog::hero_name;
 use cama_domain::wrapped_distinct::{
-    DistinctMatch, DistinctPlayer, PeopleYear, people_year, personal_records,
+    DistinctMatch, DistinctPlayer, PeopleYear, distinct_stories, people_year, personal_records,
+    select_stories,
 };
 use chrono::{Datelike, Utc};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
@@ -259,10 +260,15 @@ impl WrappedSources {
             .player_year_matches(target_id, guild_id, start_ts, end_ts)
             .map_err(|error| error.to_string())?;
 
+        // The server comparison is a bonus: an unreadable row costs only the
+        // stories ranked against the guild, never the whole deck.
         let (year_rows, year_players) = self
             .wrapped
             .guild_year_rows(guild_id, start_ts, end_ts)
-            .map_err(|error| error.to_string())?;
+            .unwrap_or_else(|error| {
+                warn!(%error, guild_id, "failed to fetch Wrapped guild year rows");
+                (Vec::new(), Vec::new())
+            });
         let people = people_year(&year_rows, target_id);
         let rating_history = self
             .wrapped
@@ -1563,34 +1569,36 @@ fn build_slides(
     // story gives way to the next record; when none is left, its slot goes
     // back to the distinct stories, which are then picked again. The record
     // count only falls, so this settles in a few rounds.
+    // Only stories are picked in the loop; their cards, with art and gold
+    // graphs, are drawn once it settles.
     let fixed = slides
         .iter()
         .filter(|slide| deck::FIXED_KINDS.contains(&slide.kind.as_str()))
         .count();
+    let candidates = distinct_stories(&raw.year_rows, &raw.year_players, target_id, minimum_games);
     let mut held = record_count(&record_candidates);
-    let (slots, distinct, fresh) = loop {
+    let (slots, selected, fresh) = loop {
         let slots = deck::distinct_slots(
             fixed + held + hero_stories.len() + people.len() + side_cards + deck::PERSONA_SLOTS,
         );
-        let distinct = distinct_slides(
-            &raw.year_rows,
-            &raw.year_players,
-            target_id,
-            minimum_games,
-            slots,
-            &raw.art,
-            &*raw.gold,
-            seed,
-            target_display_name,
-            &year_label,
-        );
-        let fresh = fresh_records(&record_candidates, &distinct.games, &distinct.metrics);
+        let selected = select_stories(&candidates, slots);
+        let fresh = fresh_records(&record_candidates, &selected);
         let fits = record_count(&fresh).min(held);
         if fits == held {
-            break (slots, distinct, fresh);
+            break (slots, selected, fresh);
         }
         held = fits;
     };
+    let distinct = distinct_slides(
+        &selected,
+        &raw.year_rows,
+        target_id,
+        &raw.art,
+        &*raw.gold,
+        seed,
+        target_display_name,
+        &year_label,
+    );
     let records = record_story_slides(
         &fresh,
         held,
