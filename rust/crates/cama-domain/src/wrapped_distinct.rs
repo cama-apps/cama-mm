@@ -109,7 +109,6 @@ pub struct DistinctMatch {
     pub last_hits: Option<i64>,
     pub gpm: Option<i64>,
     pub hero_damage: Option<i64>,
-    pub tower_damage: Option<i64>,
     pub hero_healing: Option<i64>,
     /// Observer plus sentry wards; `None` when both are null.
     pub wards: Option<i64>,
@@ -136,7 +135,6 @@ pub struct DistinctMatch {
     /// Parsed games only; `None` when unknown.
     pub first_blood: Option<bool>,
     pub roshans: Option<i64>,
-    pub towers: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -609,8 +609,7 @@ impl WrappedLiveRepository {
         let mut statement = connection.prepare(
             "SELECT mp.match_id, mp.discord_id, mp.side, mp.won, m.match_date,
                     m.duration_seconds, mp.hero_id, mp.kills, mp.deaths, mp.assists,
-                    mp.last_hits, mp.gpm, mp.hero_damage, mp.tower_damage,
-                    mp.hero_healing,
+                    mp.last_hits, mp.gpm, mp.hero_damage, mp.hero_healing,
                     CASE WHEN mp.obs_placed IS NULL AND mp.sen_placed IS NULL THEN NULL
                          ELSE COALESCE(mp.obs_placed, 0) + COALESCE(mp.sen_placed, 0) END,
                     mp.camps_stacked, mp.rune_pickups, mp.stuns,
@@ -618,7 +617,7 @@ impl WrappedLiveRepository {
                     wf.actions_per_min, wf.rapier_count, wf.buybacks, wf.item_counts,
                     wf.comeback, wf.throw,
                     rh.expected_team_win_prob, rh.rating - rh.rating_before,
-                    p.timezone, mp.firstblood_claimed, mp.roshans_killed, mp.towers_killed
+                    p.timezone, mp.firstblood_claimed, mp.roshans_killed
                FROM match_participants AS mp
                JOIN matches AS m ON m.match_id = mp.match_id
                JOIN players AS p ON p.discord_id = mp.discord_id AND p.guild_id = ?1
@@ -642,7 +641,7 @@ impl WrappedLiveRepository {
         while let Some(row) = rows.next()? {
             let discord_id: i64 = row.get(1)?;
             let match_date: Option<String> = row.get(4)?;
-            let item_counts: Option<String> = row.get(25)?;
+            let item_counts: Option<String> = row.get(24)?;
             matches.push(DistinctMatch {
                 match_id: row.get(0)?,
                 discord_id,
@@ -657,30 +656,28 @@ impl WrappedLiveRepository {
                 last_hits: row.get(10)?,
                 gpm: row.get(11)?,
                 hero_damage: row.get(12)?,
-                tower_damage: row.get(13)?,
-                hero_healing: row.get(14)?,
-                wards: row.get(15)?,
-                camps_stacked: row.get(16)?,
-                rune_pickups: row.get(17)?,
-                stuns: row.get(18)?,
-                enriched: row.get(19)?,
-                courier_kills: row.get(20)?,
-                pings: row.get(21)?,
-                actions_per_min: row.get(22)?,
-                rapiers: row.get(23)?,
-                buybacks: row.get(24)?,
+                hero_healing: row.get(13)?,
+                wards: row.get(14)?,
+                camps_stacked: row.get(15)?,
+                rune_pickups: row.get(16)?,
+                stuns: row.get(17)?,
+                enriched: row.get(18)?,
+                courier_kills: row.get(19)?,
+                pings: row.get(20)?,
+                actions_per_min: row.get(21)?,
+                rapiers: row.get(22)?,
+                buybacks: row.get(23)?,
                 items: item_counts.as_deref().and_then(parse_item_counts),
-                comeback: row.get(26)?,
-                throw: row.get(27)?,
-                expected_win: row.get(28)?,
-                rating_delta: row.get(29)?,
-                first_blood: row.get::<_, Option<i64>>(31)?.map(|claimed| claimed != 0),
-                roshans: row.get(32)?,
-                towers: row.get(33)?,
+                comeback: row.get(25)?,
+                throw: row.get(26)?,
+                expected_win: row.get(27)?,
+                rating_delta: row.get(28)?,
+                first_blood: row.get::<_, Option<i64>>(30)?.map(|claimed| claimed != 0),
+                roshans: row.get(31)?,
             });
             players
                 .entry(discord_id)
-                .or_insert(row.get::<_, Option<String>>(30)?);
+                .or_insert(row.get::<_, Option<String>>(29)?);
         }
         let players = players
             .into_iter()
@@ -1007,19 +1004,17 @@ mod tests {
     }
 
     #[test]
-    fn guild_year_rows_reads_first_blood_roshans_towers() {
+    fn guild_year_rows_reads_first_blood_and_roshans() {
         let (file, db) = year_fixture();
         add_match(&db, 1, 42, "2026-03-14 21:05:00", &[7, 8, 9]);
         db.execute(
-            "UPDATE match_participants
-                SET firstblood_claimed=1, roshans_killed=2, towers_killed=3
+            "UPDATE match_participants SET firstblood_claimed=1, roshans_killed=2
               WHERE discord_id=8",
             [],
         )
         .unwrap();
         db.execute(
-            "UPDATE match_participants
-                SET firstblood_claimed=0, roshans_killed=0, towers_killed=0
+            "UPDATE match_participants SET firstblood_claimed=0, roshans_killed=0
               WHERE discord_id=9",
             [],
         )
@@ -1028,11 +1023,11 @@ mod tests {
             .guild_year_rows(42, START, END)
             .unwrap();
         let row = |id: i64| matches.iter().find(|m| m.discord_id == id).unwrap();
-        let facts = |id: i64| (row(id).first_blood, row(id).roshans, row(id).towers);
-        assert_eq!(facts(8), (Some(true), Some(2), Some(3)));
+        let facts = |id: i64| (row(id).first_blood, row(id).roshans);
+        assert_eq!(facts(8), (Some(true), Some(2)));
         // A parsed zero is known; an unparsed game stays unknown.
-        assert_eq!(facts(9), (Some(false), Some(0), Some(0)));
-        assert_eq!(facts(7), (None, None, None));
+        assert_eq!(facts(9), (Some(false), Some(0)));
+        assert_eq!(facts(7), (None, None));
     }
 
     #[test]
