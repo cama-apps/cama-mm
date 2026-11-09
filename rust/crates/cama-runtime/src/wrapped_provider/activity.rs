@@ -7,7 +7,9 @@ use cama_app::hero_lookup::{HeroImageSize, HeroLookup};
 use cama_app::pet_assets::{
     FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
 };
-use cama_app::trivia_image_cache::{TriviaImageCache, production_trivia_cache_path};
+use cama_app::trivia_image_cache::{
+    MAX_CACHED_IMAGE_BYTES, TriviaImageCache, production_trivia_cache_path,
+};
 use cama_app::wrapped_media::{WrappedLayout, WrappedRow, WrappedTheme};
 use cama_app::wrapped_story::chapters::{
     CardArt, CardMood, CardStyle, ChapterCard, DigContext, PersonaActivity, PersonaSignal,
@@ -104,8 +106,7 @@ impl ArtSources {
             .ok()?
             .path_for_url(&url);
         let bytes = std::fs::read(path).ok()?;
-        // Renders are about 1 MB; anything over 4 MiB is not one.
-        (bytes.len() <= 4 * 1024 * 1024).then_some(bytes)
+        (bytes.len() <= MAX_CACHED_IMAGE_BYTES).then_some(bytes)
     }
 
     fn boss_scene(&self, boss_id: &str, scene: &str) -> Option<Vec<u8>> {

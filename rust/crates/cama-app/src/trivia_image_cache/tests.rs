@@ -29,20 +29,31 @@ fn shared_steam_image_root_preserves_local_default_for_empty_configuration() {
 /// signature followed by an `IEND` chunk.
 const PNG_FIXTURE: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\0IEND\xaeB`\x82";
 
-fn one_shot_image_server(body: &'static [u8]) -> (String, thread::JoinHandle<()>) {
+fn one_shot_image_server(body: &[u8]) -> (String, thread::JoinHandle<()>) {
+    one_shot_server(body, true)
+}
+
+/// Serves `body` once. Without a `Content-Length` the body runs until the
+/// connection closes. A client may hang up early on a body it refuses.
+fn one_shot_server(body: &[u8], content_length: bool) -> (String, thread::JoinHandle<()>) {
+    let body = body.to_vec();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind image server");
     let address = listener.local_addr().expect("image server address");
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept image request");
         let mut request = [0_u8; 4_096];
         let _ = stream.read(&mut request).expect("read image request");
+        let length = if content_length {
+            format!("Content-Length: {}\r\n", body.len())
+        } else {
+            String::new()
+        };
         write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n{length}Connection: close\r\n\r\n"
         )
         .expect("write image response headers");
-        stream.write_all(body).expect("write image response body");
+        let _ = stream.write_all(&body);
     });
     (format!("http://{address}"), handle)
 }
@@ -254,4 +265,31 @@ fn warm_urls_caches_each_url_once() {
     // The one-shot server is gone; a second warm must not need it.
     let second = cache.warm_urls(urls).expect("second warm");
     assert_eq!((second.newly_cached, second.total_urls), (0, 1));
+}
+
+#[test]
+fn images_over_the_reader_limit_are_never_cached() {
+    // Complete PNG framing around more bytes than any reader accepts.
+    let mut oversized = PNG_FIXTURE[..8].to_vec();
+    oversized.resize(MAX_CACHED_IMAGE_BYTES + 1, 0);
+    oversized.extend_from_slice(&PNG_FIXTURE[8..]);
+    for content_length in [true, false] {
+        let root = tempdir().expect("cache directory");
+        let cache = TriviaImageCache::new(root.path()).expect("cache");
+        let (server, handle) = one_shot_server(&oversized, content_length);
+        let url = format!("{server}/apps/dota_react/heroes/renders/huge.png");
+
+        let error = cache
+            .get_or_download(&url)
+            .expect_err("an oversized image must not be served");
+        handle.join().expect("image server");
+
+        assert!(
+            matches!(error, TriviaImageCacheError::TooLarge { .. }),
+            "{error:?}"
+        );
+        let path = cache.path_for_url(&url);
+        assert!(!path.exists(), "content length sent: {content_length}");
+        assert!(!path.with_extension("png.partial").exists());
+    }
 }

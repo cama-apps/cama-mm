@@ -12,6 +12,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -45,6 +46,10 @@ pub fn production_trivia_cache_path() -> PathBuf {
     production_steam_image_cache_root().join("trivia")
 }
 
+/// The largest image the cache stores, and the largest cached file a reader
+/// accepts. A hero render is about 1 MB.
+pub const MAX_CACHED_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedTriviaImage {
     pub filename: String,
@@ -71,6 +76,14 @@ pub enum TriviaImageCacheError {
     },
     #[error("trivia image URL {url:?} did not return a complete PNG or JPEG")]
     InvalidImage { url: String },
+    #[error("trivia image URL {url:?} body could not be read: {source}")]
+    Read {
+        url: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("trivia image URL {url:?} returned more than {limit} bytes")]
+    TooLarge { url: String, limit: usize },
     #[error("trivia image cache I/O failed at {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -211,15 +224,7 @@ impl TriviaImageCache {
         if let Some(bytes) = read_cached_image(path) {
             return Ok(bytes);
         }
-        let bytes = client
-            .get(url)
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .and_then(reqwest::blocking::Response::bytes)
-            .map_err(|source| TriviaImageCacheError::Download {
-                url: url.to_owned(),
-                source,
-            })?;
+        let bytes = download_capped(client, url)?;
         if !is_complete_image(&bytes) {
             return Err(TriviaImageCacheError::InvalidImage {
                 url: url.to_owned(),
@@ -245,6 +250,41 @@ impl TriviaImageCache {
         }
         Ok(bytes.to_vec())
     }
+}
+
+/// The body at `url`, refused once it passes `MAX_CACHED_IMAGE_BYTES`, so
+/// the cache never stores a file its readers would drop.
+fn download_capped(client: &Client, url: &str) -> Result<Vec<u8>, TriviaImageCacheError> {
+    let too_large = || TriviaImageCacheError::TooLarge {
+        url: url.to_owned(),
+        limit: MAX_CACHED_IMAGE_BYTES,
+    };
+    let response = client
+        .get(url)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|source| TriviaImageCacheError::Download {
+            url: url.to_owned(),
+            source,
+        })?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_CACHED_IMAGE_BYTES as u64)
+    {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_CACHED_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| TriviaImageCacheError::Read {
+            url: url.to_owned(),
+            source,
+        })?;
+    if bytes.len() > MAX_CACHED_IMAGE_BYTES {
+        return Err(too_large());
+    }
+    Ok(bytes)
 }
 
 /// The cached bytes at `path`, or `None` when the file is missing,
