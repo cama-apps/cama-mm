@@ -463,6 +463,20 @@ impl DotaHostWorker {
             if state.recorded_match_id.is_none() && record.valve_match_id.is_none() {
                 state.create_requested_at = None;
                 state.launch_requested_at = None;
+                // A prelaunch lobby that vanished would otherwise be reviewed
+                // again at once. If it still exists, ownership re-adopts it.
+                if state.allocation_observed_at.is_none()
+                    && state.server_id.is_none()
+                    && !state.betting_closed
+                    && state.lobby_recreation.is_none()
+                {
+                    record.lobby_id = None;
+                }
+            }
+            // Give failed-launch cleanup a fresh window; its timeout and
+            // destroy budget otherwise still count from the first attempt.
+            if let Some(recreation) = &mut state.lobby_recreation {
+                recreation.restart(now);
             }
             self.save(&mut record, &state, now).await?;
         } else if record.phase == Phase::NeedsReview

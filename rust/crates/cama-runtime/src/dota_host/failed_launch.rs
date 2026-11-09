@@ -15,6 +15,16 @@ pub(super) struct LobbyRecreation {
     last_destroy_at: Option<i64>,
 }
 
+impl LobbyRecreation {
+    /// An operator resume retries cleanup of the same retired lobby; its
+    /// identity and the consumed replacement budget are kept.
+    pub(super) fn restart(&mut self, now: i64) {
+        self.requested_at = now;
+        self.destroy_attempts = 0;
+        self.last_destroy_at = None;
+    }
+}
+
 pub(super) fn returned_to_lobby(lobby: &HostLobby) -> bool {
     lobby.stage == LobbyStage::Gathering
         && lobby.server_id.is_none()

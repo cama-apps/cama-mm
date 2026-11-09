@@ -595,3 +595,35 @@ async fn conflicting_match_ids_between_polls_prevent_recreation() {
             .any(|call| call == "destroy")
     );
 }
+
+#[tokio::test]
+async fn resume_restarts_timed_out_failed_launch_cleanup() {
+    let f = loading_match().await;
+    return_to_lobby(&f);
+    f.worker.tick(&f.port, 155).await.unwrap();
+    *f.port.destroy_behavior.lock().unwrap() = "ignore";
+    for now in [160, 175, 200, 245, 300] {
+        restarted(&f).tick(&f.port, now).await.unwrap();
+    }
+    assert!(
+        f.session()
+            .last_error
+            .unwrap_or_default()
+            .contains("cleanup timed out")
+    );
+
+    // The GC now honours destroys; resume must retry instead of re-reviewing.
+    *f.port.destroy_behavior.lock().unwrap() = "normal";
+    guild_operator_command(f.worker.path.clone(), "resume", 1, Some(f.pending))
+        .await
+        .unwrap();
+    restarted(&f).tick(&f.port, 400).await.unwrap();
+    assert_ne!(f.session().phase, Phase::NeedsReview);
+    restarted(&f).tick(&f.port, 405).await.unwrap(); // cleanup confirmed
+    restarted(&f).tick(&f.port, 410).await.unwrap(); // fresh lobby created
+    let calls = f.port.calls.lock().unwrap().clone();
+    assert_eq!(calls.iter().filter(|c| *c == "destroy").count(), 4);
+    assert_eq!(calls.iter().filter(|c| *c == "create").count(), 2);
+    assert!(f.state().lobby_recreation.is_none());
+    assert_eq!(f.state().failed_launches.len(), 1);
+}

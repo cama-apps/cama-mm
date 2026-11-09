@@ -396,3 +396,59 @@ async fn cleanup_rechecks_lobby_that_changed_while_refreshing() {
     f.worker.tick(&f.port, 210).await.unwrap();
     assert_eq!(f.session().phase, Phase::Recorded);
 }
+
+#[tokio::test]
+async fn resume_recreates_a_prelaunch_lobby_that_disappeared() {
+    let f = Fixture::new(false);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.worker.tick(&f.port, 101).await.unwrap();
+    assert!(f.session().lobby_id.is_some());
+    assert!(f.state().allocation_observed_at.is_none());
+    // The GC drops the lobby before launch (e.g. the leader disconnected).
+    *f.port.lobby.lock().unwrap() = None;
+    f.update_state(|_, state| state.launch_requested_at = None);
+    f.worker.tick(&f.port, 102).await.unwrap();
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+
+    guild_operator_command(f.worker.path.clone(), "resume", 1, Some(f.pending))
+        .await
+        .unwrap();
+    f.worker.tick(&f.port, 103).await.unwrap();
+    assert_ne!(f.session().phase, Phase::NeedsReview);
+    assert_eq!(
+        f.port
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| *c == "create")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn resume_keeps_the_lobby_identity_once_allocation_was_observed() {
+    let f = Fixture::new(false);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.worker.tick(&f.port, 101).await.unwrap();
+    *f.port.lobby.lock().unwrap() = None;
+    f.update_state(|record, state| {
+        record.phase = Phase::NeedsReview;
+        state.allocation_observed_at = Some(101);
+    });
+    guild_operator_command(f.worker.path.clone(), "resume", 1, Some(f.pending))
+        .await
+        .unwrap();
+    f.worker.tick(&f.port, 103).await.unwrap();
+    assert!(f.session().lobby_id.is_some());
+    assert!(
+        !f.port
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(1)
+            .any(|c| c == "create")
+    );
+}
