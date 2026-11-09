@@ -23,6 +23,7 @@ use cama_db::{
     core_repositories::MatchRepository,
     dota_session_repository::{
         DotaSessionClaim, DotaSessionPhase as Phase, DotaSessionRecord, DotaSessionRepository,
+        DotaSessionRepositoryError,
     },
     guild_config_repository::GuildConfigRepository,
     match_runtime::{PendingMatchRecord, PendingMatchRepository, PendingMatchRepositoryError},
@@ -65,6 +66,10 @@ const PUBLIC_LOBBY_VISIBILITY: i32 = 0;
 // newer than the launch timeout. Keep the observation window strictly shorter.
 const GC_OBSERVATION_MAX_AGE: Duration = Duration::from_secs(45);
 const LAUNCH_CONFIRMATION_TIMEOUT_SECONDS: i64 = 90;
+/// An operator command saved the session while a tick held the older
+/// revision. Nothing was written; the next tick re-reads and continues.
+const STALE_SESSION_SAVE: &str =
+    "Dota session changed during this tick; retrying with the newer revision";
 
 fn legacy_lobby_visibility() -> i32 {
     2
@@ -1675,7 +1680,12 @@ impl DotaHostWorker {
         let update = record.clone();
         *record = blocking(move || {
             repo.update(&update, update.revision, now)
-                .map_err(|e| e.to_string())
+                .map_err(|error| match error {
+                    DotaSessionRepositoryError::StaleRevision { .. } => {
+                        STALE_SESSION_SAVE.to_owned()
+                    }
+                    error => error.to_string(),
+                })
         })
         .await?;
         Ok(())
@@ -1921,6 +1931,21 @@ impl DotaHostWorker {
         Ok(())
     }
 
+    async fn run_once(&self, port: &dyn DotaHostPort, now: i64) -> Result<(), String> {
+        match self.tick(port, now).await {
+            // A concurrent operator command is not a transport failure;
+            // reconnecting would also discard in-memory GC launch history.
+            Err(error) if error == STALE_SESSION_SAVE => {
+                tracing::debug!("{STALE_SESSION_SAVE}");
+            }
+            result => result?,
+        }
+        // Idle and held sessions can return before reading Steam. A closed
+        // transport must restart the worker even without a new match
+        // triggering an external command.
+        port.snapshot().await.map(|_| ())
+    }
+
     async fn run_connected(
         &self,
         port: &dyn DotaHostPort,
@@ -1929,13 +1954,7 @@ impl DotaHostWorker {
         loop {
             tokio::select! {
                 _ = context.cancelled() => return Ok(()),
-                result = async {
-                    self.tick(port, chrono::Utc::now().timestamp()).await?;
-                    // Idle and held sessions can return before reading Steam.
-                    // A closed transport must restart the worker even without
-                    // a new match triggering an external command.
-                    port.snapshot().await.map(|_| ())
-                } => result?,
+                result = self.run_once(port, chrono::Utc::now().timestamp()) => result?,
             }
             if !context.sleep(Duration::from_secs(5)).await {
                 return Ok(());

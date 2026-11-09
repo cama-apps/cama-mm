@@ -1896,6 +1896,23 @@ async fn manual_handoff_during_coordinator_preflight_prevents_creation() {
 }
 
 #[tokio::test]
+async fn concurrent_operator_command_retries_without_restarting_the_transport() {
+    let f = Fixture::new(false);
+    f.port.manual_during_prepare.store(true, Ordering::SeqCst);
+    // The tick itself stops at its stale save, before creating anything ...
+    f.worker.run_once(&f.port, 100).await.unwrap();
+    assert!(f.port.calls.lock().unwrap().is_empty());
+    assert_eq!(f.state().create_requested_at, None);
+    // ... and the next iteration honours the newer revision.
+    f.worker.run_once(&f.port, 105).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Cancelled);
+
+    // Real failures still restart the worker.
+    *f.port.snapshot_error.lock().unwrap() = Some("GC disconnected".into());
+    assert!(f.worker.run_once(&f.port, 110).await.is_err());
+}
+
+#[tokio::test]
 async fn real_lobby_preview_preflight_failure_does_not_save_creation_intent() {
     let f = Fixture::preview(DotaHostTestMode::RealLobby, true);
     *f.port.prepare_create_error.lock().unwrap() = Some("GC session unavailable".into());
