@@ -50,6 +50,36 @@ async fn replaced_host_never_records_or_launches_old_game_even_after_pending_cle
 }
 
 #[tokio::test]
+async fn replaced_failed_launch_that_returned_with_its_match_id_is_released() {
+    for durable_evidence in [false, true] {
+        let f = replaced().await;
+        {
+            // Allocated, failed, and returned to the lobby keeping match 888.
+            let mut lobby = f.port.lobby.lock().unwrap();
+            let lobby = lobby.as_mut().unwrap();
+            lobby.stage = LobbyStage::Gathering;
+            lobby.game_state = Some(0);
+            lobby.server_id = None;
+            lobby.launch_history.allocation_observed = !durable_evidence;
+        }
+        if durable_evidence {
+            // Restarted worker: in-memory GC history is gone, the saved one is not.
+            f.update_state(|_, state| state.allocation_observed_at = Some(115));
+        }
+
+        f.worker.tick(&f.port, 130).await.unwrap();
+        assert_eq!(
+            *f.port.calls.lock().unwrap(),
+            vec!["destroy"],
+            "durable: {durable_evidence}"
+        );
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+        f.worker.tick(&f.port, 140).await.unwrap();
+        assert_eq!(f.session().phase, Phase::Cancelled);
+    }
+}
+
+#[tokio::test]
 async fn replaced_lobby_cleanup_requires_fresh_owned_matching_old_game() {
     for changed in ["owner", "lobby", "match", "stale"] {
         let f = replaced().await;

@@ -1624,7 +1624,14 @@ impl DotaHostWorker {
             {
                 return Ok(());
             }
+            // A failed launch can return to the lobby still carrying the old
+            // match ID (checked equal above). Once it has demonstrably left
+            // allocation and come back, nothing else will ever release it.
+            let failed_launch_returned = failed_launch::returned_to_lobby(&lobby)
+                && (lobby.launch_history.allocation_observed
+                    || state.allocation_observed_at.is_some());
             if lobby.stage == LobbyStage::Postgame
+                || failed_launch_returned
                 || (lobby.stage == LobbyStage::Gathering
                     && lobby.match_id.is_none()
                     && lobby.server_id.is_none())
