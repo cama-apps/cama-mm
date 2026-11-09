@@ -30,12 +30,16 @@ use steam_vent_proto_dota2::dota_gcmessages_client_match_management::{
     CMsgPracticeLobbySetTeamSlot,
 };
 use steam_vent_proto_dota2::dota_gcmessages_common::CMsgDOTAMatch;
-use steam_vent_proto_dota2::dota_gcmessages_common_lobby::{CSODOTALobby, CSODOTALobbyMember};
+use steam_vent_proto_dota2::dota_gcmessages_common_lobby::{
+    CSODOTALobby, CSODOTALobbyMember, csodotalobby,
+};
 use steam_vent_proto_dota2::dota_gcmessages_msgid::EDOTAGCMsg;
 use steam_vent_proto_dota2::dota_gcmessages_server::{
     CMsgDOTALiveScoreboardUpdate, cmsg_dotalive_scoreboard_update,
 };
-use steam_vent_proto_dota2::dota_shared_enums::{DOTA_CM_PICK, DOTA_GC_TEAM, DOTALobbyVisibility};
+use steam_vent_proto_dota2::dota_shared_enums::{
+    DOTA_CM_PICK, DOTA_GC_TEAM, DOTALobbyVisibility, EMatchOutcome,
+};
 use steam_vent_proto_dota2::gcsdk_gcmessages::{
     CMsgClientHello, CMsgClientWelcome, CMsgConnectionStatus, CMsgSOCacheSubscribed,
     CMsgSOCacheSubscribedUpToDate, CMsgSOCacheSubscriptionRefresh, CMsgSOCacheUnsubscribed,
@@ -1828,7 +1832,7 @@ fn map_lobby(lobby: &CSODOTALobby) -> LobbySnapshot {
         league_id: nonzero(lobby.leagueid()),
         server_region: lobby.server_region(),
         game_mode: lobby.game_mode(),
-        cm_pick: lobby.cm_pick().value(),
+        cm_pick: wire_enum(lobby.cm_pick, DOTA_CM_PICK::DOTA_CM_RANDOM),
         allow_cheats: lobby.allow_cheats(),
         fill_with_bots: lobby.fill_with_bots(),
         allow_spectating: lobby.allow_spectating(),
@@ -1838,10 +1842,16 @@ fn map_lobby(lobby: &CSODOTALobby) -> LobbySnapshot {
             .dota_tv_delay
             .as_ref()
             .map_or(DOTA_TV_DELAY_10_SECONDS, |value| value.value()),
-        visibility: lobby.visibility().value(),
-        state: LobbyState::from_raw(lobby.state().value()),
+        visibility: wire_enum(
+            lobby.visibility,
+            DOTALobbyVisibility::DOTALobbyVisibility_Public,
+        ),
+        state: LobbyState::from_raw(wire_enum(lobby.state, csodotalobby::State::UI)),
         game_state: lobby.game_state.as_ref().map(|value| value.value()),
-        outcome: LobbyOutcome::from_raw(lobby.match_outcome().value()),
+        outcome: LobbyOutcome::from_raw(wire_enum(
+            lobby.match_outcome,
+            EMatchOutcome::k_EMatchOutcome_Unknown,
+        )),
         game_start_time: nonzero(lobby.game_start_time()),
         match_duration: nonzero(lobby.match_duration()),
         connect: (!lobby.connect().is_empty()).then(|| lobby.connect().to_owned()),
@@ -1855,14 +1865,20 @@ fn map_lobby_member(member: &CSODOTALobbyMember) -> LobbyMember {
         steam_id: member.id(),
         account_id: member.id() as u32,
         hero_id: member.hero_id(),
-        team: member.team().value().into(),
+        team: wire_enum(member.team, DOTA_GC_TEAM::DOTA_GC_TEAM_GOOD_GUYS).into(),
         name: member.name().to_owned(),
         slot: member.slot(),
         party_id: nonzero(member.party_id()),
-        coach_team: member
-            .has_coach_team()
-            .then(|| member.coach_team().value().into()),
+        coach_team: member.coach_team.map(|team| team.value().into()),
     }
+}
+
+/// Read an enum field's raw wire value. Generated getters collapse a value
+/// newer than the bundled schema to the field's default (for example, an
+/// unknown team to Radiant); keep it so callers see an unknown value instead.
+/// An absent field takes the schema's declared default, as Dota itself does.
+fn wire_enum<E: Enum>(value: Option<EnumOrUnknown<E>>, default: E) -> i32 {
+    value.map_or(default.value(), |value| value.value())
 }
 
 fn nonzero<T>(value: T) -> Option<T>
@@ -2254,7 +2270,6 @@ impl Default for DestroyLobbyWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use steam_vent_proto_dota2::dota_gcmessages_common_lobby::csodotalobby;
     use steam_vent_proto_dota2::gcsdk_gcmessages::CMsgSOIDOwner;
 
     const TEST_STEAM_ID: u64 = 76561197960287930;
@@ -3252,6 +3267,36 @@ mod tests {
         assert_eq!(snapshot.cm_pick, 2);
         assert_eq!(snapshot.members[0].team, Team::Radiant);
         assert_eq!(snapshot.members[0].account_id, 22_202);
+        assert_eq!(snapshot.members[0].coach_team, Some(Team::NoTeam));
+
+        // Values newer than the bundled schema must not collapse to the
+        // generated getters' defaults (Radiant, UI, random pick, public).
+        let mut newer = lobby.clone();
+        newer.state = Some(EnumOrUnknown::from_i32(40));
+        newer.cm_pick = Some(EnumOrUnknown::from_i32(41));
+        newer.visibility = Some(EnumOrUnknown::from_i32(42));
+        newer.match_outcome = Some(EnumOrUnknown::from_i32(43));
+        newer.all_members[0].team = Some(EnumOrUnknown::from_i32(44));
+        newer.all_members[0].coach_team = Some(EnumOrUnknown::from_i32(45));
+        let snapshot = map_lobby(&newer);
+        assert_eq!(snapshot.state, LobbyState::Unknown(40));
+        assert_eq!(snapshot.cm_pick, 41);
+        assert_eq!(snapshot.visibility, 42);
+        assert_eq!(snapshot.outcome, LobbyOutcome::UnknownValue(43));
+        assert_eq!(snapshot.members[0].team, Team::Unknown(44));
+        assert_eq!(snapshot.members[0].coach_team, Some(Team::Unknown(45)));
+
+        // Absent fields take the schema's declared defaults; no coach is None.
+        let mut absent = lobby;
+        absent.state = None;
+        absent.cm_pick = None;
+        absent.visibility = None;
+        absent.all_members[0].coach_team = None;
+        let snapshot = map_lobby(&absent);
+        assert_eq!(snapshot.state, LobbyState::Ui);
+        assert_eq!(snapshot.cm_pick, 0);
+        assert_eq!(snapshot.visibility, 0);
+        assert_eq!(snapshot.members[0].coach_team, None);
     }
 
     #[test]
