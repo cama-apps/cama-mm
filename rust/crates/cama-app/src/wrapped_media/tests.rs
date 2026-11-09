@@ -398,6 +398,70 @@ fn two_beat_with_full_render_stays_under_cap() {
         "{} bytes",
         media.bytes.len()
     );
+    // A plain punchline keeps the render beside its type, still animated
+    // and still ending on exactly the finished card.
+    let mut plain = two_beat(WrappedPunch::Plain);
+    plain.art_png = Some(full_render());
+    let media = render_wrapped_media(&plain, true).unwrap();
+    assert_eq!(media.filename, "wrapped_slide.gif");
+    assert!(media.bytes.len() <= MAX_ANIMATION_BYTES);
+    let (frames, _) = play(&media.bytes);
+    assert!(*frames.last().unwrap() == still_through_palette(&media.bytes, &plain));
+}
+
+/// A 256x144 opaque portrait, the art a card wears before a render is cached.
+fn portrait() -> Vec<u8> {
+    encode_png(&Canvas::new(256, 144, Rgba::rgb(160, 40, 60)))
+}
+
+#[test]
+fn plain_punchline_keeps_the_hero_clear_of_its_type() {
+    for punch in [
+        "Stop picking it.",
+        "The fountain knew you by name.",
+        "Black King Bar didn't save you",
+    ] {
+        for (name, art) in [("render", full_render()), ("portrait", portrait())] {
+            let mut slide = two_beat(WrappedPunch::Plain);
+            slide.beat.as_mut().unwrap().punch = punch.to_owned();
+            slide.art_png = Some(art);
+            let stage = stage::Stage::new(&slide);
+            let placed = stage
+                .punch_art
+                .as_ref()
+                .unwrap_or_else(|| panic!("no room for the {name} beside {punch:?}"));
+            // The finished still carries the hero: the middle of its visible
+            // part lands on the card exactly.
+            let still = decode_png(&render_wrapped_slide(&slide).unwrap()).unwrap();
+            let (width, height) = (placed.art.width, placed.art.height);
+            let visible = height.min((stage::HEIGHT - placed.top) as usize);
+            let (column, row) = (width / 2, visible / 2);
+            let solid = &placed.art.pixels[(row * width + column) * 4..][..4];
+            assert_eq!(solid[3], 255, "{name}: the middle of the hero is solid");
+            let (x, y) = (placed.left as usize + column, placed.top as usize + row);
+            assert_eq!(pixel(&still, x, y)[..3], solid[..3], "{name} on the still");
+            // Not one visible pixel of the hero reaches the type, the credit
+            // chip or the footer name.
+            let taken = beats::punch_art_clearance(&slide).unwrap();
+            for (index, pixel) in placed.art.pixels.chunks_exact(4).enumerate() {
+                let (x, y) = (
+                    placed.left + (index % width) as i32,
+                    placed.top + (index / width) as i32,
+                );
+                if pixel[3] < 32 || y >= stage::HEIGHT {
+                    continue;
+                }
+                for (left, top, right, bottom) in &taken {
+                    let inside = x >= *left && x < *right && y >= *top && y < *bottom;
+                    assert!(!inside, "{punch:?}: hero at ({x}, {y}) covers the type");
+                }
+            }
+        }
+    }
+    // Meme punchlines keep their graphics to themselves.
+    let mut graph = two_beat(WrappedPunch::GoldGraph);
+    graph.art_png = Some(full_render());
+    assert!(stage::Stage::new(&graph).punch_art.is_none());
 }
 
 #[test]
@@ -954,6 +1018,16 @@ fn neighboring_cards_never_share_a_background() {
     deck.push(WrappedSlideData::new("story_games", "Your Year"));
     deck.push(two_beat(WrappedPunch::Plain));
     deck.last_mut().unwrap().theme = WrappedTheme::BeatRoast;
+    // A late-night clock and a gold graph end near-black, so the plain
+    // popoff between them must not end on ink.
+    for (punch, theme) in [
+        (WrappedPunch::Clock, WrappedTheme::BeatRoastRed),
+        (WrappedPunch::Plain, WrappedTheme::BeatPopoffLime),
+        (WrappedPunch::GoldGraph, WrappedTheme::BeatRoastViolet),
+    ] {
+        deck.push(two_beat(punch));
+        deck.last_mut().unwrap().theme = theme;
+    }
     let kinds = deck
         .iter()
         .map(|slide| slide.theme.is_roast_beat())
@@ -964,8 +1038,10 @@ fn neighboring_cards_never_share_a_background() {
     for pair in deck.windows(2) {
         let (before, after) = (slide_backgrounds(&pair[0]), slide_backgrounds(&pair[1]));
         assert!(
-            before.iter().all(|color| !after.contains(color)),
-            "{:?} then {:?} share a background",
+            before
+                .iter()
+                .all(|color| after.iter().all(|other| !backgrounds_alike(*color, *other))),
+            "{:?} then {:?} look alike: {before:?} {after:?}",
             pair[0].theme,
             pair[1].theme
         );
@@ -992,6 +1068,28 @@ fn neighboring_cards_never_share_a_background() {
         again.iter().map(|slide| slide.theme).collect::<Vec<_>>(),
         deck.iter().map(|slide| slide.theme).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn near_black_backgrounds_count_as_alike() {
+    let black = [0, 0, 0];
+    let clock = beats::look(WrappedTheme::BeatRoast, WrappedPunch::Clock).bg;
+    let graph = beats::look(WrappedTheme::BeatRoast, WrappedPunch::GoldGraph).bg;
+    let ink = beats::look(WrappedTheme::BeatRoast, WrappedPunch::Plain).bg;
+    // Black, a near-black clock face, a navy graph and ink all read as black.
+    for pair in [
+        (black, rgb(clock)),
+        (rgb(clock), rgb(graph)),
+        (rgb(graph), rgb(ink)),
+    ] {
+        assert!(backgrounds_alike(pair.0, pair.1), "{pair:?}");
+    }
+    // Small RGB steps between brighter colors look alike too; real contrast
+    // does not.
+    assert!(backgrounds_alike([200, 255, 60], [198, 244, 50]));
+    assert!(!backgrounds_alike([255, 90, 54], [45, 70, 185]));
+    assert!(!backgrounds_alike(black, [92, 33, 240]));
+    assert!(!backgrounds_alike(rgb(graph), [62, 34, 18]));
 }
 
 #[test]

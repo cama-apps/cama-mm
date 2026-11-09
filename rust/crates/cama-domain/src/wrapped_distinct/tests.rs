@@ -475,3 +475,320 @@ fn item_stories_name_the_item() {
     assert_eq!(items[0].item.as_deref(), Some("magic_wand"));
     assert_eq!(items[0].direction, Direction::Roast);
 }
+
+/// One of player 7's games, finished on `day` of March 2026 at 20:00 UTC.
+fn mine(id: i64, day: u32, hero: i64, won: Option<bool>) -> DistinctMatch {
+    DistinctMatch {
+        match_id: id,
+        discord_id: 7,
+        side: Some("radiant".to_owned()),
+        won,
+        hero_id: Some(hero),
+        finished_at: Some(
+            Utc.with_ymd_and_hms(2026, 3, day, 20, 0, 0)
+                .unwrap()
+                .timestamp(),
+        ),
+        ..DistinctMatch::default()
+    }
+}
+
+fn record<'a>(records: &'a [PersonalRecord], key: &str) -> Option<&'a PersonalRecord> {
+    records.iter().find(|record| record.key == key)
+}
+
+type RecordLine = (
+    i64,
+    i64,
+    Option<bool>,
+    Option<(i64, i64, i64, i64, i64)>,
+    i64,
+    Option<bool>,
+    Option<i64>,
+);
+
+/// Five games of player 7, one of them a 27-kill Invoker loss that finished
+/// at 03:30 UTC on March 4 (still March 3 in New York), plus a stranger's
+/// bigger numbers that must never count.
+fn record_rows() -> (Vec<DistinctMatch>, i64) {
+    let late = Utc
+        .with_ymd_and_hms(2026, 3, 4, 3, 30, 0)
+        .unwrap()
+        .timestamp();
+    // Id, hero, result, (kills, deaths, assists, gpm, damage), duration,
+    // first blood, Roshans.
+    let lines: [RecordLine; 5] = [
+        (
+            1,
+            1,
+            Some(true),
+            Some((6, 4, 10, 450, 12_000)),
+            2_100,
+            Some(false),
+            Some(0),
+        ),
+        (
+            2,
+            74,
+            Some(false),
+            Some((27, 5, 8, 610, 41_500)),
+            2_700,
+            Some(true),
+            Some(1),
+        ),
+        (
+            3,
+            1,
+            Some(false),
+            Some((5, 18, 12, 380, 14_000)),
+            4_692,
+            None,
+            None,
+        ),
+        (
+            4,
+            1,
+            Some(true),
+            Some((8, 3, 9, 500, 15_000)),
+            1_065,
+            Some(true),
+            Some(2),
+        ),
+        (5, 1, Some(true), None, 2_400, None, None),
+    ];
+    let mut rows = Vec::new();
+    for (id, hero, won, combat, duration, first_blood, roshans) in lines {
+        let mut row = mine(id, id as u32, hero, won);
+        if let Some((kills, deaths, assists, gpm, damage)) = combat {
+            row.kills = Some(kills);
+            row.deaths = Some(deaths);
+            row.assists = Some(assists);
+            row.gpm = Some(gpm);
+            row.hero_damage = Some(damage);
+        }
+        row.duration_seconds = Some(duration);
+        row.first_blood = first_blood;
+        row.roshans = roshans;
+        rows.push(row);
+    }
+    rows[1].finished_at = Some(late);
+    let mut stranger = game(9, 8, "dire", true);
+    stranger.kills = Some(40);
+    stranger.deaths = Some(30);
+    stranger.duration_seconds = Some(6_000);
+    rows.push(stranger);
+    (rows, late)
+}
+
+#[test]
+fn records_pick_personal_extremes_with_hero_and_date() {
+    let (rows, late) = record_rows();
+    let records = personal_records(&rows, 7);
+
+    let kills = record(&records, "most_kills").expect("kill record");
+    assert_eq!(
+        (kills.value, kills.display.as_str(), kills.direction),
+        (27, "27 kills", Direction::Popoff)
+    );
+    assert_eq!((kills.hero_id, kills.match_id), (Some(74), 2));
+    assert_eq!((kills.finished_at, kills.won), (Some(late), Some(false)));
+    // The unknown fifth game is left out of the mean, not counted as zero.
+    assert!((kills.score - (27.0 - 11.5) / 11.5).abs() < 1e-9);
+
+    let deaths = record(&records, "most_deaths").expect("death record");
+    assert_eq!(
+        (deaths.display.as_str(), deaths.direction),
+        ("18 deaths", Direction::Roast)
+    );
+    assert_eq!((deaths.hero_id, deaths.match_id), (Some(1), 3));
+    let long = record(&records, "longest_game").expect("longest game");
+    assert_eq!((long.value, long.display.as_str()), (4_692, "78:12"));
+    assert_eq!((long.direction, long.match_id), (Direction::Roast, 3));
+    // The fastest of three known wins, scored below their mean.
+    let fast = record(&records, "fastest_win").expect("fastest win");
+    assert_eq!((fast.display.as_str(), fast.match_id), ("17:45", 4));
+    assert_eq!(fast.won, Some(true));
+    assert!((fast.score - (1_855.0 - 1_065.0) / 1_855.0).abs() < 1e-9);
+    assert_eq!(
+        record(&records, "most_damage").unwrap().display,
+        "41,500 damage"
+    );
+    assert_eq!(record(&records, "best_gpm").unwrap().display, "610 GPM");
+    // Counts score by count per known game and point at the latest game
+    // that counted.
+    let bloods = record(&records, "first_bloods").expect("first bloods");
+    assert_eq!(
+        (bloods.value, bloods.display.as_str()),
+        (2, "2 first bloods")
+    );
+    assert_eq!(bloods.match_id, 4);
+    assert!((bloods.score - 2.0 / 3.0).abs() < 1e-9);
+    assert_eq!(record(&records, "roshans").unwrap().display, "3 Roshans");
+    // No ward was ever recorded, so there is no ward record.
+    assert!(record(&records, "most_wards").is_none());
+    assert!(
+        records
+            .windows(2)
+            .all(|pair| pair[0].score >= pair[1].score)
+    );
+    for key in records.iter().map(|record| record.key) {
+        assert!(RECORD_KEYS.iter().any(|(known, _)| *known == key), "{key}");
+    }
+
+    // The date is the player's own: New York by default.
+    assert_eq!(month_day(late, None).as_deref(), Some("Mar 3"));
+    assert_eq!(
+        month_day(late, Some("Europe/Berlin")).as_deref(),
+        Some("Mar 4")
+    );
+
+    // The two strongest, one roast and one popoff.
+    let keys = |picked: Vec<PersonalRecord>| picked.iter().map(|r| r.key).collect::<Vec<_>>();
+    assert_eq!(
+        keys(select_records(&records, 2)),
+        ["most_deaths", "most_kills"]
+    );
+    let no_deaths = records
+        .iter()
+        .filter(|record| record.key != "most_deaths")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys(select_records(&no_deaths, 2)),
+        ["most_kills", "longest_game"]
+    );
+    let popoffs = records
+        .iter()
+        .filter(|record| record.direction == Direction::Popoff)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys(select_records(&popoffs, 2)),
+        ["most_kills", "most_damage"]
+    );
+}
+
+#[test]
+fn records_need_three_known_games() {
+    let mut rows = Vec::new();
+    for (id, kills, wards, won, first_blood) in [
+        (1, 2, Some(3), Some(true), Some(true)),
+        (2, 19, Some(12), Some(true), Some(true)),
+        (3, 4, None, None, None),
+    ] {
+        let mut row = mine(id, id as u32, 1, won);
+        row.kills = Some(kills);
+        row.deaths = Some(5);
+        row.wards = wards;
+        row.first_blood = first_blood;
+        row.duration_seconds = Some(1_800 + id * 300);
+        rows.push(row);
+    }
+    let records = personal_records(&rows, 7);
+    assert_eq!(record(&records, "most_kills").map(|r| r.value), Some(19));
+    assert!(record(&records, "longest_game").is_some());
+    // Two known values, two known wins, two known first-blood games.
+    for key in ["most_wards", "fastest_win", "first_bloods"] {
+        assert!(record(&records, key).is_none(), "{key}");
+    }
+    // Five deaths every game is the average, not a record.
+    assert!(record(&records, "most_deaths").is_none());
+    // Two games are too few for anything.
+    assert!(personal_records(&rows[..2], 7).is_empty());
+    assert!(personal_records(&rows, 8).is_empty());
+
+    // A worst game of two deaths, or one first blood, is no story.
+    let quiet = (1..=3)
+        .map(|id| {
+            let mut row = mine(id, id as u32, 1, Some(true));
+            row.deaths = Some(i64::from(id == 3) * 2);
+            row.first_blood = Some(id == 2);
+            row
+        })
+        .collect::<Vec<_>>();
+    assert!(personal_records(&quiet, 7).is_empty());
+}
+
+/// `wins` wins, `losses` losses and `unknown` unrecorded results on `hero`.
+fn hero_games(
+    rows: &mut Vec<DistinctMatch>,
+    hero: i64,
+    wins: usize,
+    losses: usize,
+    unknown: usize,
+) {
+    let results = std::iter::repeat_n(Some(true), wins)
+        .chain(std::iter::repeat_n(Some(false), losses))
+        .chain(std::iter::repeat_n(None, unknown));
+    for result in results {
+        let id = rows.len() as i64 + 1;
+        rows.push(mine(id, 1 + (id % 28) as u32, hero, result));
+    }
+}
+
+#[test]
+fn hero_year_best_and_nemesis_thresholds() {
+    let mut rows = Vec::new();
+    hero_games(&mut rows, 1, 3, 2, 0); // 60% in five: the best
+    hero_games(&mut rows, 2, 4, 0, 0); // perfect, but four games
+    hero_games(&mut rows, 3, 11, 9, 0); // exactly 55%, a lower rate
+    hero_games(&mut rows, 4, 2, 4, 0); // 33%: the hero that hates you
+    hero_games(&mut rows, 5, 2, 3, 0); // exactly 40%, a higher rate
+    hero_games(&mut rows, 6, 1, 3, 3); // 25%, but four known results
+    let mut stranger = mine(500, 1, 9, Some(false));
+    stranger.discord_id = 8;
+    rows.extend(std::iter::repeat_n(stranger, 9));
+
+    let line = |hero_id, games, wins| HeroLine {
+        hero_id,
+        games,
+        wins,
+    };
+    let year = hero_year(&rows, 7);
+    assert_eq!(year.best, Some(line(1, 5, 3)));
+    assert_eq!(year.nemesis_hero, Some(line(4, 6, 2)));
+
+    // Both thresholds are inclusive.
+    let mut edges = Vec::new();
+    hero_games(&mut edges, 3, 11, 9, 0);
+    hero_games(&mut edges, 5, 2, 3, 0);
+    let year = hero_year(&edges, 7);
+    assert_eq!(year.best, Some(line(3, 20, 11)));
+    assert_eq!(year.nemesis_hero, Some(line(5, 5, 2)));
+    // Half the games won is not a best hero; 41% is not a nemesis.
+    let mut middling = Vec::new();
+    hero_games(&mut middling, 3, 10, 10, 0);
+    hero_games(&mut middling, 5, 7, 10, 0);
+    let year = hero_year(&middling, 7);
+    assert!(year.best.is_none() && year.nemesis_hero.is_none());
+}
+
+#[test]
+fn side_split_requires_gap_and_sample() {
+    let sides = |radiant: (i64, i64), dire: (i64, i64)| {
+        let mut rows = Vec::new();
+        for (side, (games, wins)) in [("radiant", radiant), ("dire", dire)] {
+            for index in 0..games {
+                let id = rows.len() as i64 + 1;
+                let mut row = mine(id, 1 + (id % 28) as u32, 1, Some(index < wins));
+                row.side = Some(side.to_owned());
+                rows.push(row);
+            }
+        }
+        // Unknown sides and results never count.
+        let mut sideless = mine(900, 2, 1, Some(true));
+        sideless.side = None;
+        rows.push(sideless);
+        rows.push(mine(901, 2, 1, None));
+        hero_year(&rows, 7)
+    };
+    let even_gap = sides((5, 4), (5, 3));
+    assert_eq!((even_gap.radiant, even_gap.dire), ((5, 4), (5, 3)));
+    // 80% against 60%: exactly twenty points.
+    assert_eq!(even_gap.side_split(), Some("Radiant"));
+    assert_eq!(sides((10, 5), (10, 7)).side_split(), Some("Dire"));
+    // Too few games on one side, or too small a gap.
+    assert_eq!(sides((5, 4), (4, 0)).side_split(), None);
+    assert_eq!(sides((10, 7), (10, 6)).side_split(), None);
+    assert_eq!(sides((0, 0), (0, 0)).side_split(), None);
+}

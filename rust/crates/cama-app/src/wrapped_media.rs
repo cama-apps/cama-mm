@@ -391,10 +391,49 @@ fn rgb(color: Rgba) -> [u8; 3] {
     [color.0[0], color.0[1], color.0[2]]
 }
 
+/// Channels at or below this all read as black on a phone screen.
+const NEAR_BLACK: u8 = 48;
+/// Backgrounds closer than this in RGB look like one color side by side.
+const ALIKE_DISTANCE: i32 = 48;
+
+/// Whether two backgrounds read as the same color next to each other: close
+/// in RGB, or both near-black, since black, ink and navy cards look alike.
+#[must_use]
+pub fn backgrounds_alike(a: [u8; 3], b: [u8; 3]) -> bool {
+    let near_black = |color: [u8; 3]| color.iter().all(|channel| *channel <= NEAR_BLACK);
+    let distance = a
+        .iter()
+        .zip(b)
+        .map(|(first, second)| (i32::from(*first) - i32::from(second)).pow(2))
+        .sum::<i32>();
+    distance < ALIKE_DISTANCE.pow(2) || (near_black(a) && near_black(b))
+}
+
+/// Whether any color of `a` is alike to any color of `b`.
+#[must_use]
+pub fn any_backgrounds_alike(a: &[[u8; 3]], b: &[[u8; 3]]) -> bool {
+    a.iter()
+        .any(|first| b.iter().any(|second| backgrounds_alike(*first, *second)))
+}
+
+/// The background colors of a card that no palette change can move: a fixed
+/// card's, and a meme punchline's, which its treatment sets. A plain
+/// two-beat card can take any palette of its kind, so it has none.
+#[must_use]
+pub fn fixed_backgrounds(slide: &WrappedSlideData) -> Vec<[u8; 3]> {
+    let recolorable = slide.layout == WrappedLayout::TwoBeat && slide.theme.beat_family().is_some();
+    match slide.beat.as_ref().filter(|_| recolorable) {
+        Some(beat) if beat.treatment == WrappedPunch::Plain => Vec::new(),
+        Some(beat) => vec![rgb(beats::look(slide.theme, beat.treatment).bg)],
+        None => slide_backgrounds(slide),
+    }
+}
+
 /// Recolors a story's two-beat cards, in order, so that no two neighboring
-/// cards share a background. Each card keeps its kind (roast or popoff) and
-/// takes the next palette of that kind that clashes with neither the card
-/// before it nor a fixed card after it, so long runs also rotate colors.
+/// cards share a background or two that look alike. Each card keeps its kind
+/// (roast or popoff) and takes the next palette of that kind that clashes
+/// with neither the card before it nor a fixed card after it, so long runs
+/// also rotate colors.
 pub fn vary_beat_palettes(slides: &mut [WrappedSlideData]) {
     let mut next_turn = [0_usize; 2];
     for index in 0..slides.len() {
@@ -411,20 +450,25 @@ pub fn vary_beat_palettes(slides: &mut [WrappedSlideData]) {
             .checked_sub(1)
             .map(|previous| slide_backgrounds(&slides[previous]))
             .unwrap_or_default();
-        // A later two-beat card picks its own colors around this one.
+        // A later two-beat card picks its own colors around this one, except
+        // a meme punchline's, which its treatment fixes.
         let after = slides
             .get(index + 1)
-            .filter(|next| next.theme.beat_family().is_none() || next.beat.is_none())
-            .map(slide_backgrounds)
+            .map(fixed_backgrounds)
             .unwrap_or_default();
         let start = next_turn[turn];
-        let pick = (0..family.len())
-            .map(|offset| (start + offset) % family.len())
-            .find(|candidate| {
-                beat_backgrounds(family[*candidate], treatment)
-                    .iter()
-                    .all(|color| !before.contains(color) && !after.contains(color))
-            })
+        let clear_of = |candidate: usize, neighbors: &[&[[u8; 3]]]| {
+            let colors = beat_backgrounds(family[candidate], treatment);
+            neighbors
+                .iter()
+                .all(|taken| !any_backgrounds_alike(&colors, taken))
+        };
+        // When the card after is fixed in a like color, at least keep clear
+        // of the card before.
+        let order = || (0..family.len()).map(|offset| (start + offset) % family.len());
+        let pick = order()
+            .find(|candidate| clear_of(*candidate, &[&before, &after]))
+            .or_else(|| order().find(|candidate| clear_of(*candidate, &[&before])))
             .unwrap_or(start % family.len());
         slides[index].theme = family[pick];
         next_turn[turn] = pick + 1;

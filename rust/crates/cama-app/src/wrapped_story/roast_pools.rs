@@ -1,6 +1,6 @@
 //! Two-beat copy for Wrapped: a setup over the big number, then a punchline
-//! with a small fact line, for distinct stories, people, and side games, plus
-//! the persona title.
+//! with a small fact line, for distinct stories, personal records, hero
+//! stories, people, and side games, plus the persona title.
 //!
 //! Every line is hand-written and roasts play only. Placeholders (`{n}`,
 //! `{hero}`, `{name}`, `{rank}`, `{of}`, `{time}`, `{item}`) are filled from
@@ -9,12 +9,18 @@
 
 use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::wrapped_activity::ServerRank;
-use cama_domain::wrapped_distinct::{Direction, DistinctStory, PairStory, Theme, Tier};
+use cama_domain::wrapped_distinct::{
+    COUNT_RECORDS, Direction, DistinctStory, HeroLine, HeroYear, PairStory, PersonalRecord, Theme,
+    Tier,
+};
 
 #[path = "roast_pools/lines.rs"]
 mod lines;
+#[path = "roast_pools/records.rs"]
+mod records;
 
 use lines::{FALLBACK_PERSONAS, ITEM_POOLS, PEOPLE_POOLS, PERSONAS, SIDE_POOLS, STORY_POOLS};
+use records::{HERO_POOLS, RECORD_POOLS};
 
 /// One setup and its punchline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -371,6 +377,144 @@ pub fn side_game_copy(key: &str, tier: Tier, seed: u64) -> Beat {
     lines[index(seed, mix_text(&[key, tier_key(tier)]), lines.len())]
 }
 
+/// Hero-story kinds: the best hero, the hero that hates you, and a
+/// Radiant/Dire split.
+pub const HERO_STORY_KINDS: [&str; 3] = ["hero_best", "hero_nemesis", "side_split"];
+
+/// Lines for a personal record read `direction`'s way; empty for an
+/// unknown key or the other way.
+#[must_use]
+pub fn record_pool(key: &str, direction: Direction) -> &'static [Beat] {
+    RECORD_POOLS
+        .iter()
+        .find(|(pool, way, _)| *pool == key && *way == direction)
+        .map_or(&[], |(_, _, lines)| *lines)
+}
+
+/// Joins the parts a card knows with `" · "`.
+fn dotted<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> String {
+    parts.into_iter().flatten().collect::<Vec<_>>().join(" · ")
+}
+
+/// The card copy for one personal record: `hero` is the record game's
+/// readable hero name and `date` its day, such as `"Mar 3"`. A count record
+/// spans the year, so it names the latest game's hero but no date or result.
+#[must_use]
+pub fn record_copy(
+    record: &PersonalRecord,
+    hero: Option<&str>,
+    date: Option<&str>,
+    seed: u64,
+) -> StoryCopy {
+    let number = record.display.split(' ').next().unwrap_or_default();
+    let slots = [("n", Some(number)), ("hero", hero)];
+    let salt = mix_text(&["record", record.key]);
+    let (setup, punch) = choose(
+        record_pool(record.key, record.direction),
+        seed,
+        salt,
+        &slots,
+    )
+    .unwrap_or_default();
+    let (label, credit) = if COUNT_RECORDS.contains(&record.key) {
+        let counted = format!("{} in parsed games", record.display);
+        let latest = hero.map(|hero| format!("latest on {hero}"));
+        (
+            "in parsed games".to_owned(),
+            dotted([Some(counted.as_str()), latest.as_deref()]),
+        )
+    } else {
+        let result = record.won.map(|won| if won { "Won" } else { "Lost" });
+        let label = dotted([hero, date]);
+        (
+            if label.is_empty() {
+                "in one game".to_owned()
+            } else {
+                label
+            },
+            dotted([Some(record.display.as_str()), hero, date, result]),
+        )
+    };
+    StoryCopy {
+        setup,
+        value: record.display.clone(),
+        label,
+        punch,
+        credit,
+        treatment: Punch::Plain,
+    }
+}
+
+/// A win rate in whole percent.
+fn rate(wins: i64, games: i64) -> String {
+    let percent = if games > 0 {
+        (wins as f64 * 100.0 / games as f64).round()
+    } else {
+        0.0
+    };
+    format!("{percent}%")
+}
+
+/// The card copy for `hero_best` or `hero_nemesis`: the hero's win rate and
+/// record. Other kinds get empty copy.
+#[must_use]
+pub fn hero_copy(kind: &str, line: &HeroLine, hero: Option<&str>, seed: u64) -> StoryCopy {
+    if !matches!(kind, "hero_best" | "hero_nemesis") {
+        return StoryCopy::default();
+    }
+    let (setup, punch) =
+        choose(hero_pool(kind), seed, mix_text(&[kind]), &[("hero", hero)]).unwrap_or_default();
+    let record = format!("Won {} of {}", line.wins, line.games);
+    StoryCopy {
+        setup,
+        value: rate(line.wins, line.games),
+        label: format!("win rate on {}", hero.unwrap_or("this hero")),
+        punch,
+        credit: match hero {
+            Some(hero) => format!("{record} on {hero}"),
+            None => record,
+        },
+        treatment: Punch::Plain,
+    }
+}
+
+/// The card copy for a Radiant/Dire split, when the year has one.
+#[must_use]
+pub fn side_split_copy(year: &HeroYear, seed: u64) -> Option<StoryCopy> {
+    let better = year.side_split()?;
+    let ((radiant_games, radiant_wins), (dire_games, dire_wins)) = (year.radiant, year.dire);
+    let (radiant, dire) = (
+        rate(radiant_wins, radiant_games),
+        rate(dire_wins, dire_games),
+    );
+    let (setup, punch) = choose(
+        hero_pool("side_split"),
+        seed,
+        mix_text(&["side_split"]),
+        &[],
+    )
+    .unwrap_or_default();
+    Some(StoryCopy {
+        setup,
+        value: if better == "Radiant" {
+            radiant.clone()
+        } else {
+            dire.clone()
+        },
+        label: format!("win rate as {better}"),
+        punch,
+        credit: format!("Radiant {radiant} · Dire {dire}"),
+        treatment: Punch::Plain,
+    })
+}
+
+fn hero_pool(kind: &str) -> &'static [Beat] {
+    HERO_POOLS
+        .iter()
+        .find(|(key, _)| *key == kind)
+        .map_or(&[], |(_, lines)| *lines)
+}
+
 /// Every beat in every pool, for fit and tone checks.
 #[must_use]
 pub fn all_beats() -> Vec<&'static Beat> {
@@ -378,7 +522,15 @@ pub fn all_beats() -> Vec<&'static Beat> {
     let items = ITEM_POOLS.iter().flat_map(|(_, _, lines)| lines.iter());
     let people = PEOPLE_POOLS.iter().flat_map(|(_, lines)| lines.iter());
     let side = SIDE_POOLS.iter().flat_map(|(_, _, lines)| lines.iter());
-    story.chain(items).chain(people).chain(side).collect()
+    let records = RECORD_POOLS.iter().flat_map(|(_, _, lines)| lines.iter());
+    let heroes = HERO_POOLS.iter().flat_map(|(_, lines)| lines.iter());
+    story
+        .chain(items)
+        .chain(people)
+        .chain(side)
+        .chain(records)
+        .chain(heroes)
+        .collect()
 }
 
 fn item_pool(item: &str) -> &'static [Beat] {

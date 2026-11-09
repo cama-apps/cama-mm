@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use cama_domain::wrapped_activity::ServerRank;
 use cama_domain::wrapped_distinct::{
-    Direction, DistinctStory, METRIC_KEYS, PairStory, TRACKED_ITEMS, Theme, Tier, metric_directions,
+    COUNT_RECORDS, Direction, DistinctStory, HeroLine, HeroYear, METRIC_KEYS, PairStory,
+    PersonalRecord, RECORD_KEYS, TRACKED_ITEMS, Theme, Tier, metric_directions,
 };
 
 use super::*;
@@ -389,11 +390,14 @@ fn no_line_targets_personal_life() {
 #[test]
 fn record_time_copy_never_claims_a_queue_or_start_time() {
     // Late-night times and day totals come from when a game was recorded as
-    // finished, so the copy never says when it was queued or started.
-    for key in ["night_owl", "marathon_day"] {
+    // finished, and game records from its length, so the copy never says
+    // when it was queued or started.
+    for key in ["night_owl", "marathon_day", "longest_game", "fastest_win"] {
         let mut lines: Vec<&str> = TIERS
             .iter()
             .flat_map(|tier| pool(key, Direction::Roast, *tier))
+            .chain(record_pool(key, Direction::Roast))
+            .chain(record_pool(key, Direction::Popoff))
             .flat_map(|beat| [beat.setup, beat.punch])
             .collect();
         lines.extend(
@@ -620,4 +624,208 @@ fn persona_comes_from_the_strongest_trait() {
     assert!(throws.contains(&thrower));
     assert_ne!(persona_title(&[owl, throw], 4), thrower);
     assert!(FALLBACK_PERSONAS.contains(&persona_title(&[], 4)));
+}
+
+/// The placeholders a line in `lines` uses.
+fn placeholders(lines: &[Beat]) -> BTreeSet<String> {
+    lines
+        .iter()
+        .flat_map(|beat| [beat.setup, beat.punch])
+        .flat_map(|line| line.split('{').skip(1))
+        .filter_map(|rest| rest.split_once('}').map(|(slot, _)| slot.to_owned()))
+        .collect()
+}
+
+#[test]
+fn record_and_hero_pools_are_deep() {
+    let every = all_beats();
+    let reaches_checks = |lines: &[Beat]| {
+        lines
+            .iter()
+            .all(|line| every.iter().any(|seen| std::ptr::eq(*seen, line)))
+    };
+    for (key, direction) in RECORD_KEYS {
+        let lines = record_pool(key, direction);
+        assert!(lines.len() >= 6, "{key}: {} lines", lines.len());
+        let plain = lines
+            .iter()
+            .filter(|beat| !beat.setup.contains("{hero}") && !beat.punch.contains("{hero}"))
+            .count();
+        assert!(plain >= 3, "{key}: {plain} lines without a hero");
+        let allowed = ["hero".to_owned(), "n".to_owned()];
+        assert!(placeholders(lines).is_subset(&allowed.into()), "{key}");
+        assert!(
+            reaches_checks(lines),
+            "{key} escapes the fit and tone checks"
+        );
+        let other = match direction {
+            Direction::Roast => Direction::Popoff,
+            Direction::Popoff => Direction::Roast,
+        };
+        assert!(record_pool(key, other).is_empty(), "{key} reads one way");
+    }
+    for kind in HERO_STORY_KINDS {
+        let lines = hero_pool(kind);
+        assert!(lines.len() >= 6, "{kind}: {} lines", lines.len());
+        assert!(
+            reaches_checks(lines),
+            "{kind} escapes the fit and tone checks"
+        );
+        let slots = placeholders(lines);
+        if kind == "side_split" {
+            assert!(slots.is_empty(), "a split has no hero: {slots:?}");
+        } else {
+            assert!(
+                slots.is_subset(&["hero".to_owned()].into()),
+                "{kind}: {slots:?}"
+            );
+        }
+    }
+    assert!(record_pool("most_naps", Direction::Popoff).is_empty());
+}
+
+#[test]
+fn record_lines_never_claim_the_result() {
+    // Only a fastest win is known to be a win; any other record game may
+    // have been either, and the credit line says which.
+    const RESULTS: &[&str] = &[
+        "won", "win", "wins", "lost", "loss", "losses", "victory", "defeat", "threw",
+    ];
+    for (key, direction) in RECORD_KEYS {
+        if key == "fastest_win" {
+            continue;
+        }
+        for beat in record_pool(key, direction) {
+            for line in [beat.setup, beat.punch] {
+                let lower = line.to_lowercase();
+                let claims = lower
+                    .split(|character: char| !character.is_alphanumeric())
+                    .any(|word| RESULTS.contains(&word));
+                assert!(!claims, "{key}: {line:?} claims a result");
+            }
+        }
+    }
+}
+
+fn kill_record(won: Option<bool>) -> PersonalRecord {
+    PersonalRecord {
+        key: "most_kills",
+        direction: Direction::Popoff,
+        value: 27,
+        display: "27 kills".to_owned(),
+        hero_id: Some(1),
+        match_id: 9,
+        finished_at: Some(1_772_595_000),
+        won,
+        score: 1.3,
+    }
+}
+
+#[test]
+fn record_copy_credits_the_game() {
+    let copy = record_copy(
+        &kill_record(Some(false)),
+        Some("Anti-Mage"),
+        Some("Mar 3"),
+        7,
+    );
+    assert_eq!(copy.value, "27 kills");
+    assert_eq!(copy.label, "Anti-Mage · Mar 3");
+    assert_eq!(copy.credit, "27 kills · Anti-Mage · Mar 3 · Lost");
+    assert_eq!(copy.treatment, Punch::Plain);
+    assert!(!copy.setup.is_empty() && !copy.punch.is_empty());
+    assert!(
+        record_pool("most_kills", Direction::Popoff)
+            .iter()
+            .any(|beat| copy.punch == beat.punch.replace("{hero}", "Anti-Mage"))
+    );
+    let won = record_copy(&kill_record(Some(true)), Some("Anti-Mage"), None, 7);
+    assert_eq!(won.credit, "27 kills · Anti-Mage · Won");
+    // Nothing known beyond the number: the card still reads, with no gaps.
+    let bare = record_copy(&kill_record(None), None, None, 7);
+    assert_eq!(bare.credit, "27 kills");
+    assert!(!bare.label.is_empty());
+    let punches: BTreeSet<String> = (0..24)
+        .map(|seed| record_copy(&kill_record(None), Some("Anti-Mage"), None, seed).punch)
+        .collect();
+    assert!(punches.len() >= 3, "{punches:?}");
+
+    // Counts are years, not games: no result, and the hero is the latest.
+    for key in COUNT_RECORDS {
+        let count = PersonalRecord {
+            key,
+            value: 5,
+            display: format!("5 {key}"),
+            ..kill_record(Some(true))
+        };
+        let copy = record_copy(&count, Some("Anti-Mage"), Some("Mar 3"), 7);
+        assert_eq!(copy.label, "in parsed games");
+        assert_eq!(
+            copy.credit,
+            format!("5 {key} in parsed games · latest on Anti-Mage")
+        );
+    }
+    for (key, direction) in RECORD_KEYS {
+        for seed in 0..24 {
+            let record = PersonalRecord {
+                key,
+                direction,
+                display: "78:12".to_owned(),
+                ..kill_record(Some(true))
+            };
+            let text = copy_text(&record_copy(&record, Some("Pudge"), Some("Mar 3"), seed));
+            assert!(!text.contains('{'), "{key}: {text}");
+            assert!(!text.contains('#'), "{key}: {text}");
+        }
+    }
+}
+
+#[test]
+fn hero_copy_states_the_record() {
+    let best = HeroLine {
+        hero_id: 1,
+        games: 12,
+        wins: 10,
+    };
+    let copy = hero_copy("hero_best", &best, Some("Anti-Mage"), 3);
+    assert_eq!(copy.value, "83%");
+    assert_eq!(copy.label, "win rate on Anti-Mage");
+    assert_eq!(copy.credit, "Won 10 of 12 on Anti-Mage");
+    assert!(!copy.setup.is_empty() && !copy.punch.is_empty());
+    let worst = HeroLine {
+        hero_id: 14,
+        games: 6,
+        wins: 2,
+    };
+    let copy = hero_copy("hero_nemesis", &worst, Some("Pudge"), 3);
+    assert_eq!(
+        (copy.value.as_str(), copy.credit.as_str()),
+        ("33%", "Won 2 of 6 on Pudge")
+    );
+    for seed in 0..24 {
+        for kind in ["hero_best", "hero_nemesis"] {
+            // Without a readable hero name, lines that need one are skipped.
+            let nameless = hero_copy(kind, &worst, None, seed);
+            let text = copy_text(&nameless);
+            assert!(!text.contains('{') && !nameless.setup.is_empty(), "{text}");
+        }
+    }
+    assert_eq!(hero_copy("mystery", &best, None, 3), StoryCopy::default());
+
+    let split = HeroYear {
+        radiant: (14, 10),
+        dire: (8, 3),
+        ..HeroYear::default()
+    };
+    let copy = side_split_copy(&split, 3).expect("a split year");
+    assert_eq!(copy.value, "71%");
+    assert_eq!(copy.label, "win rate as Radiant");
+    assert_eq!(copy.credit, "Radiant 71% · Dire 38%");
+    assert!(!copy.setup.is_empty() && !copy.punch.is_empty());
+    let even = HeroYear {
+        radiant: (14, 7),
+        dire: (8, 4),
+        ..HeroYear::default()
+    };
+    assert!(side_split_copy(&even, 3).is_none());
 }

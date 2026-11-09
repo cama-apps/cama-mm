@@ -53,7 +53,7 @@ impl Face {
     }
 
     /// Display sizes are set tight; reading sizes get room to breathe.
-    const fn leading(self) -> f32 {
+    pub(super) const fn leading(self) -> f32 {
         match self {
             Self::Black => 1.02,
             Self::Bold => 1.12,
@@ -112,7 +112,7 @@ pub(super) fn text_width(value: &str, size: f32, face: Face) -> f32 {
 }
 
 pub(super) const FIRST_BASELINE: f32 = 0.9;
-const DESCENT: f32 = 0.27;
+pub(super) const DESCENT: f32 = 0.27;
 
 pub(super) fn block_height(rows: usize, size: f32, face: Face) -> f32 {
     if rows == 0 {
@@ -428,6 +428,14 @@ pub(super) struct PreparedArt {
     pub(super) pixels: Vec<u8>,
 }
 
+/// Prepared art with its top-left corner on the card and its corner radius.
+pub(super) struct PlacedArt {
+    pub(super) art: PreparedArt,
+    pub(super) left: i32,
+    pub(super) top: i32,
+    pub(super) radius: f32,
+}
+
 /// A rasterized glyph, shared between frames.
 type Glyph = Rc<(Metrics, Vec<u8>)>;
 /// Text wrapped to a box: the size it fit at and its lines.
@@ -441,6 +449,8 @@ pub(super) struct Stage<'a> {
     pub(super) art: Option<PreparedArt>,
     /// A two-beat Cinema punchline's letterboxed hero still.
     pub(super) still_art: Option<PreparedArt>,
+    /// The hero beside a Plain punchline, placed clear of its type.
+    pub(super) punch_art: Option<PlacedArt>,
     /// Pictures for ranked rows, by row index.
     pub(super) row_art: Vec<Option<PreparedArt>>,
     glyphs: HashMap<(Face, char, u32), Glyph>,
@@ -450,10 +460,10 @@ pub(super) struct Stage<'a> {
 impl<'a> Stage<'a> {
     pub(super) fn new(slide: &'a WrappedSlideData) -> Self {
         let palette = palette(slide.theme);
-        let (art, still_art) = if slide.layout == WrappedLayout::TwoBeat {
+        let (art, still_art, punch_art) = if slide.layout == WrappedLayout::TwoBeat {
             artwork::prepare_beat(slide)
         } else {
-            (artwork::prepare(slide), None)
+            (artwork::prepare(slide), None, None)
         };
         Self {
             canvas: Canvas::new(WRAPPED_SLIDE_WIDTH, WRAPPED_SLIDE_HEIGHT, palette.bg),
@@ -462,6 +472,7 @@ impl<'a> Stage<'a> {
             t: 1.0,
             art,
             still_art,
+            punch_art,
             row_art: artwork::prepare_rows(slide),
             glyphs: HashMap::new(),
             fits: HashMap::new(),
@@ -722,7 +733,7 @@ impl<'a> Stage<'a> {
 }
 
 /// Shrink a pill's type until it fits, keeping its padding.
-fn pill_size(value: &str, maximum_width: i32, size: f32) -> f32 {
+pub(super) fn pill_size(value: &str, maximum_width: i32, size: f32) -> f32 {
     let available = maximum_width as f32 - size * 1.5;
     let width = text_width(value, size, Face::Bold);
     if width > available {

@@ -18,6 +18,14 @@ use crate::wrapped_activity::ServerRank;
 use Direction::{Popoff, Roast};
 use Theme::{Chaos, Clutch, Combat, Farm, Heroes, Items, Map, Time};
 
+#[path = "wrapped_distinct/records.rs"]
+mod records;
+
+pub use records::{
+    COUNT_RECORDS, HeroLine, HeroYear, PersonalRecord, RECORD_KEYS, hero_year, month_day,
+    personal_records, select_records,
+};
+
 /// Below this many eligible players a metric is too thin to rank.
 pub const SMALL_POPULATION: usize = 12;
 
@@ -124,6 +132,10 @@ pub struct DistinctMatch {
     pub expected_win: Option<f64>,
     /// `rating - rating_before`.
     pub rating_delta: Option<f64>,
+    /// Parsed games only; `None` when unknown.
+    pub first_blood: Option<bool>,
+    pub roshans: Option<i64>,
+    pub towers: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

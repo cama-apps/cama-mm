@@ -617,7 +617,7 @@ impl WrappedLiveRepository {
                     wf.actions_per_min, wf.rapier_count, wf.buybacks, wf.item_counts,
                     wf.comeback, wf.throw,
                     rh.expected_team_win_prob, rh.rating - rh.rating_before,
-                    p.timezone
+                    p.timezone, mp.firstblood_claimed, mp.roshans_killed, mp.towers_killed
                FROM match_participants AS mp
                JOIN matches AS m ON m.match_id = mp.match_id
                JOIN players AS p ON p.discord_id = mp.discord_id AND p.guild_id = ?1
@@ -676,6 +676,9 @@ impl WrappedLiveRepository {
                 throw: row.get(27)?,
                 expected_win: row.get(28)?,
                 rating_delta: row.get(29)?,
+                first_blood: row.get::<_, Option<i64>>(31)?.map(|claimed| claimed != 0),
+                roshans: row.get(32)?,
+                towers: row.get(33)?,
             });
             players
                 .entry(discord_id)
@@ -995,6 +998,35 @@ mod tests {
             .unwrap();
         let malformed = matches.iter().find(|m| m.discord_id == 8).unwrap();
         assert!(malformed.enriched && malformed.items.is_empty());
+    }
+
+    #[test]
+    fn guild_year_rows_reads_first_blood_roshans_towers() {
+        let (file, db) = year_fixture();
+        add_match(&db, 1, 42, "2026-03-14 21:05:00", &[7, 8, 9]);
+        db.execute(
+            "UPDATE match_participants
+                SET firstblood_claimed=1, roshans_killed=2, towers_killed=3
+              WHERE discord_id=8",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE match_participants
+                SET firstblood_claimed=0, roshans_killed=0, towers_killed=0
+              WHERE discord_id=9",
+            [],
+        )
+        .unwrap();
+        let (matches, _) = WrappedLiveRepository::new(file.path())
+            .guild_year_rows(42, START, END)
+            .unwrap();
+        let row = |id: i64| matches.iter().find(|m| m.discord_id == id).unwrap();
+        let facts = |id: i64| (row(id).first_blood, row(id).roshans, row(id).towers);
+        assert_eq!(facts(8), (Some(true), Some(2), Some(3)));
+        // A parsed zero is known; an unparsed game stays unknown.
+        assert_eq!(facts(9), (Some(false), Some(0), Some(0)));
+        assert_eq!(facts(7), (None, None, None));
     }
 
     #[test]

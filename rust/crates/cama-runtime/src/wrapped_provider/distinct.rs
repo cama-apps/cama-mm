@@ -38,6 +38,9 @@ pub(super) struct DistinctDeck {
     pub best_roast: Option<String>,
     /// The best popoff's fact line, which the recap wears as its badge.
     pub badge: Option<String>,
+    /// The games the stories are about, so other cards can avoid repeating
+    /// one.
+    pub games: Vec<i64>,
 }
 
 pub(super) struct Persona {
@@ -92,9 +95,7 @@ pub(super) fn distinct_slides(
             year_label,
         );
         // Every story about a hero wears that hero's render.
-        slide.art_png = story
-            .hero_id
-            .and_then(|hero| art.hero_render(hero).or_else(|| art.hero_portrait(hero)));
+        slide.art_png = story.hero_id.and_then(|hero| hero_art(art, hero));
         copy.treatment = treat(&mut slide, story, copy.treatment, rows, target, gold);
         set_beat(&mut slide, story.direction, copy);
         cards.push((story.direction, slide));
@@ -112,6 +113,7 @@ pub(super) fn distinct_slides(
         best_popoff,
         best_roast,
         badge,
+        games: selected.iter().filter_map(|story| story.match_id).collect(),
     }
 }
 
@@ -204,7 +206,12 @@ fn team_gold(
     (series.iter().filter(|lead| lead.is_finite()).count() >= 2).then_some(series)
 }
 
-fn set_beat(slide: &mut WrappedSlideData, direction: Direction, copy: StoryCopy) {
+/// The hero's full render, or its portrait when no render is cached.
+pub(super) fn hero_art(art: &ArtSources, hero: i64) -> Option<Vec<u8>> {
+    art.hero_render(hero).or_else(|| art.hero_portrait(hero))
+}
+
+pub(super) fn set_beat(slide: &mut WrappedSlideData, direction: Direction, copy: StoryCopy) {
     slide.layout = WrappedLayout::TwoBeat;
     slide.theme = match direction {
         Direction::Roast => WrappedTheme::BeatRoast,

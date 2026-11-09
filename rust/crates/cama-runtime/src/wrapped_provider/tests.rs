@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use cama_app::wrapped_media::{
-    WrappedPunch, WrappedSlideData, render_wrapped_slide, slide_backgrounds,
+    WrappedPunch, WrappedSlideData, backgrounds_alike, render_wrapped_slide, slide_backgrounds,
 };
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -2461,10 +2461,47 @@ const SIDE_KINDS: [&str; 10] = [
     "story_mafia_victim",
 ];
 
+/// Standout games for the player, all Anti-Mage wins: 31 kills on March 4,
+/// which is also the best game the Cinema card shows, a 78:12 game on
+/// March 7, and 1,400 GPM on March 9.
+fn seed_record_games(fixture: &Fixture) {
+    Connection::open(&fixture.path)
+        .unwrap()
+        .execute_batch(
+            "UPDATE match_participants SET kills=31 WHERE match_id=4 AND discord_id=100;
+             UPDATE match_participants SET gpm=1400 WHERE match_id=9 AND discord_id=100;
+             UPDATE matches SET duration_seconds=4692 WHERE match_id=7;",
+        )
+        .unwrap();
+}
+
+/// Art sources whose warm cache holds one Anti-Mage render, and its bytes.
+fn anti_mage_art() -> (TempDir, ArtSources, Vec<u8>) {
+    let heroes = tempfile::tempdir().unwrap();
+    let dotabase = heroes.path().join("dotabase.db");
+    Connection::open(&dotabase)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE heroes (
+                 id INTEGER PRIMARY KEY,name TEXT,color TEXT,localized_name TEXT,roles TEXT
+             );
+             INSERT INTO heroes VALUES (1,'npc_dota_hero_antimage','#784094','Anti-Mage','Carry');",
+        )
+        .unwrap();
+    let cache = heroes.path().join("trivia");
+    std::fs::create_dir_all(cache.join("heroes/renders")).unwrap();
+    let render = std::fs::read(repository_assets().join("wrapped/courier.png")).unwrap();
+    std::fs::write(cache.join("heroes/renders/antimage.png"), &render).unwrap();
+    let art = ArtSources::for_assets(&repository_assets())
+        .with_hero_portraits(cama_app::hero_lookup::HeroLookup::new(&dotabase), cache);
+    (heroes, art, render)
+}
+
 #[test]
 fn deck_respects_twenty_card_budget_for_an_all_activity_player() {
     let fixture = Fixture::league(12);
     seed_all_activity(&fixture);
+    seed_record_games(&fixture);
     let slides = league_deck(&fixture, &league_names());
     let story = story_of(&slides);
     let count = |kind: &str| story.iter().filter(|slide| slide.kind == kind).count();
@@ -2478,6 +2515,9 @@ fn deck_respects_twenty_card_budget_for_an_all_activity_player() {
         assert_eq!(count(kind), 1, "{kind}");
     }
     assert!((5..=8).contains(&count("story_distinct")));
+    // The player's own records and their best hero make the cut.
+    assert_eq!(count("story_record"), 2);
+    assert_eq!(count("story_hero_year"), 1);
     assert!(count("story_people") <= 2);
     assert_eq!(count("story_persona"), 1);
     // Every side game's main card stays; extras drop to More stats first.
@@ -2505,6 +2545,124 @@ fn deck_respects_twenty_card_budget_for_an_all_activity_player() {
             "{kind} is under More stats"
         );
     }
+}
+
+#[test]
+fn record_cards_use_hero_render_and_credit_the_game() {
+    let fixture = Fixture::league(12);
+    seed_record_games(&fixture);
+    let (_heroes, art, render) = anti_mage_art();
+    let raw = WrappedSources::with_art(&fixture.path, art)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    let slides = build_slides(
+        raw,
+        &league_names(),
+        OWNER as i64,
+        "Guild Owner",
+        2026,
+        3,
+        3,
+    );
+    let story = story_of(&slides);
+    let records = story
+        .iter()
+        .filter(|slide| slide.kind == "story_record")
+        .collect::<Vec<_>>();
+    // The strongest record of each kind: a roast and a popoff, each naming
+    // its hero, the day it finished in the player's time zone, and the result.
+    // The 31-kill game is already the Cinema card, so it is not repeated.
+    let beats = records
+        .iter()
+        .map(|slide| slide.beat.as_ref().expect("two-beat record copy"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        beats
+            .iter()
+            .map(|beat| beat.credit.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "78:12 · Anti-Mage · Mar 7 · Won",
+            "1,400 GPM · Anti-Mage · Mar 9 · Won"
+        ]
+    );
+    assert_eq!(
+        (beats[1].value.as_str(), beats[1].setup_label.as_str()),
+        ("1,400 GPM", "Anti-Mage · Mar 9")
+    );
+    let cinema = story
+        .iter()
+        .filter_map(|slide| slide.beat.as_ref())
+        .find(|beat| beat.treatment == WrappedPunch::Cinema)
+        .expect("the best game's cinema card");
+    assert!(
+        cinema.credit.starts_with("31 / 13 / 10"),
+        "{}",
+        cinema.credit
+    );
+    assert!(records[0].theme.is_roast_beat() && records[1].theme.is_popoff_beat());
+    for (slide, beat) in records.iter().zip(&beats) {
+        assert_eq!(slide.layout, WrappedLayout::TwoBeat);
+        assert_eq!(slide.art_png.as_deref(), Some(render.as_slice()));
+        assert_eq!(beat.treatment, WrappedPunch::Plain);
+        assert!(!beat.setup.is_empty() && !beat.punch.is_empty());
+        render_wrapped_slide(slide).expect("a record card renders");
+    }
+    // The best hero wears its render too.
+    let hero = story
+        .iter()
+        .find(|slide| slide.kind == "story_hero_year")
+        .expect("the best-hero card");
+    let beat = hero.beat.as_ref().expect("two-beat hero copy");
+    assert_eq!(
+        (beat.value.as_str(), beat.credit.as_str()),
+        ("83%", "Won 10 of 12 on Anti-Mage")
+    );
+    assert_eq!(hero.art_png.as_deref(), Some(render.as_slice()));
+}
+
+#[test]
+fn dota_cards_come_before_side_games() {
+    let fixture = Fixture::league(12);
+    seed_all_activity(&fixture);
+    seed_record_games(&fixture);
+    let slides = league_deck(&fixture, &league_names());
+    let kinds = story_of(&slides)
+        .iter()
+        .map(|slide| slide.kind.as_str())
+        .collect::<Vec<_>>();
+    let span = |kind: &str| {
+        let first = kinds.iter().position(|seen| *seen == kind);
+        let last = kinds.iter().rposition(|seen| *seen == kind);
+        first
+            .zip(last)
+            .unwrap_or_else(|| panic!("{kind} in {kinds:?}"))
+    };
+    // Distinct stories, then records, then hero stories, then people.
+    let sections = [
+        "story_hero",
+        "story_distinct",
+        "story_record",
+        "story_hero_year",
+        "story_people",
+    ]
+    .map(span);
+    for pair in sections.windows(2) {
+        assert!(pair[0].1 < pair[1].0, "{kinds:?}");
+    }
+    let first_side = kinds
+        .iter()
+        .position(|kind| SIDE_KINDS.contains(kind))
+        .expect("side games in the story");
+    assert!(sections[4].1 < first_side, "{kinds:?}");
+    assert!(
+        kinds[first_side..]
+            .iter()
+            .all(|kind| SIDE_KINDS.contains(kind)
+                || matches!(*kind, "story_persona" | "story_finale")),
+        "{kinds:?}"
+    );
 }
 
 #[test]
@@ -2580,6 +2738,7 @@ fn people_cards_never_call_a_beaten_opponent_a_nemesis() {
 fn neighboring_story_cards_never_share_a_background() {
     let all = Fixture::league(12);
     seed_all_activity(&all);
+    seed_record_games(&all);
     let thin = Fixture::league(2);
     Connection::open(&thin.path)
         .unwrap()
@@ -2604,11 +2763,20 @@ fn neighboring_story_cards_never_share_a_background() {
     ];
     for deck in &decks {
         let story = story_of(deck);
+        let sequence = story
+            .iter()
+            .map(|slide| {
+                let treatment = slide.beat.as_ref().map(|beat| beat.treatment);
+                format!("{} {:?} {treatment:?}", slide.kind, slide.theme)
+            })
+            .collect::<Vec<_>>();
         for pair in story.windows(2) {
             let (before, after) = (slide_backgrounds(pair[0]), slide_backgrounds(pair[1]));
             assert!(
-                before.iter().all(|color| !after.contains(color)),
-                "{} ({:?}) then {} ({:?})",
+                before
+                    .iter()
+                    .all(|color| after.iter().all(|other| !backgrounds_alike(*color, *other))),
+                "{} ({:?}) then {} ({:?}) look alike in {sequence:#?}",
                 pair[0].kind,
                 pair[0].theme,
                 pair[1].kind,
@@ -2621,23 +2789,7 @@ fn neighboring_story_cards_never_share_a_background() {
 #[test]
 fn hero_stories_wear_the_hero_render() {
     let fixture = Fixture::league(12);
-    let heroes = tempfile::tempdir().unwrap();
-    let dotabase = heroes.path().join("dotabase.db");
-    Connection::open(&dotabase)
-        .unwrap()
-        .execute_batch(
-            "CREATE TABLE heroes (
-                 id INTEGER PRIMARY KEY,name TEXT,color TEXT,localized_name TEXT,roles TEXT
-             );
-             INSERT INTO heroes VALUES (1,'npc_dota_hero_antimage','#784094','Anti-Mage','Carry');",
-        )
-        .unwrap();
-    let cache = heroes.path().join("trivia");
-    std::fs::create_dir_all(cache.join("heroes/renders")).unwrap();
-    let render = std::fs::read(repository_assets().join("wrapped/courier.png")).unwrap();
-    std::fs::write(cache.join("heroes/renders/antimage.png"), &render).unwrap();
-    let art = ArtSources::for_assets(&repository_assets())
-        .with_hero_portraits(cama_app::hero_lookup::HeroLookup::new(&dotabase), cache);
+    let (_heroes, art, render) = anti_mage_art();
     let raw = WrappedSources::with_art(&fixture.path, art)
         .load(GUILD as i64, OWNER as i64, 2026)
         .unwrap()

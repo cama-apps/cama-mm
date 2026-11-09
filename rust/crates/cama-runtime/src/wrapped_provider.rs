@@ -35,7 +35,9 @@ use cama_db::wrapped_live::{
 };
 use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::hero_catalog::hero_name;
-use cama_domain::wrapped_distinct::{DistinctMatch, DistinctPlayer, PeopleYear, people_year};
+use cama_domain::wrapped_distinct::{
+    DistinctMatch, DistinctPlayer, PeopleYear, people_year, personal_records,
+};
 use chrono::{Datelike, Utc};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tracing::warn;
@@ -53,12 +55,14 @@ use crate::registration::{
 mod activity;
 mod deck;
 mod distinct;
+mod personal;
 
 use activity::{
     ActivityData, ArtSources, activity_cards, card_slide, persona_signals, persona_slide,
     recap_numbers,
 };
 use distinct::{MIN_STORIES, cave_in_slide, distinct_slides, people_slides, stonks};
+use personal::{hero_story_slides, record_count, record_story_slides};
 
 const COMPONENT_PREFIX: &str = "wrapped:";
 const STORY_TIMEOUT: Duration = Duration::from_secs(600);
@@ -1051,12 +1055,14 @@ const MOMENT_THEMES: [WrappedTheme; 4] = [
     WrappedTheme::Months,
 ];
 /// The story's running order. The recap always closes it.
-const STORY_ORDER: [&str; 17] = [
+const STORY_ORDER: [&str; 19] = [
     "story_intro",
     "story_games",
     "story_playtime",
     "story_hero",
     "story_distinct",
+    "story_record",
+    "story_hero_year",
     "story_people",
     "chart_gamba",
     "story_gamba",
@@ -1532,13 +1538,35 @@ fn build_slides(
     );
     people.truncate(deck::MOST_PEOPLE);
 
+    // The player against their own games, once they have a year to measure.
+    let (record_candidates, hero_stories) = if raw.matches.len() >= minimum_games {
+        (
+            personal_records(&raw.year_rows, target_id),
+            hero_story_slides(
+                &raw.year_rows,
+                target_id,
+                &raw.art,
+                seed,
+                target_display_name,
+                &year_label,
+            ),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     // Distinct stories take what the other sections leave, up to eight.
     let fixed = slides
         .iter()
         .filter(|slide| deck::FIXED_KINDS.contains(&slide.kind.as_str()))
         .count();
     let slots = deck::distinct_slots(
-        fixed + deck::RESERVED_SLOTS_USED + people.len() + side_cards + deck::PERSONA_SLOTS,
+        fixed
+            + record_count(&record_candidates)
+            + hero_stories.len()
+            + people.len()
+            + side_cards
+            + deck::PERSONA_SLOTS,
     );
     let distinct = distinct_slides(
         &raw.year_rows,
@@ -1548,6 +1576,16 @@ fn build_slides(
         slots,
         &raw.art,
         &*raw.gold,
+        seed,
+        target_display_name,
+        &year_label,
+    );
+    let records = record_story_slides(
+        &record_candidates,
+        &distinct.games,
+        &raw.year_players,
+        target_id,
+        &raw.art,
         seed,
         target_display_name,
         &year_label,
@@ -1580,6 +1618,8 @@ fn build_slides(
             ));
         }
     }
+    slides.extend(records);
+    slides.extend(hero_stories);
     slides.extend(people);
     slides.extend(side);
 
@@ -1658,6 +1698,7 @@ fn build_slides(
         .into_iter()
         .partition(|slide| is_detail_page(&slide.kind));
     story.push(finale);
+    deck::space_fixed_backgrounds(&mut story);
     deck::separate_neighbors(&mut story);
     vary_beat_palettes(&mut story);
     pages.extend(story);

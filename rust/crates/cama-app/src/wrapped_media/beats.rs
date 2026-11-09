@@ -8,8 +8,8 @@
 //! at 1.0 s, 3.0 s, 3.4 s, and 4.5 s (`motion::TWO_BEAT_PACE`).
 
 use super::stage::{
-    Align, FIRST_BASELINE, Face, HEIGHT, Stage, WIDTH, block_height, count_up, fit_text,
-    ink_height, text_width,
+    Align, DESCENT, FIRST_BASELINE, Face, HEIGHT, Stage, WIDTH, block_height, count_up, fit_text,
+    ink_height, pill_size, text_width,
 };
 use super::*;
 
@@ -26,6 +26,14 @@ const WIPE_STRIPE: f32 = 44.0;
 const FRAME_BORDER: i32 = 8;
 const FRAME_SHADOW: i32 = 11;
 const FRAME_RADIUS: f32 = 26.0;
+/// A Plain punchline's credit chip: its gap below the type and its size.
+const CHIP_GAP: i32 = 30;
+const CHIP_SIZE: f32 = 30.0;
+/// A Plain punchline starts here when the hero stands beside it, leaving
+/// the lower card to the hero.
+const BESIDE_TYPE_TOP: i32 = TOP + 12;
+/// The footer name, which the chrome draws over the card.
+const NAME_BOX: (i32, i32, f32) = (HEIGHT - 50, HEIGHT - 14, 23.0);
 
 const WHITE: Rgba = Rgba::rgb(255, 255, 255);
 const INK: Rgba = Rgba::rgb(20, 10, 46);
@@ -249,6 +257,9 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
             );
         }
     }
+    if wipe > 0.0 {
+        hero_beside(stage, wipe);
+    }
     if stage.t < WIPE.1 {
         return;
     }
@@ -270,6 +281,80 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
 fn wipe_edge(wipe: f32) -> f32 {
     let travel = HEIGHT as f32 + SLANT + WIPE_STRIPE;
     HEIGHT as f32 + SLANT / 2.0 - travel * wipe
+}
+
+/// The punchline's hero, uncovered by the wipe as its color sweeps up and
+/// then held still, so the finished card keeps it.
+fn hero_beside(stage: &mut Stage<'_>, wipe: f32) {
+    let Some(placed) = stage.punch_art.take() else {
+        return;
+    };
+    // Below the slanted edge's lowest point, only the new color shows.
+    let uncovered = if wipe >= 1.0 {
+        0
+    } else {
+        (wipe_edge(wipe) + SLANT / 2.0).ceil() as i32
+    };
+    let (width, height) = (placed.art.width as i32, placed.art.height as i32);
+    let reveal = (
+        placed.left,
+        placed.top.max(uncovered),
+        placed.left + width,
+        placed.top + height,
+    );
+    let corner = placed.radius;
+    super::artwork::paint(
+        &mut stage.canvas,
+        &placed.art,
+        placed.left,
+        placed.top,
+        reveal,
+        corner,
+    );
+    stage.punch_art = Some(placed);
+}
+
+/// The boxes, `(left, top, right, bottom)`, that a Plain punchline's type,
+/// its credit chip and the footer name cover when a hero stands beside it.
+/// `None` for the meme treatments, whose graphics need the room.
+pub(super) fn punch_art_clearance(slide: &WrappedSlideData) -> Option<Vec<(i32, i32, i32, i32)>> {
+    let beat = slide.beat.as_ref()?;
+    if beat.treatment != WrappedPunch::Plain {
+        return None;
+    }
+    let style = punch_type(WrappedPunch::Plain);
+    let text = style.apply(&beat.punch);
+    let (size, rows) = fit_text(
+        &text,
+        style.face,
+        style.size_for(&text),
+        COLUMN,
+        style.height,
+    );
+    let advance = size * style.face.leading();
+    let mut boxes = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let top = BESIDE_TYPE_TOP as f32 + index as f32 * advance;
+            let width = text_width(row, size, style.face).ceil() as i32;
+            let bottom = (top + size * (FIRST_BASELINE + DESCENT)).ceil() as i32;
+            (MARGIN, top as i32, MARGIN + width, bottom)
+        })
+        .collect::<Vec<_>>();
+    if !beat.credit.trim().is_empty() {
+        let top = BESIDE_TYPE_TOP + text_height(&beat.punch, style) + CHIP_GAP;
+        let fitted = pill_size(&beat.credit, COLUMN, CHIP_SIZE);
+        let width = text_width(&beat.credit, fitted, Face::Bold) + CHIP_SIZE * 1.5;
+        let height = (fitted * 1.9).ceil() as i32;
+        boxes.push((MARGIN, top, MARGIN + width.ceil() as i32, top + height));
+    }
+    if !slide.username.trim().is_empty() {
+        let (top, bottom, size) = NAME_BOX;
+        let width = text_width(&slide.username, size, Face::Bold).min(COLUMN as f32);
+        boxes.push((MARGIN, top, MARGIN + width.ceil() as i32, bottom));
+    }
+    Some(boxes)
 }
 
 /// Chrome ink for whichever beat is behind height `y`.
@@ -475,8 +560,17 @@ fn tracked(
 
 fn plain(stage: &mut Stage<'_>, beat: &WrappedBeat, look: Look) {
     let style = punch_type(WrappedPunch::Plain);
-    let chip = if beat.credit.trim().is_empty() { 0 } else { 87 };
-    let y = centered(text_height(&beat.punch, style) + chip);
+    let chip = if beat.credit.trim().is_empty() {
+        0
+    } else {
+        CHIP_GAP + (CHIP_SIZE * 1.9) as i32
+    };
+    // With the hero standing below and beside it, the type keeps to the top.
+    let y = if stage.punch_art.is_some() {
+        BESIDE_TYPE_TOP
+    } else {
+        centered(text_height(&beat.punch, style) + chip)
+    };
     let bottom = text(
         stage,
         &beat.punch,
@@ -491,9 +585,9 @@ fn plain(stage: &mut Stage<'_>, beat: &WrappedBeat, look: Look) {
     stage.pill(
         credit,
         MARGIN,
-        bottom + 30,
+        bottom + CHIP_GAP,
         COLUMN,
-        30.0,
+        CHIP_SIZE,
         look.ink,
         look.bg,
         0.7,
