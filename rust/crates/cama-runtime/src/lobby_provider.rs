@@ -1046,8 +1046,11 @@ impl LobbyRuntimeState {
             return;
         }
         for player_id in auto_confirm {
-            self.readychecks
-                .add_readycheck_reaction(scope, player_id, Some(previous.message_id));
+            self.readychecks.auto_confirm_readycheck_player(
+                scope,
+                player_id,
+                Some(previous.message_id),
+            );
         }
         let Some(generation) = self.readychecks.readycheck_generation(scope) else {
             return;
@@ -2843,10 +2846,8 @@ impl LobbyInteractionHandler {
                 ReadycheckCommandFailure::NoThread,
             ))?;
         let mut initial_reacted = BTreeSet::new();
-        for (player_id, data) in &player_data {
-            if data.group == ReadinessGroup::Recent
-                || (permit.invoker_id == *player_id && permit.confirm_invoker)
-            {
+        for player_id in player_data.keys() {
+            if !plan.mention_ids.contains(player_id) {
                 initial_reacted.insert(*player_id);
             }
         }

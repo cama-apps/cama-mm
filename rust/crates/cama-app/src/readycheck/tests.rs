@@ -1225,3 +1225,168 @@ fn test_ready_announcement_uses_configured_threshold() {
     assert!(ready_announcement(LobbyKind::Open, 3).contains("3+ players are ready"));
     assert!(!ready_announcement(LobbyKind::Open, 3).contains("10+ players"));
 }
+
+#[test]
+fn manual_ready_carries_over_after_the_previous_check_expires() {
+    let service = staleness_service([1, 2]);
+    let now = 1_000.0;
+    publish_new(&service, now, data([1, 2]));
+    assert!(service.add_readycheck_reaction_at(scope(), player(2), Some(MESSAGE), now));
+    assert!(service.complete_sweep(scope(), MESSAGE).is_some());
+
+    let plan = publish_new(&service, now + 301.0, data([1, 2]));
+
+    assert!(service.readycheck_reacted(scope()).contains(&player(2)));
+    assert!(!plan.mention_ids.contains(&player(2)));
+}
+
+#[test]
+fn manual_ready_grace_expires_without_automatic_renewal() {
+    for (elapsed, expected) in [(599.0, true), (600.0, false), (601.0, false)] {
+        let service = staleness_service([1, 2]);
+        publish_new(&service, 1_000.0, data([1, 2]));
+        assert!(service.add_readycheck_reaction_at(scope(), player(2), Some(MESSAGE), 1_000.0));
+        service.complete_sweep(scope(), MESSAGE);
+        publish_new(&service, 1_301.0, data([1, 2]));
+        service.complete_sweep(scope(), MESSAGE);
+
+        let plan = publish_new(&service, 1_000.0 + elapsed, data([1, 2]));
+        assert_eq!(
+            service.readycheck_reacted(scope()).contains(&player(2)),
+            expected
+        );
+        assert_eq!(!plan.mention_ids.contains(&player(2)), expected);
+    }
+}
+
+#[test]
+fn automatic_confirmations_do_not_create_manual_ready_credit() {
+    let service = staleness_service([1, 2, 3]);
+    publish_new(
+        &service,
+        1_000.0,
+        grouped_data(&[
+            (1, ReadinessGroup::Afk),
+            (2, ReadinessGroup::Recent),
+            (3, ReadinessGroup::Afk),
+        ]),
+    );
+    assert!(service.auto_confirm_readycheck_player(scope(), player(3), Some(MESSAGE)));
+    service.complete_sweep(scope(), MESSAGE);
+    let mut next = request(1_301.0);
+    next.confirm_invoker = false;
+    let plan = service.prepare_command(next, data([1, 2, 3])).unwrap();
+    service.commit_publication(
+        plan.permit.unwrap(),
+        MessageId(112),
+        CHANNEL,
+        data([1, 2, 3]),
+        1_301.0,
+    );
+    assert!(service.readycheck_reacted(scope()).is_empty());
+}
+
+#[test]
+fn manual_reaction_from_an_auto_confirmed_player_starts_the_grace_window() {
+    let service = staleness_service([1, 2]);
+    publish_new(
+        &service,
+        1_000.0,
+        grouped_data(&[(1, ReadinessGroup::Afk), (2, ReadinessGroup::Recent)]),
+    );
+    // The roster is unchanged, but the explicit action must still be recorded.
+    assert!(!service.add_readycheck_reaction_at(scope(), player(2), Some(MESSAGE), 1_300.0));
+    service.complete_sweep(scope(), MESSAGE);
+    publish_new(&service, 1_700.0, data([1, 2]));
+    assert!(service.readycheck_reacted(scope()).contains(&player(2)));
+}
+
+#[test]
+fn withdrawing_or_leaving_clears_manual_ready_credit() {
+    for action in ["withdraw", "leave", "sync_leave", "reset"] {
+        let service = staleness_service([1, 2]);
+        publish_new(&service, 1_000.0, data([1, 2]));
+        assert!(service.add_readycheck_reaction_at(scope(), player(2), Some(MESSAGE), 1_000.0));
+        match action {
+            "withdraw" => {
+                assert!(service.remove_readycheck_reaction(scope(), player(2), Some(MESSAGE)));
+            }
+            "leave" => {
+                assert!(service.leave_lobby(scope(), player(2)));
+            }
+            "sync_leave" => service.put_lobby(lobby_with([1])),
+            "reset" => service.reset_lobby(scope()),
+            _ => unreachable!(),
+        }
+        let mut lobby = lobby_with([1, 2]);
+        lobby.thread_id = Some(CHANNEL);
+        service.put_lobby(lobby);
+        service.complete_sweep(scope(), MESSAGE);
+        let plan = publish_new(&service, 1_301.0, data([1, 2]));
+        assert!(
+            !service.readycheck_reacted(scope()).contains(&player(2)),
+            "{action}"
+        );
+        assert!(plan.mention_ids.contains(&player(2)), "{action}");
+    }
+}
+
+#[test]
+fn stale_reactions_and_other_scopes_do_not_grant_manual_ready_credit() {
+    let service = staleness_service([1, 2, 3]);
+    publish_new(&service, 1_000.0, data([1, 2, 3]));
+    assert!(service.add_readycheck_reaction_at(scope(), player(2), Some(MESSAGE), 1_000.0));
+    assert!(!service.add_readycheck_reaction_at(scope(), player(3), Some(MessageId(999)), 1_000.0));
+    service.complete_sweep(scope(), MESSAGE);
+    let plan = publish_new(&service, 1_301.0, data([1, 2, 3]));
+    assert!(plan.mention_ids.contains(&player(3)));
+    for other_scope in [
+        LobbyScope::new(OTHER_GUILD, LobbyKind::Open),
+        LobbyScope::new(GUILD, LobbyKind::LowSkill),
+    ] {
+        let mut lobby = lobby_with([1, 2]);
+        lobby.scope = other_scope;
+        lobby.thread_id = Some(CHANNEL);
+        service.put_lobby(lobby);
+        let mut next = request(1_301.0);
+        next.guild_id = Some(other_scope.guild_id);
+        next.kind = other_scope.kind;
+        let plan = service.prepare_command(next, data([1, 2])).unwrap();
+        assert!(plan.mention_ids.contains(&player(2)));
+        service.commit_publication(
+            plan.permit.unwrap(),
+            MessageId(112),
+            CHANNEL,
+            data([1, 2]),
+            1_301.0,
+        );
+        assert!(!service.readycheck_reacted(other_scope).contains(&player(2)));
+    }
+}
+
+#[test]
+fn manual_ready_is_decided_when_the_new_check_starts_but_withdrawal_still_wins() {
+    for withdraw in [false, true] {
+        let service = staleness_service([1, 2]);
+        publish_new(&service, 1_000.0, data([1, 2]));
+        assert!(service.add_readycheck_reaction_at(scope(), player(2), Some(MESSAGE), 1_000.0));
+        let plan = service
+            .prepare_command(request(1_599.0), data([1, 2]))
+            .unwrap();
+        assert!(!plan.mention_ids.contains(&player(2)));
+        if withdraw {
+            assert!(service.remove_readycheck_reaction(scope(), player(2), Some(MESSAGE)));
+        }
+        service.commit_publication(
+            plan.permit.unwrap(),
+            MessageId(112),
+            CHANNEL,
+            data([1, 2]),
+            1_601.0,
+        );
+        assert_eq!(
+            service.readycheck_reacted(scope()).contains(&player(2)),
+            !withdraw
+        );
+    }
+}

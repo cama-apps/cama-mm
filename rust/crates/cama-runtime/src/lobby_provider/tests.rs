@@ -5894,3 +5894,97 @@ async fn failed_reset_keeps_the_active_lobby_controls_and_thread() {
             .contains(&AppUserId(99))
     );
 }
+
+#[tokio::test]
+async fn manual_ready_survives_expiry_and_is_shown_in_the_next_check_without_a_ping() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = unconfirmed_readycheck_fixture(&database, transport.clone()).await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let previous = provider
+        .handler
+        .state
+        .readychecks
+        .readycheck_generation(scope)
+        .unwrap();
+    provider
+        .raw_reaction_observer()
+        .observe(RawReactionEvent {
+            kind: RawReactionKind::Add,
+            guild_id: Some(42),
+            channel_id: u64::try_from(previous.channel_id.0).unwrap(),
+            message_id: 5_000,
+            user_id: 20,
+            actor_is_bot: Some(false),
+            actor_display_name: Some("Away One".to_owned()),
+            emoji: RawReactionEmoji::unicode(READY_EMOJI),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        provider
+            .handler
+            .sweep_due_readychecks(unix_time_now())
+            .await,
+        1
+    );
+    assert!(
+        provider
+            .handler
+            .state
+            .readychecks
+            .readycheck_generation(scope)
+            .is_none()
+    );
+    let sent_before = transport.sent_messages().len();
+
+    dispatch_command(
+        &provider,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let generation = provider
+        .handler
+        .state
+        .readychecks
+        .readycheck_generation(scope)
+        .unwrap();
+    assert_eq!(
+        generation.reacted,
+        BTreeSet::from([AppUserId(10), AppUserId(20)])
+    );
+    let sent = transport.sent_messages();
+    let new_messages = &sent[sent_before..];
+    let embed = new_messages
+        .iter()
+        .flat_map(|sent| &sent.message.response.embeds)
+        .find(|embed| {
+            embed
+                .title
+                .as_deref()
+                .is_some_and(|title| title.ends_with("Ready Check"))
+        })
+        .expect("new readycheck embed");
+    let confirmed = embed
+        .fields
+        .iter()
+        .find(|field| field.name.starts_with("✅ Confirmed Ready"))
+        .expect("confirmed players");
+    assert!(confirmed.value.contains("Away One"));
+    assert!(
+        new_messages
+            .iter()
+            .all(|sent| !sent.message.response.content.contains("<@20>"))
+    );
+    assert_eq!(
+        new_messages
+            .iter()
+            .filter(|sent| sent.message.response.content == ready_announcement(LobbyKind::Open, 2))
+            .count(),
+        1
+    );
+}
