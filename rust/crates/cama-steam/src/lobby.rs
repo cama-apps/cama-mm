@@ -1954,10 +1954,14 @@ fn map_match_details(match_: &CMsgDOTAMatch, gc_result: u32) -> MatchDetails {
         .map(|player| MatchPlayer {
             account_id: player.account_id(),
             player_slot: player.player_slot(),
-            team: player
-                .team_number
-                .map(|team| Team::from_raw(team.value()))
-                .unwrap_or(Team::Unknown(-1)),
+            // Older responses carry only player_slot (0-4 Radiant, 128-132
+            // Dire); without the fallback their roster would have no sides.
+            team: match (player.team_number, player.player_slot) {
+                (Some(team), _) => Team::from_raw(team.value()),
+                (None, Some(0..=4)) => Team::Radiant,
+                (None, Some(128..=132)) => Team::Dire,
+                (None, _) => Team::Unknown(-1),
+            },
             team_slot: player.team_slot,
             hero_id: player.hero_id(),
             player_name: player.player_name().to_owned(),
@@ -3580,6 +3584,32 @@ mod tests {
                 expected.map(serde_json::Value::from).as_ref(),
                 "{team:?}/{slot:?}/{raw:?}"
             );
+        }
+    }
+
+    #[test]
+    fn match_player_side_falls_back_to_player_slot_without_team_number() {
+        use steam_vent_proto_dota2::dota_gcmessages_common::cmsg_dotamatch::Player;
+        let cases = [
+            (None, Some(0), Team::Radiant),
+            (None, Some(4), Team::Radiant),
+            (None, Some(128), Team::Dire),
+            (None, Some(132), Team::Dire),
+            (None, Some(5), Team::Unknown(-1)),
+            (None, Some(133), Team::Unknown(-1)),
+            (None, None, Team::Unknown(-1)),
+            // An explicit team_number stays authoritative over the slot.
+            (Some(1), Some(0), Team::Dire),
+            (Some(0), Some(130), Team::Radiant),
+        ];
+        for (team, raw, expected) in cases {
+            let mut match_ = CMsgDOTAMatch::new();
+            let mut player = Player::new();
+            player.team_number = team.map(EnumOrUnknown::from_i32);
+            player.player_slot = raw;
+            match_.players.push(player);
+            let details = wire_match_details(&match_);
+            assert_eq!(details.players[0].team, expected, "{team:?}/{raw:?}");
         }
     }
 
