@@ -161,6 +161,15 @@ pub enum Theme {
     Items,
 }
 
+/// The end of the server's table a story stands out at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TableEnd {
+    /// The most of the measure: most deaths, highest GPM.
+    Top,
+    /// The least of it: fewest deaths, lowest win rate.
+    Bottom,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Tier {
     Extreme,
@@ -177,10 +186,10 @@ pub struct DistinctStory {
     pub value: f64,
     /// Ready to show: `"23,400"`, `"4:12 AM"`, `"27 / 2 / 14"`, `"61"`.
     pub display: String,
-    /// Counted from the story's own end of the table (best for a Popoff on
-    /// the high side, lowest for a Roast on the low side). `None` for small
-    /// populations and for ties.
+    /// Counted from `end`: rank 1 has the most at `Top` and the least at
+    /// `Bottom`. `None` for small populations and for ties.
     pub rank: Option<ServerRank>,
+    pub end: TableEnd,
     pub hero_id: Option<i64>,
     pub match_id: Option<i64>,
     /// Item key for `"item"` stories.
@@ -752,6 +761,7 @@ fn percentile(query: f64, values: &[f64]) -> f64 {
 
 struct Placement {
     direction: Direction,
+    end: TableEnd,
     tier: Tier,
     percentile: f64,
     rank: Option<ServerRank>,
@@ -766,10 +776,10 @@ fn place(row: &Row, high: Direction, value: f64, population: &[f64]) -> Option<P
     let above = n - below - equal;
     let percentile = percentile(value, population);
 
-    let (direction, strength, beyond) = if percentile >= 50.0 {
-        (high, percentile, above)
+    let (direction, end, strength, beyond) = if percentile >= 50.0 {
+        (high, TableEnd::Top, percentile, above)
     } else {
-        (row.low?, 100.0 - percentile, below)
+        (row.low?, TableEnd::Bottom, 100.0 - percentile, below)
     };
     let mut tier = if (beyond == 0 && equal == 1) || strength >= 95.0 {
         Tier::Extreme
@@ -790,6 +800,7 @@ fn place(row: &Row, high: Direction, value: f64, population: &[f64]) -> Option<P
     });
     Some(Placement {
         direction,
+        end,
         tier,
         percentile,
         rank,
@@ -866,6 +877,7 @@ pub fn distinct_stories(
             }
             Placement {
                 direction: high,
+                end: TableEnd::Top,
                 tier: Tier::Notable,
                 percentile: 65.0,
                 rank: None,
@@ -885,6 +897,7 @@ pub fn distinct_stories(
             value: mine.value,
             display: mine.display.clone(),
             rank: story.rank,
+            end: story.end,
             hero_id: mine.hero_id,
             match_id: mine.match_id,
             item: mine.item.clone(),

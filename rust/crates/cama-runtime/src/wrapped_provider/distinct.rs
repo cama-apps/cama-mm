@@ -352,7 +352,7 @@ pub(super) fn cave_in_slide(
 #[cfg(all(test, feature = "runtime-test-core"))]
 mod tests {
     use cama_domain::wrapped_activity::ServerRank;
-    use cama_domain::wrapped_distinct::Tier;
+    use cama_domain::wrapped_distinct::{TableEnd, Tier};
 
     use super::*;
 
@@ -365,6 +365,7 @@ mod tests {
             value,
             display: String::new(),
             rank: None,
+            end: TableEnd::Top,
             hero_id: None,
             match_id: Some(6),
             item: None,

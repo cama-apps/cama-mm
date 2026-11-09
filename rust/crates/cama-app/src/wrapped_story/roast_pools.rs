@@ -11,8 +11,8 @@ use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::formatting::count_noun;
 use cama_domain::wrapped_activity::ServerRank;
 use cama_domain::wrapped_distinct::{
-    COUNT_RECORDS, Direction, DistinctStory, HeroLine, HeroYear, PairStory, PersonalRecord, Theme,
-    Tier,
+    COUNT_RECORDS, Direction, DistinctStory, HeroLine, HeroYear, PairStory, PersonalRecord,
+    TableEnd, Theme, Tier,
 };
 
 #[path = "roast_pools/lines.rs"]
@@ -180,7 +180,10 @@ pub fn story_copy(story: &DistinctStory, vars: &CopyVars, seed: u64) -> StoryCop
     let (setup, punch) = choose(lines, seed, salt, &slots).unwrap_or_default();
     let (label, mut credit) = facts(story, hero, item.as_deref().unwrap_or("item"));
     if let Some(rank) = story.rank {
-        credit = format!("{credit} · {}", rank_phrase(story.direction, rank));
+        credit = format!(
+            "{credit} · {}",
+            rank_phrase(story.direction, story.end, rank)
+        );
     }
     StoryCopy {
         setup,
@@ -276,13 +279,18 @@ fn facts(story: &DistinctStory, hero: Option<&str>, item: &str) -> (String, Stri
     }
 }
 
-/// Server rank from the story's own end: the best for a popoff, the worst
-/// for a roast.
-fn rank_phrase(direction: Direction, rank: ServerRank) -> String {
-    match direction {
-        Direction::Popoff => format!("#{} of {}", rank.rank, rank.of),
-        Direction::Roast if rank.rank == 1 => format!("Dead last of {}", rank.of),
-        Direction::Roast => format!("{} from last of {}", ordinal(rank.rank), rank.of),
+/// Server rank from the end the story was ranked at. Only a roast at the
+/// bottom of the table counts from last; most deaths is `#1`, like any
+/// popoff.
+fn rank_phrase(direction: Direction, end: TableEnd, rank: ServerRank) -> String {
+    match (direction, end) {
+        (Direction::Roast, TableEnd::Bottom) if rank.rank == 1 => {
+            format!("Dead last of {}", rank.of)
+        }
+        (Direction::Roast, TableEnd::Bottom) => {
+            format!("{} from last of {}", ordinal(rank.rank), rank.of)
+        }
+        _ => format!("#{} of {}", rank.rank, rank.of),
     }
 }
 

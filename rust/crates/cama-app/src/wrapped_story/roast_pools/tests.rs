@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use cama_domain::wrapped_activity::ServerRank;
 use cama_domain::wrapped_distinct::{
     COUNT_RECORDS, Direction, DistinctStory, HeroLine, HeroYear, METRIC_KEYS, PairStory,
-    PersonalRecord, RECORD_KEYS, TRACKED_ITEMS, Theme, Tier, metric_directions,
+    PersonalRecord, RECORD_KEYS, TRACKED_ITEMS, TableEnd, Theme, Tier, metric_directions,
 };
 
 use super::*;
@@ -69,6 +69,7 @@ fn story(metric: &'static str, theme: Theme, direction: Direction, tier: Tier) -
         value: 9.4,
         display: "9.4".to_owned(),
         rank: None,
+        end: TableEnd::Top,
         hero_id: None,
         match_id: None,
         item: None,
@@ -473,6 +474,7 @@ fn ranks_and_heroes_show_up_when_known() {
     assert!(ranked > 0, "rank lines never used");
     assert!(story_copy(&best, &vars(), 3).credit.ends_with("#1 of 187"));
 
+    // Most deaths counts from the top of the table, like any popoff.
     let mut worst = story(
         "deaths_per_game",
         Theme::Combat,
@@ -480,16 +482,38 @@ fn ranks_and_heroes_show_up_when_known() {
         Tier::Strong,
     );
     worst.rank = Some(ServerRank { rank: 3, of: 187 });
+    assert!(story_copy(&worst, &vars(), 3).credit.ends_with("#3 of 187"));
+    worst.rank = Some(ServerRank { rank: 1, of: 187 });
+    let credit = story_copy(&worst, &vars(), 3).credit;
+    assert!(credit.ends_with("#1 of 187"), "{credit}");
+    // Only a roast from the bottom counts from last.
+    let mut losing = story("win_rate", Theme::Clutch, Direction::Roast, Tier::Strong);
+    losing.end = TableEnd::Bottom;
+    losing.rank = Some(ServerRank { rank: 3, of: 187 });
     assert!(
-        story_copy(&worst, &vars(), 3)
+        story_copy(&losing, &vars(), 3)
             .credit
             .ends_with("3rd from last of 187")
     );
-    worst.rank = Some(ServerRank { rank: 1, of: 187 });
+    losing.rank = Some(ServerRank { rank: 1, of: 187 });
     assert!(
-        story_copy(&worst, &vars(), 3)
+        story_copy(&losing, &vars(), 3)
             .credit
             .ends_with("Dead last of 187")
+    );
+    // The fewest deaths is a popoff's own #1.
+    let mut survivor = story(
+        "deaths_per_game",
+        Theme::Combat,
+        Direction::Popoff,
+        Tier::Strong,
+    );
+    survivor.end = TableEnd::Bottom;
+    survivor.rank = Some(ServerRank { rank: 1, of: 187 });
+    assert!(
+        story_copy(&survivor, &vars(), 3)
+            .credit
+            .ends_with("#1 of 187")
     );
 
     let mut cinema = story("best_game", Theme::Combat, Direction::Popoff, Tier::Strong);

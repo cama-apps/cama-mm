@@ -192,6 +192,42 @@ fn a_two_way_tie_at_the_top_is_not_extreme() {
 }
 
 #[test]
+fn stories_know_which_end_of_the_table_they_rank_from() {
+    // Player 1 dies the most and wins the least; player 2 dies the least.
+    let rows = population(30, 8, |player, index, row| {
+        row.deaths = Some(match player {
+            1 => 15,
+            2 => 1,
+            _ => 4 + player % 4,
+        });
+        if player == 1 {
+            row.won = Some(index == 0);
+        }
+    });
+    let roster = players(30);
+    let feeder = distinct_stories(&rows, &roster, 1, 3);
+
+    let deaths = story_for(&feeder, "deaths_per_game").expect("most deaths");
+    assert_eq!(
+        (deaths.direction, deaths.end),
+        (Direction::Roast, TableEnd::Top)
+    );
+    assert_eq!(deaths.rank.map(|rank| rank.rank), Some(1));
+    let losing = story_for(&feeder, "win_rate").expect("lowest win rate");
+    assert_eq!(
+        (losing.direction, losing.end),
+        (Direction::Roast, TableEnd::Bottom)
+    );
+    assert_eq!(losing.rank.map(|rank| rank.rank), Some(1));
+    let survivor = distinct_stories(&rows, &roster, 2, 3);
+    let fewest = story_for(&survivor, "deaths_per_game").expect("fewest deaths");
+    assert_eq!(
+        (fewest.direction, fewest.end),
+        (Direction::Popoff, TableEnd::Bottom)
+    );
+}
+
+#[test]
 fn small_population_uses_records_only() {
     let rows = population(6, 8, |player, index, row| {
         row.enriched = true;
@@ -239,6 +275,7 @@ fn candidate(
         value: 1.0,
         display: "1".to_string(),
         rank: None,
+        end: TableEnd::Top,
         hero_id: None,
         match_id: None,
         item: None,

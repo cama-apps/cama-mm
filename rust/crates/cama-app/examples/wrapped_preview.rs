@@ -17,7 +17,7 @@ use cama_app::wrapped_story::roast_pools::{
 };
 use cama_domain::wrapped_activity::ServerRank;
 use cama_domain::wrapped_distinct::{
-    Direction, DistinctStory, HeroLine, PairStory, PersonalRecord, Theme, Tier,
+    Direction, DistinctStory, HeroLine, PairStory, PersonalRecord, TableEnd, Theme, Tier,
 };
 use std::path::PathBuf;
 use std::time::Instant;
@@ -138,6 +138,11 @@ fn story(
         value: 0.0,
         display: display.to_owned(),
         rank: rank.map(|(rank, of)| ServerRank { rank, of }),
+        // The preview's only ranked roast is a bottom-of-the-table one.
+        end: match direction {
+            Direction::Popoff => TableEnd::Top,
+            Direction::Roast => TableEnd::Bottom,
+        },
         hero_id: None,
         match_id: None,
         item: None,
