@@ -209,6 +209,7 @@ pub struct DeadlockSteamClient {
     state: Arc<RwLock<ClientState>>,
     events: broadcast::Sender<DeadlockSteamEvent>,
     _watcher: Arc<Watcher>,
+    _pump: Arc<Watcher>,
     own_account_id: u32,
 }
 impl fmt::Debug for DeadlockSteamClient {
@@ -246,7 +247,11 @@ impl DeadlockSteamClient {
     ) -> Result<Self, DeadlockSteamError> {
         cache_types.validate()?;
         // Subscribe before the handshake; retain all following cache mutations.
-        let mut raw = auth.connection.on::<FromGc>();
+        // Drain it immediately: steam-vent buffers only 16 messages per kind
+        // and reports overflow as EOF, so an unread subscription across the
+        // handshake would otherwise end the session as soon as it starts.
+        let (raw, pump) = crate::gc_stream::buffer_gc_messages(auth.connection.on::<FromGc>());
+        let pump = Watcher(pump);
         let (gc, welcome) = timeout(
             COMMAND_TIMEOUT,
             auth.connection
@@ -261,31 +266,15 @@ impl DeadlockSteamClient {
             snapshot: initial,
         }));
         let (events, _) = broadcast::channel(128);
-        let watcher_state = state.clone();
-        let watcher_events = events.clone();
-        let watcher = tokio::spawn(async move {
-            while let Some(Ok(FromGc(message))) = raw.next().await {
-                let mut state = watcher_state.write().await;
-                match apply_envelope(&mut state.snapshot, &message, cache_types) {
-                    Ok(changed) => {
-                        if changed {
-                            let _ = watcher_events
-                                .send(DeadlockSteamEvent::Updated(state.snapshot.clone()));
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            watcher_state.write().await.ready = false;
-            let _ = watcher_events.send(DeadlockSteamEvent::Disconnected);
-        });
+        let watcher = spawn_watcher(raw, &state, &events, cache_types);
         Ok(Self {
             own_account_id: auth.connection.steam_id().account_id(),
             _connection: auth.connection,
             gc: Arc::new(Mutex::new(gc)),
             state,
             events,
-            _watcher: Arc::new(Watcher(watcher)),
+            _watcher: Arc::new(watcher),
+            _pump: Arc::new(pump),
         })
     }
     pub const fn own_account_id(&self) -> u32 {
@@ -637,6 +626,44 @@ fn apply_object(
     }
     Ok(())
 }
+/// Apply ordered GC traffic until the session can no longer be trusted.
+///
+/// The Deadlock client has no cache resync, so a lagged subscription (EOF),
+/// a closed stream, or an invalid cache message ends the session explicitly
+/// instead of continuing on a snapshot that silently missed a mutation.
+fn spawn_watcher(
+    messages: impl futures_util::Stream<Item = Result<FromGc, NetworkError>> + Send + 'static,
+    state: &Arc<RwLock<ClientState>>,
+    events: &broadcast::Sender<DeadlockSteamEvent>,
+    cache_types: DeadlockCacheTypes,
+) -> Watcher {
+    let state = state.clone();
+    let events = events.clone();
+    Watcher(tokio::spawn(async move {
+        futures_util::pin_mut!(messages);
+        let reason = loop {
+            let message = match messages.next().await {
+                Some(Ok(FromGc(message))) => message,
+                Some(Err(NetworkError::EOF)) => {
+                    break "coordinator messages were dropped".to_owned();
+                }
+                Some(Err(error)) => break error.to_string(),
+                None => break "coordinator message stream closed".to_owned(),
+            };
+            let mut guard = state.write().await;
+            match apply_envelope(&mut guard.snapshot, &message, cache_types) {
+                Ok(true) => {
+                    let _ = events.send(DeadlockSteamEvent::Updated(guard.snapshot.clone()));
+                }
+                Ok(false) => {}
+                Err(error) => break error.to_string(),
+            }
+        };
+        tracing::warn!(%reason, "Deadlock coordinator session ended");
+        state.write().await.ready = false;
+        let _ = events.send(DeadlockSteamEvent::Disconnected);
+    }))
+}
 fn apply_envelope(
     snapshot: &mut DeadlockSnapshot,
     message: &CMsgGCClient,
@@ -853,6 +880,84 @@ mod tests {
         let multiple=CMsgSOMultipleObjects {objects_added:vec![steam_vent_proto_deadlock::gcsdk_gcmessages::cmsg_somultiple_objects::SingleObject {type_id:Some(TYPES.party),object_data:Some(object.write_to_bytes().unwrap()),..Default::default()}],..Default::default()};
         apply_envelope(&mut snapshot, &envelope(26, multiple), TYPES).unwrap();
         assert_eq!(snapshot.party.unwrap().party_id, 42);
+    }
+    /// Mirror steam-vent's per-kind subscription: a 16-slot broadcast whose
+    /// lag is reported as EOF and whose closure ends the stream.
+    fn steam_vent_subscription(
+        receiver: broadcast::Receiver<CMsgGCClient>,
+    ) -> impl futures_util::Stream<Item = Result<FromGc, NetworkError>> + Send + 'static {
+        futures_util::stream::unfold(receiver, |mut receiver| async move {
+            match receiver.recv().await {
+                Ok(message) => Some((Ok(FromGc(message)), receiver)),
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    Some((Err(NetworkError::EOF), receiver))
+                }
+                Err(broadcast::error::RecvError::Closed) => None,
+            }
+        })
+    }
+    fn party_update(join_code: u64) -> CMsgGCClient {
+        let object = CSOCitadelParty {
+            party_id: Some(42),
+            join_code: Some(join_code),
+            ..Default::default()
+        };
+        envelope(
+            22,
+            CMsgSOSingleObject {
+                type_id: Some(TYPES.party),
+                object_data: Some(object.write_to_bytes().unwrap()),
+                ..Default::default()
+            },
+        )
+    }
+    async fn wait_until(state: &Arc<RwLock<ClientState>>, done: impl Fn(&ClientState) -> bool) {
+        timeout(Duration::from_secs(1), async {
+            while !done(&*state.read().await) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn unread_subscription_across_handshake_burst_keeps_session_ready() {
+        let (sender, receiver) = broadcast::channel(16);
+        let (messages, pump) =
+            crate::gc_stream::buffer_gc_messages(steam_vent_subscription(receiver));
+        let _pump = Watcher(pump);
+        // Like a 30s handshake: GC traffic arrives while nobody reads the stream.
+        for join_code in 1..=100 {
+            sender.send(party_update(join_code)).unwrap();
+            tokio::task::yield_now().await;
+        }
+        let state = Arc::new(RwLock::new(ClientState {
+            ready: true,
+            snapshot: DeadlockSnapshot::default(),
+        }));
+        let (events, _) = broadcast::channel(128);
+        let _watcher = spawn_watcher(messages, &state, &events, TYPES);
+        wait_until(&state, |state| {
+            state.snapshot.party.as_ref().and_then(|p| p.join_code) == Some(100)
+        })
+        .await;
+        assert!(state.read().await.ready);
+    }
+    #[tokio::test]
+    async fn dropped_coordinator_messages_end_the_session_explicitly() {
+        let state = Arc::new(RwLock::new(ClientState {
+            ready: true,
+            snapshot: DeadlockSnapshot::default(),
+        }));
+        let (events, mut receiver) = broadcast::channel(128);
+        let messages = futures_util::stream::iter([Err(NetworkError::EOF)])
+            .chain(futures_util::stream::pending());
+        let _watcher = spawn_watcher(messages, &state, &events, TYPES);
+        wait_until(&state, |state| !state.ready).await;
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            DeadlockSteamEvent::Disconnected
+        ));
     }
     #[test]
     fn disconnect_and_bad_headers_fail_closed_and_other_games_are_ignored() {

@@ -747,7 +747,8 @@ impl DotaSteamClient {
         // and drain it immediately: steam-vent buffers only 16 messages per
         // kind and reports overflow as EOF, so an unread subscription across
         // the handshake would otherwise lose the Welcome or initial caches.
-        let (messages, pump) = buffer_gc_messages(auth.connection.on::<crate::handshake::FromGc>());
+        let (messages, pump) =
+            crate::gc_stream::buffer_gc_messages(auth.connection.on::<crate::handshake::FromGc>());
         let (gc, _welcome) = crate::handshake::connect(&auth.connection).await?;
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let state = Arc::new(RwLock::new(ClientState {
@@ -782,7 +783,7 @@ impl DotaSteamClient {
             state,
             events,
             _watcher: Arc::new(watcher),
-            _pump: Arc::new(pump),
+            _pump: Arc::new(WatcherTask(pump)),
             own_steam_id,
             own_account_id,
             command_timeout: INITIAL_CACHE_TIMEOUT,
@@ -1308,25 +1309,6 @@ fn lobby_config_matches(config: &LobbyConfig, snapshot: &LobbySnapshot) -> bool 
 }
 
 type GcMessage = Result<crate::handshake::FromGc, NetworkError>;
-
-/// Forward a steam-vent subscription into an unbounded queue as soon as each
-/// message arrives. The forwarder does no other work, so the bounded upstream
-/// broadcast cannot overflow while the consumer waits on handshake or locks.
-fn buffer_gc_messages(
-    messages: impl Stream<Item = GcMessage> + Send + 'static,
-) -> (impl Stream<Item = GcMessage> + Send + 'static, WatcherTask) {
-    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(async move {
-        futures_util::pin_mut!(messages);
-        while let Some(message) = messages.next().await {
-            if sender.send(message).is_err() {
-                return;
-            }
-        }
-    });
-    let stream = futures_util::stream::poll_fn(move |cx| receiver.poll_recv(cx));
-    (stream, WatcherTask(task))
-}
 
 fn spawn_watchers(
     messages: impl Stream<Item = GcMessage> + Send + 'static,
@@ -2408,7 +2390,9 @@ mod tests {
         );
 
         let (sender, receiver) = broadcast::channel(16);
-        let (buffered, _pump) = buffer_gc_messages(steam_vent_subscription(receiver));
+        let (buffered, pump) =
+            crate::gc_stream::buffer_gc_messages(steam_vent_subscription(receiver));
+        let _pump = WatcherTask(pump);
         let buffered = burst_through(buffered, sender).await;
         assert_eq!(buffered.len(), 100);
         assert!(buffered.iter().all(Result::is_ok));
