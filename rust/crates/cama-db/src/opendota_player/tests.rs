@@ -1247,3 +1247,30 @@ fn test_wrapped_refresh_preserves_buybacks_and_item_counts_across_link_changes()
     );
     assert_eq!(read(&fixture), expected);
 }
+
+#[test]
+fn test_wrapped_refresh_keeps_only_integral_buyback_counts() {
+    let fixture = Fixture::new();
+    fixture.player(100, GUILD, "whole-number", None);
+    fixture.player(200, GUILD, "text", None);
+    link(&fixture, 100, 12_345, true, 10);
+    link(&fixture, 200, 23_456, true, 10);
+    let match_id = fixture.enriched_match(
+        &[100, 200],
+        r#"{"players":[{"account_id":12345,"buyback_count":2.0},
+            {"account_id":23456,"buyback_count":"x"}]}"#,
+    );
+    let buybacks = |discord_id: i64| {
+        fixture
+            .connection()
+            .query_row(
+                "SELECT buybacks FROM wrapped_enrichment_facts
+                  WHERE guild_id=?1 AND match_id=?2 AND discord_id=?3",
+                params![GUILD, match_id, discord_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .expect("read buybacks")
+    };
+    assert_eq!(buybacks(100), Some(2));
+    assert_eq!(buybacks(200), None);
+}

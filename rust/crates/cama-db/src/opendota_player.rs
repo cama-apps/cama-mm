@@ -654,7 +654,7 @@ fn refresh_wrapped_enrichment_facts(
                     number_f64(match_data.get("throw")),
                     player
                         .and_then(|fields| fields.get("buyback_count"))
-                        .and_then(JsonValue::as_i64),
+                        .and_then(coerce_integral_i64),
                     item_counts,
                 ],
             )?;

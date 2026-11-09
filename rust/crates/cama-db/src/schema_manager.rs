@@ -28,7 +28,7 @@ use thiserror::Error;
 
 use crate::{
     expected_migrations,
-    json_numeric::{coerce_i64_like_python, number_f64},
+    json_numeric::{coerce_i64_like_python, coerce_integral_i64, number_f64},
 };
 
 /// Canonical schema produced by the current ordered migration set.
@@ -2145,7 +2145,9 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
                     json_number_i64(player.and_then(|fields| fields.get("lane_role"))),
                     json_number_f64(payload.get("comeback")),
                     json_number_f64(payload.get("throw")),
-                    json_number_i64(player.and_then(|fields| fields.get("buyback_count"))),
+                    player
+                        .and_then(|fields| fields.get("buyback_count"))
+                        .and_then(coerce_integral_i64),
                     item_counts,
                 ],
             )?;

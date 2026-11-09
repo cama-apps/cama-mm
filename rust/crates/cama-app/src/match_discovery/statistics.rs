@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::opendota_http::{field_bool, field_f64, field_i64, value_f64};
+use cama_db::json_numeric::coerce_integral_i64;
 use cama_domain::role_derivation::FARM_PRIORITY_MINUTE;
 use serde_json::Value;
 
@@ -118,7 +119,7 @@ fn project_match_player(value: &Value) -> Option<OpenDotaPlayer> {
             courier_kills: field_i64(object, "courier_kills"),
             pings: field_i64(object, "pings"),
             lane_role: field_i64(object, "lane_role"),
-            buyback_count: field_i64(object, "buyback_count"),
+            buyback_count: object.get("buyback_count").and_then(coerce_integral_i64),
             purchase_keys,
         },
     })
