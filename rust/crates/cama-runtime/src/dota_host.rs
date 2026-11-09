@@ -69,6 +69,9 @@ const LAUNCH_CONFIRMATION_TIMEOUT_SECONDS: i64 = 90;
 /// Same bound as server allocation: a launch never identified by Valve
 /// after this long needs an operator.
 const UNIDENTIFIED_LAUNCH_REVIEW_SECONDS: i64 = 300;
+/// After a manual replacement, an old lobby that never got a server is
+/// released once this long has passed since the override.
+const REPLACED_LOBBY_ABANDON_SECONDS: i64 = 600;
 /// An operator command saved the session while a tick held the older
 /// revision. Nothing was written; the next tick re-reads and continues.
 const STALE_SESSION_SAVE: &str =
@@ -1666,8 +1669,22 @@ impl DotaHostWorker {
             let failed_launch_returned = failed_launch::returned_to_lobby(&lobby)
                 && (lobby.launch_history.allocation_observed
                     || state.allocation_observed_at.is_some());
+            // A launch that never got a server (still gathering or
+            // allocating) is abandoned once the replacement has long been
+            // recorded; without this bound nothing would ever release it.
+            let abandoned_unstarted =
+                matches!(lobby.stage, LobbyStage::Gathering | LobbyStage::Allocating)
+                    && lobby.server_id.is_none()
+                    && lobby.winner.is_none()
+                    && state
+                        .manual_record_override
+                        .as_ref()
+                        .and_then(|o| o.get("requested_at"))
+                        .and_then(serde_json::Value::as_i64)
+                        .is_some_and(|at| now.saturating_sub(at) >= REPLACED_LOBBY_ABANDON_SECONDS);
             if lobby.stage == LobbyStage::Postgame
                 || failed_launch_returned
+                || abandoned_unstarted
                 || (lobby.stage == LobbyStage::Gathering
                     && lobby.match_id.is_none()
                     && lobby.server_id.is_none())
