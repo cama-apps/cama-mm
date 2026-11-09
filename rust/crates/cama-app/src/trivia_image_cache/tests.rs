@@ -25,9 +25,27 @@ fn shared_steam_image_root_preserves_local_default_for_empty_configuration() {
     );
 }
 
-/// The smallest byte string the cache accepts as a complete PNG: the
-/// signature followed by an `IEND` chunk.
+/// The smallest byte string the cache reads back as a complete PNG: the
+/// signature followed by an `IEND` chunk. It has no pixels, so a download of
+/// it is refused.
 const PNG_FIXTURE: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\0IEND\xaeB`\x82";
+
+/// A real PNG `width` by `height`: opaque red on the left half, clear on the
+/// right.
+fn png(width: usize, height: usize) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(width * height * 4);
+    for _ in 0..height {
+        for x in 0..width {
+            let pixel = if x < width / 2 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 0, 0]
+            };
+            pixels.extend_from_slice(&pixel);
+        }
+    }
+    crate::png_encoder::encode_rgba_png(width, height, &pixels)
+}
 
 fn one_shot_image_server(body: &[u8]) -> (String, thread::JoinHandle<()>) {
     one_shot_server(body, true)
@@ -162,15 +180,16 @@ fn test_returns_existing_path() {
 fn test_downloads_on_miss() {
     let root = tempdir().expect("cache directory");
     let cache = TriviaImageCache::new(root.path()).expect("cache");
-    let (server, handle) = one_shot_image_server(PNG_FIXTURE);
+    let body = png(2, 2);
+    let (server, handle) = one_shot_image_server(&body);
     let url = format!("{server}/apps/dota_react/heroes/new_hero.png");
     let image = cache.get_or_download(&url).expect("download image");
     handle.join().expect("image server");
     assert_eq!(image.filename, "new_hero.png");
-    assert_eq!(image.bytes, PNG_FIXTURE);
+    assert_eq!(image.bytes, body);
     assert_eq!(
         fs::read(cache.path_for_url(&url)).expect("persisted cached image"),
-        PNG_FIXTURE
+        body
     );
 }
 
@@ -178,17 +197,18 @@ fn test_downloads_on_miss() {
 fn test_truncated_cached_file_is_downloaded_again() {
     let root = tempdir().expect("cache directory");
     let cache = TriviaImageCache::new(root.path()).expect("cache");
-    let (server, handle) = one_shot_image_server(PNG_FIXTURE);
+    let body = png(2, 2);
+    let (server, handle) = one_shot_image_server(&body);
     let url = format!("{server}/apps/dota_react/heroes/cut_short.png");
     let path = cache.path_for_url(&url);
     fs::create_dir_all(path.parent().expect("cache parent")).expect("create cache parent");
-    fs::write(&path, &PNG_FIXTURE[..12]).expect("seed a write that stopped part way");
+    fs::write(&path, &body[..12]).expect("seed a write that stopped part way");
 
     let image = cache.get_or_download(&url).expect("re-download the image");
     handle.join().expect("image server");
 
-    assert_eq!(image.bytes, PNG_FIXTURE);
-    assert_eq!(fs::read(&path).expect("replaced cached image"), PNG_FIXTURE);
+    assert_eq!(image.bytes, body);
+    assert_eq!(fs::read(&path).expect("replaced cached image"), body);
     let leftovers = fs::read_dir(path.parent().expect("cache parent"))
         .expect("list cache directory")
         .count();
@@ -252,7 +272,8 @@ fn test_returns_none_when_not_cached() {
 fn warm_urls_caches_each_url_once() {
     let root = tempdir().expect("cache directory");
     let cache = TriviaImageCache::new(root.path()).expect("cache");
-    let (server, handle) = one_shot_image_server(PNG_FIXTURE);
+    let body = png(2, 2);
+    let (server, handle) = one_shot_image_server(&body);
     let url = format!("{server}/apps/dota_react/heroes/renders/new_hero.png");
     let urls = BTreeSet::from([url.clone()]);
     let first = cache.warm_urls(urls.clone()).expect("first warm");
@@ -260,7 +281,7 @@ fn warm_urls_caches_each_url_once() {
     assert_eq!((first.newly_cached, first.total_urls), (1, 1));
     assert_eq!(
         fs::read(cache.path_for_url(&url)).expect("cached render"),
-        PNG_FIXTURE
+        body
     );
     // The one-shot server is gone; a second warm must not need it.
     let second = cache.warm_urls(urls).expect("second warm");
@@ -292,4 +313,65 @@ fn images_over_the_reader_limit_are_never_cached() {
         assert!(!path.exists(), "content length sent: {content_length}");
         assert!(!path.with_extension("png.partial").exists());
     }
+}
+
+#[test]
+fn images_that_look_complete_but_do_not_decode_are_never_cached() {
+    let mut garbled = png(4, 4);
+    // Ruin the compressed pixels but keep the PNG framing intact.
+    let pixels = garbled
+        .windows(4)
+        .position(|window| window == b"IDAT")
+        .expect("pixel chunk")
+        + 4;
+    for byte in &mut garbled[pixels..pixels + 6] {
+        *byte ^= 0xff;
+    }
+    for body in [PNG_FIXTURE.to_vec(), garbled] {
+        let root = tempdir().expect("cache directory");
+        let cache = TriviaImageCache::new(root.path()).expect("cache");
+        let (server, handle) = one_shot_image_server(&body);
+        let url = format!("{server}/apps/dota_react/heroes/corrupt.png");
+
+        let error = cache
+            .get_or_download(&url)
+            .expect_err("bytes that do not decode must not be served");
+        handle.join().expect("image server");
+
+        assert!(
+            matches!(error, TriviaImageCacheError::InvalidImage { .. }),
+            "{error:?}"
+        );
+        assert!(!cache.path_for_url(&url).exists());
+    }
+}
+
+#[test]
+fn hero_renders_are_cached_at_most_900_px_with_their_alpha() {
+    let large = png(1200, 300);
+    let root = tempdir().expect("cache directory");
+    let cache = TriviaImageCache::new(root.path()).expect("cache");
+
+    let (server, handle) = one_shot_image_server(&large);
+    let render = format!("{server}/apps/dota2/videos/dota_react/heroes/renders/big_hero.png");
+    let image = cache.get_or_download(&render).expect("download render");
+    handle.join().expect("image server");
+    let cached = fs::read(cache.path_for_url(&render)).expect("cached render");
+    assert_eq!(image.bytes, cached);
+    let decoded = crate::pet_assets::decode_png_raster(&cached).expect("cached render decodes");
+    assert_eq!((decoded.width, decoded.height), (900, 225));
+    let pixel = |x: usize, y: usize| {
+        let at = (y * decoded.width + x) * 4;
+        decoded.pixels[at..at + 4].to_vec()
+    };
+    assert_eq!(pixel(10, 100), [255, 0, 0, 255]);
+    assert_eq!(pixel(890, 100)[3], 0, "the clear half stays clear");
+
+    // Portraits are cached exactly as served.
+    let (server, handle) = one_shot_image_server(&large);
+    let portrait = format!("{server}/apps/dota2/images/dota_react/heroes/big_hero.png");
+    let image = cache.get_or_download(&portrait).expect("download portrait");
+    handle.join().expect("image server");
+    assert_eq!(image.bytes, large);
+    assert_eq!(fs::read(cache.path_for_url(&portrait)).unwrap(), large);
 }

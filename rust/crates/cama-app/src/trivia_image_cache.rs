@@ -4,10 +4,11 @@
 //! fallback mirror `services/trivia_image_cache.py`. Callers perform these
 //! blocking operations on a worker thread.
 //!
-//! Only complete PNG/JPEG bodies are cached, and they land through a
-//! temporary file and a rename, so a reader never sees a partial image. A
-//! cached file that is unreadable or not a complete image counts as a miss
-//! and is downloaded again.
+//! Only PNG bodies that decode and complete JPEG bodies are cached, none
+//! larger than `MAX_CACHED_IMAGE_BYTES`, and hero renders are shrunk to
+//! `MAX_RENDER_SIDE` first. They land through a temporary file and a rename,
+//! so a reader never sees a partial image. A cached file that is unreadable
+//! or not a complete image counts as a miss and is downloaded again.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -20,6 +21,8 @@ use std::time::Duration;
 use reqwest::blocking::Client;
 use thiserror::Error;
 
+use crate::pet_assets::decode_png_raster;
+use crate::png_encoder::{PNG_SIGNATURE, encode_rgba_png};
 use crate::trivia_questions::TriviaCatalog;
 
 pub const STEAM_IMAGE_CACHE_ROOT_ENV: &str = "STEAM_IMAGE_CACHE_ROOT";
@@ -49,6 +52,9 @@ pub fn production_trivia_cache_path() -> PathBuf {
 /// The largest image the cache stores, and the largest cached file a reader
 /// accepts. A hero render is about 1 MB.
 pub const MAX_CACHED_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// The longest side a cached hero render keeps. Steam serves them at 1440 px.
+pub const MAX_RENDER_SIDE: usize = 900;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedTriviaImage {
@@ -224,12 +230,11 @@ impl TriviaImageCache {
         if let Some(bytes) = read_cached_image(path) {
             return Ok(bytes);
         }
-        let bytes = download_capped(client, url)?;
-        if !is_complete_image(&bytes) {
+        let Some(bytes) = cacheable(url, download_capped(client, url)?) else {
             return Err(TriviaImageCacheError::InvalidImage {
                 url: url.to_owned(),
             });
-        }
+        };
         let io_error = |path: &Path| {
             let path = path.to_path_buf();
             move |source| TriviaImageCacheError::Io { path, source }
@@ -248,8 +253,31 @@ impl TriviaImageCache {
                 source,
             });
         }
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
+}
+
+/// What the cache stores for `url`'s downloaded `bytes`: a complete JPEG as
+/// served, or a PNG that decodes, a hero render shrunk to `MAX_RENDER_SIDE`
+/// on its long side with its alpha kept. `None` for anything else, so a
+/// corrupt image is never cached.
+fn cacheable(url: &str, bytes: Vec<u8>) -> Option<Vec<u8>> {
+    if !is_complete_image(&bytes) {
+        return None;
+    }
+    if !bytes.starts_with(PNG_SIGNATURE) {
+        // There is no JPEG decoder here; its framing is the check.
+        return Some(bytes);
+    }
+    let image = decode_png_raster(&bytes)?;
+    let longest = image.width.max(image.height);
+    if !url.contains("/dota_react/heroes/renders/") || longest <= MAX_RENDER_SIDE {
+        return Some(bytes);
+    }
+    let scaled = |side: usize| ((side * MAX_RENDER_SIDE + longest / 2) / longest).max(1);
+    let (width, height) = (scaled(image.width), scaled(image.height));
+    let shrunk = image.resized_lanczos(width, height);
+    Some(encode_rgba_png(width, height, &shrunk.pixels))
 }
 
 /// The body at `url`, refused once it passes `MAX_CACHED_IMAGE_BYTES`, so

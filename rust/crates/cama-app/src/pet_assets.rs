@@ -240,7 +240,10 @@ impl RasterImage {
         }
     }
 
-    fn resized_lanczos(&self, width: usize, height: usize) -> Self {
+    /// This image resampled to `width` by `height` with a Lanczos-3 filter,
+    /// weighting colors by alpha so clear pixels never bleed into opaque ones.
+    #[must_use]
+    pub fn resized_lanczos(&self, width: usize, height: usize) -> Self {
         if self.width == width && self.height == height {
             return self.clone();
         }
