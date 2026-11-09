@@ -780,7 +780,7 @@ fn place(row: &Row, high: Direction, value: f64, population: &[f64]) -> Option<P
     } else {
         return None;
     };
-    let shared_extreme = beyond == 0 && equal > 2;
+    let shared_extreme = beyond == 0 && equal > 1;
     if shared_extreme {
         tier = tier.max(Tier::Strong);
     }

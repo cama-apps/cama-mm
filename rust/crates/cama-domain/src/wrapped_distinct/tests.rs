@@ -177,6 +177,21 @@ fn shared_extreme_never_gets_rank_one_or_extreme() {
 }
 
 #[test]
+fn a_two_way_tie_at_the_top_is_not_extreme() {
+    let rows = population(30, 8, |player, _, row| {
+        row.enriched = true;
+        row.deaths = Some(if player <= 2 { 15 } else { 4 + player % 4 });
+    });
+    for target in [1, 2] {
+        let stories = distinct_stories(&rows, &players(30), target, 3);
+        let deaths = story_for(&stories, "deaths_per_game").expect("tied deaths story");
+
+        assert_eq!(deaths.tier, Tier::Strong, "player {target}");
+        assert!(deaths.rank.is_none(), "player {target}");
+    }
+}
+
+#[test]
 fn small_population_uses_records_only() {
     let rows = population(6, 8, |player, index, row| {
         row.enriched = true;
