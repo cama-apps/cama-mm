@@ -7,6 +7,42 @@ use super::super::stage::{
 };
 use super::*;
 
+/// The cinema card's credit caption: its size, face, and letter spacing.
+pub(super) const CAPTION: (f32, Face, f32) = (26.0, Face::Medium, 0.32);
+
+fn tracked_width(glyphs: &[String], size: f32, face: Face, spacing: f32) -> f32 {
+    let letters = glyphs.iter().map(|glyph| text_width(glyph, size, face));
+    letters.sum::<f32>() + spacing * size * glyphs.len().saturating_sub(1) as f32
+}
+
+/// The size `value` takes as one line of spaced caps across `width`, shrunk
+/// from `size` only as far as it must.
+fn tracked_size(value: &str, width: i32, size: f32, face: Face, spacing: f32) -> f32 {
+    let glyphs = value.chars().map(String::from).collect::<Vec<_>>();
+    size.min(size * width as f32 / tracked_width(&glyphs, size, face, spacing))
+}
+
+/// The cinema caption's size and letter spacing for `caption`: the designed
+/// spacing while the type stays at the credit's minimum or above, then
+/// tighter spacing, down to none, before the type shrinks any further.
+pub(super) fn caption_fit(caption: &str) -> (f32, f32) {
+    let (size, face, spacing) = CAPTION;
+    let floor = CREDIT_TYPE.minimum;
+    let fitted = tracked_size(caption, COLUMN, size, face, spacing);
+    if fitted >= floor {
+        return (fitted, spacing);
+    }
+    let glyphs = caption.chars().map(String::from).collect::<Vec<_>>();
+    let letters = tracked_width(&glyphs, floor, face, 0.0);
+    let gaps = floor * glyphs.len().saturating_sub(1) as f32;
+    let tighter = if gaps > 0.0 {
+        ((COLUMN as f32 - letters) / gaps).clamp(0.0, spacing)
+    } else {
+        0.0
+    };
+    (tracked_size(caption, COLUMN, floor, face, tighter), tighter)
+}
+
 /// Cubic ease-in-out, for the film-like letterbox and the chart draw.
 fn in_out(progress: f32) -> f32 {
     if progress < 0.5 {
@@ -80,11 +116,8 @@ fn tracked(
         return;
     }
     let glyphs = value.chars().map(String::from).collect::<Vec<_>>();
-    let measure = |size: f32| {
-        let letters = glyphs.iter().map(|glyph| text_width(glyph, size, face));
-        letters.sum::<f32>() + spacing * size * (glyphs.len() - 1) as f32
-    };
-    let size = size.min(size * rect.2 as f32 / measure(size));
+    let measure = |size: f32| tracked_width(&glyphs, size, face, spacing);
+    let size = tracked_size(value, rect.2, size, face, spacing);
     let shown = stage.ease(rise.0, rise.1);
     if shown <= 0.0 {
         return;
@@ -127,14 +160,16 @@ pub(super) fn cinema(stage: &mut Stage<'_>, beat: &WrappedBeat, look: Look) {
         Align::Center,
         (0.66, 0.78),
     );
+    let caption = beat.credit.to_uppercase();
+    let (size, spacing) = caption_fit(&caption);
     tracked(
         stage,
-        &beat.credit.to_uppercase(),
+        &caption,
         (MARGIN, bottom + 30, COLUMN, 34),
-        26.0,
-        Face::Medium,
+        size,
+        CAPTION.1,
         look.quiet,
-        0.32,
+        spacing,
         0.5,
         (0.74, 0.86),
     );

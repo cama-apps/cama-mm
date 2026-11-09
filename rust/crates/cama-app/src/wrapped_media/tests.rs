@@ -625,6 +625,128 @@ fn every_pool_line_fits_its_beat() {
 }
 
 #[test]
+fn every_label_and_credit_fits_its_beat() {
+    use crate::wrapped_story::roast_pools::{
+        CopyVars, HERO_STORY_KINDS, PEOPLE_KINDS, hero_copy, people_copy, record_copy,
+        side_split_copy, story_copy,
+    };
+    use cama_domain::wrapped_activity::ServerRank;
+    use cama_domain::wrapped_distinct::{
+        DistinctStory, HeroLine, HeroYear, METRIC_KEYS, PairStory, PersonalRecord, RECORD_KEYS,
+        TRACKED_ITEMS, TableEnd, Theme, Tier, metric_directions,
+    };
+    // The longest hero, and long readable names with and without a break.
+    const HERO: &str = "Keeper of the Light";
+    const NAMES: [&str; 2] = ["Bartholomew Featherstone", "Bartholomew_Featherstone"];
+    let vars = CopyVars {
+        hero: Some(HERO.to_owned()),
+        ..CopyVars::default()
+    };
+    let mut copies = Vec::new();
+    for metric in METRIC_KEYS.iter().copied() {
+        let items: Vec<Option<&str>> = if metric == "item" {
+            TRACKED_ITEMS.iter().copied().map(Some).collect()
+        } else {
+            vec![None]
+        };
+        let display = match metric {
+            "best_game" => "27 / 22 / 34",
+            "night_owl" => "12:59 AM",
+            "rating_swing" => "-23,400",
+            "hero_pool" => "187 heroes",
+            _ => "23,400",
+        };
+        for item in items {
+            for direction in metric_directions(metric) {
+                for tier in [Tier::Extreme, Tier::Strong, Tier::Notable] {
+                    for end in [TableEnd::Top, TableEnd::Bottom] {
+                        let story = DistinctStory {
+                            metric,
+                            theme: Theme::Chaos,
+                            direction: *direction,
+                            tier,
+                            value: 2.0,
+                            display: display.to_owned(),
+                            rank: Some(ServerRank { rank: 187, of: 187 }),
+                            end,
+                            hero_id: Some(1),
+                            match_id: Some(1),
+                            item: item.map(str::to_owned),
+                            score: 1.0,
+                        };
+                        copies.push(story_copy(&story, &vars, 7));
+                    }
+                }
+            }
+        }
+    }
+    let pair = PairStory {
+        discord_id: 1,
+        games: 187,
+        wins: 99,
+    };
+    for kind in PEOPLE_KINDS {
+        for name in NAMES {
+            copies.push(people_copy(kind, &pair, Some(name), 7));
+        }
+    }
+    for (key, direction) in RECORD_KEYS {
+        let display = match key {
+            "most_kills" => "99 kills",
+            "most_deaths" => "99 deaths",
+            "most_assists" => "99 assists",
+            "best_gpm" => "1,400 GPM",
+            "most_damage" => "123,400 damage",
+            "most_wards" => "99 wards",
+            "longest_game" | "fastest_win" => "123:59",
+            "first_bloods" => "99 first bloods",
+            _ => "99 Roshans",
+        };
+        let record = PersonalRecord {
+            key,
+            direction,
+            value: 99,
+            display: display.to_owned(),
+            hero_id: Some(1),
+            match_id: 1,
+            finished_at: Some(0),
+            won: Some(false),
+            score: 1.0,
+        };
+        copies.push(record_copy(&record, Some(HERO), Some("Sep 30"), 7));
+    }
+    let line = HeroLine {
+        hero_id: 1,
+        games: 187,
+        wins: 99,
+    };
+    for kind in &HERO_STORY_KINDS[..2] {
+        copies.push(hero_copy(kind, &line, Some(HERO), 7));
+    }
+    let split = HeroYear {
+        radiant: (187, 150),
+        dire: (187, 20),
+        ..HeroYear::default()
+    };
+    copies.extend(side_split_copy(&split, 7));
+    assert!(copies.len() > 100, "{} copies", copies.len());
+    // `Punch` mirrors `WrappedPunch` variant for variant.
+    let media = |copy: &crate::wrapped_story::roast_pools::StoryCopy| {
+        let name = format!("{:?}", copy.treatment);
+        WrappedPunch::ALL
+            .into_iter()
+            .find(|punch| format!("{punch:?}") == name)
+            .expect("a media twin")
+    };
+    let misfits = copies
+        .iter()
+        .filter(|copy| !two_beat_facts_fit(&copy.label, &copy.credit, media(copy)))
+        .map(|copy| format!("{:?} | {} | {}", copy.treatment, copy.label, copy.credit))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(misfits.is_empty(), "{misfits:#?}");
+}
+
+#[test]
 fn reveal_stays_small_over_a_detailed_image() {
     let mut slide = busy("custom");
     slide.layout = WrappedLayout::Spotlight;

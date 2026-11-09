@@ -576,6 +576,14 @@ pub fn two_beat_copy_fits(setup: &str, punch: &str) -> bool {
     beats::copy_fits(setup, punch)
 }
 
+/// Whether a two-beat card's unit label and fact line fit where a
+/// `treatment` card sets them, without shrinking below the minimum or
+/// breaking a word.
+#[must_use]
+pub fn two_beat_facts_fit(label: &str, credit: &str, treatment: WrappedPunch) -> bool {
+    beats::facts_fit(label, credit, treatment)
+}
+
 fn validate_slide(slide: &WrappedSlideData) -> Result<(), WrappedMediaError> {
     let row_text = slide
         .rows

@@ -130,7 +130,19 @@ pub(super) fn fit_text(
     width: i32,
     height: i32,
 ) -> (f32, Vec<String>) {
-    const SMALLEST: f32 = 14.0;
+    fit_text_within(value, face, maximum, 14.0, width, height)
+}
+
+/// `fit_text` that shrinks no further than `smallest`: a block still too tall
+/// there ends in an ellipsis.
+pub(super) fn fit_text_within(
+    value: &str,
+    face: Face,
+    maximum: f32,
+    smallest: f32,
+    width: i32,
+    height: i32,
+) -> (f32, Vec<String>) {
     let width = width as f32;
     let mut size = maximum;
     loop {
@@ -166,7 +178,7 @@ pub(super) fn fit_text(
         if block_height(rows.len(), size, face) <= height as f32 {
             return (size, rows);
         }
-        if size <= SMALLEST {
+        if size <= smallest {
             let mut kept = rows.len();
             while kept > 1 && block_height(kept, size, face) > height as f32 {
                 kept -= 1;
@@ -180,7 +192,7 @@ pub(super) fn fit_text(
             }
             return (size, rows);
         }
-        size = (size - if size > 40.0 { 2.0 } else { 1.0 }).max(SMALLEST);
+        size = (size - if size > 40.0 { 2.0 } else { 1.0 }).max(smallest);
     }
 }
 

@@ -9,7 +9,7 @@
 
 use super::stage::{
     Align, DESCENT, FIRST_BASELINE, FOOTER_NAME, Face, HEIGHT, PILL_HEIGHT, Stage, WIDTH,
-    block_height, count_up, fit_text, pill_extent, text_width,
+    block_height, count_up, fit_text, fit_text_within, pill_extent, pill_size, text_width,
 };
 use super::*;
 
@@ -130,7 +130,8 @@ impl Type {
     }
 
     /// The design size, lowered just enough for the widest word of `text` to
-    /// fit the column, so a long word shrinks instead of breaking mid-word.
+    /// fit the column, so a long word shrinks instead of breaking mid-word,
+    /// but never below the minimum: a word too wide even there breaks.
     fn size_for(self, text: &str) -> f32 {
         let widest = text
             .split_whitespace()
@@ -139,7 +140,9 @@ impl Type {
         if widest <= COLUMN as f32 {
             self.size
         } else {
-            (self.size * COLUMN as f32 / widest).floor()
+            (self.size * COLUMN as f32 / widest)
+                .floor()
+                .max(self.minimum)
         }
     }
 }
@@ -162,13 +165,28 @@ fn punch_type(treatment: WrappedPunch) -> Type {
     }
 }
 
+/// `value` fitted to `style`: the size it is set at, never below the
+/// minimum, and its rows.
+fn fitted(value: &str, style: Type) -> (f32, Vec<String>) {
+    let text = style.apply(value);
+    let start = style.size_for(&text);
+    fit_text_within(
+        &text,
+        style.face,
+        start,
+        style.minimum,
+        COLUMN,
+        style.height,
+    )
+}
+
 /// Whether `value` fits `style` at no less than its minimum size, whole words
 /// only.
 fn fits(value: &str, style: Type) -> bool {
-    let text = style.apply(value);
-    let start = style.size_for(&text);
-    let (size, rows) = fit_text(&text, style.face, start, COLUMN, style.height);
-    size >= style.minimum && rows.join(" ") == text.split_whitespace().collect::<Vec<_>>().join(" ")
+    let (size, rows) = fitted(value, style);
+    let words = style.apply(value);
+    size >= style.minimum
+        && rows.join(" ") == words.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub(super) fn copy_fits(setup: &str, punch: &str) -> bool {
@@ -178,14 +196,25 @@ pub(super) fn copy_fits(setup: &str, punch: &str) -> bool {
             .all(|treatment| fits(punch, punch_type(*treatment)))
 }
 
+/// Whether the unit under the number and the fact line fit where a
+/// `treatment` card sets them: the label, then the credit as a cinema
+/// caption or under the punchline. A treatment missing its data falls back to
+/// Plain, so every credit must also fit a Plain card's chip.
+pub(super) fn facts_fit(label: &str, credit: &str, treatment: WrappedPunch) -> bool {
+    let set = match treatment {
+        WrappedPunch::Plain => true,
+        WrappedPunch::Cinema => memes::caption_fit(&credit.to_uppercase()).0 >= CREDIT_TYPE.minimum,
+        _ => fits(credit, CREDIT_TYPE),
+    };
+    fits(label, LABEL_TYPE) && pill_size(credit, COLUMN, CHIP_SIZE) >= CREDIT_TYPE.minimum && set
+}
+
 /// The height `value` occupies once fitted to `style`.
 fn text_height(value: &str, style: Type) -> i32 {
     if value.trim().is_empty() {
         return 0;
     }
-    let text = style.apply(value);
-    let start = style.size_for(&text);
-    let (size, rows) = fit_text(&text, style.face, start, COLUMN, style.height);
+    let (size, rows) = fitted(value, style);
     block_height(rows.len(), size, style.face).ceil() as i32
 }
 
@@ -200,10 +229,9 @@ fn text(
     align: Align,
     rise: (f32, f32),
 ) -> i32 {
-    let value = style.apply(value);
+    let (size, rows) = fitted(value, style);
     let rect = (MARGIN, y, COLUMN, style.height);
-    let size = style.size_for(&value);
-    stage.block(&value, rect, size, style.face, color, align, rise)
+    stage.block(&rows.join("\n"), rect, size, style.face, color, align, rise)
 }
 
 /// The top of a block `height` tall, centered between the chrome bands.
@@ -500,4 +528,53 @@ fn plain(stage: &mut Stage<'_>, beat: &WrappedBeat, look: Look) {
         look.bg,
         0.7,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `value` set in `style` stays at or above its minimum and inside its
+    /// box: every row within the column, the block within its height.
+    fn assert_readable(value: &str, style: Type) {
+        let (size, rows) = fitted(value, style);
+        assert!(size >= style.minimum, "{value:?} set at {size}");
+        for row in &rows {
+            assert!(
+                text_width(row, size, style.face) <= COLUMN as f32,
+                "{row:?} runs off the card"
+            );
+        }
+        assert!(
+            block_height(rows.len(), size, style.face) <= style.height as f32,
+            "{value:?} spills out of its box"
+        );
+    }
+
+    #[test]
+    fn long_names_and_hero_credits_stay_readable_on_the_card() {
+        // A 24-character name with nowhere to break, and the longest hero.
+        let name = "Bartholomew_Featherstone";
+        let credit = format!("27 / 22 / 34 · Keeper of the Light · Won with {name}");
+        for treatment in WrappedPunch::ALL {
+            let beat = WrappedBeat {
+                setup: format!("{name} again."),
+                value: "27".to_owned(),
+                setup_label: format!("kills with {name}"),
+                punch: format!("{name}."),
+                credit: credit.clone(),
+                treatment,
+            };
+            assert_readable(&beat.setup, SETUP_TYPE);
+            assert_readable(&beat.setup_label, LABEL_TYPE);
+            assert_readable(&beat.punch, punch_type(treatment));
+            assert_readable(&beat.credit, CREDIT_TYPE);
+            let mut slide = WrappedSlideData::new("story_distinct", "Combat");
+            slide.layout = WrappedLayout::TwoBeat;
+            slide.theme = WrappedTheme::BeatPopoff;
+            slide.username = name.to_owned();
+            slide.beat = Some(beat);
+            render_wrapped_slide(&slide).expect("the card renders");
+        }
+    }
 }
