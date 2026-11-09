@@ -693,7 +693,10 @@ impl ClientState {
 pub struct DotaSteamClient {
     // GameCoordinator alone does not retain steam-vent's heartbeat drop guard.
     _connection: steam_vent::Connection,
-    gc: Arc<Mutex<GameCoordinator>>,
+    gc: Arc<GameCoordinator>,
+    /// Orders cache-checked commands with their sends. Job requests do not
+    /// take it: steam-vent routes each reply by its unique job id.
+    commands: Arc<Mutex<()>>,
     state: Arc<RwLock<ClientState>>,
     events: broadcast::Sender<DotaSteamEvent>,
     _watcher: Arc<WatcherTask>,
@@ -768,16 +771,20 @@ impl DotaSteamClient {
             lobby_refresh_requested_at: None,
             resync_pending: false,
         }));
-        let gc = Arc::new(Mutex::new(gc));
+        let gc = Arc::new(gc);
+        let commands = Arc::new(Mutex::new(()));
         let resync_gc = Arc::downgrade(&gc);
+        let resync_commands = Arc::downgrade(&commands);
         let watcher = spawn_watchers(messages, &state, &events, move || {
             // Hello makes the GC answer with a Welcome carrying every cache.
-            // Send off the watcher so a held GC mutex cannot stall updates.
-            let Some(gc) = resync_gc.upgrade() else {
+            // Send off the watcher so a held command lock cannot stall updates.
+            let (Some(gc), Some(commands)) = (resync_gc.upgrade(), resync_commands.upgrade())
+            else {
                 return;
             };
             tokio::spawn(async move {
-                if let Err(error) = gc.lock().await.send(CMsgClientHello::new()).await {
+                let _order = commands.lock().await;
+                if let Err(error) = gc.send(CMsgClientHello::new()).await {
                     warn!(%error, "Dota coordinator resync request failed");
                 }
             });
@@ -785,6 +792,7 @@ impl DotaSteamClient {
         let client = Self {
             _connection: auth.connection,
             gc,
+            commands,
             state,
             events,
             _watcher: Arc::new(watcher),
@@ -1011,14 +1019,14 @@ impl DotaSteamClient {
         max_age: Duration,
         predicate: impl FnOnce(&LobbySnapshot) -> bool + Send,
     ) -> Result<bool, DotaSteamError> {
-        let gc = self.gc.lock().await;
+        let _order = self.commands.lock().await;
         let state = self.state.read().await;
         if !authorized_lobby_action(&state, self.own_steam_id, lobby_id, max_age, predicate) {
             return Ok(false);
         }
         let mut request = CMsgPracticeLobbyLaunch::new();
         request.set_client_version(client_version);
-        gc.send(request).await.map_err(DotaSteamError::from)?;
+        self.gc.send(request).await.map_err(DotaSteamError::from)?;
         drop(state);
         Ok(true)
     }
@@ -1030,12 +1038,13 @@ impl DotaSteamClient {
         max_age: Duration,
         predicate: impl FnOnce(&LobbySnapshot) -> bool + Send,
     ) -> Result<bool, DotaSteamError> {
-        let gc = self.gc.lock().await;
+        let _order = self.commands.lock().await;
         let state = self.state.read().await;
         if !authorized_lobby_action(&state, self.own_steam_id, lobby_id, max_age, predicate) {
             return Ok(false);
         }
-        gc.send(DestroyLobbyWire::default())
+        self.gc
+            .send(DestroyLobbyWire::default())
             .await
             .map_err(DotaSteamError::from)?;
         drop(state);
@@ -1081,18 +1090,19 @@ impl DotaSteamClient {
     ) -> Result<CMsgGCMatchDetailsResponse, DotaSteamError> {
         let mut request = CMsgGCMatchDetailsRequest::new();
         request.set_match_id(match_id);
-        // Match details responses carry the Steam job target id.  Holding the
-        // GC mutex for this request/response pair both uses that correlation
-        // and serializes callers, so an archive lookup cannot consume the
-        // response intended for the currently hosted match.
-        let response = timeout(self.command_timeout, async {
-            let gc = self.gc.lock().await;
-            gc.job::<CMsgGCMatchDetailsRequest, CMsgGCMatchDetailsResponse>(request)
-                .await
-                .map_err(DotaSteamError::from)
-        })
+        // steam-vent registers a fresh, unique source job id before sending
+        // and routes the reply only by its target job id, so an archive lookup
+        // cannot consume the response intended for the hosted match. That
+        // correlation needs no lock; holding the command lock for the whole
+        // wait would block invites, launch and destroy for up to the timeout.
+        let response = timeout(
+            self.command_timeout,
+            self.gc
+                .job::<CMsgGCMatchDetailsRequest, CMsgGCMatchDetailsResponse>(request),
+        )
         .await
-        .map_err(|_| DotaSteamError::Timeout)??;
+        .map_err(|_| DotaSteamError::Timeout)?
+        .map_err(DotaSteamError::from)?;
 
         match_response_details(&response, match_id)?;
         Ok(response)
@@ -1102,7 +1112,8 @@ impl DotaSteamClient {
     where
         Msg: NetMessage,
     {
-        self.gc.lock().await.send(message).await.map_err(Into::into)
+        let _order = self.commands.lock().await;
+        self.gc.send(message).await.map_err(Into::into)
     }
 
     async fn require_lobby(&self, lobby_id: u64) -> Result<LobbySnapshot, DotaSteamError> {
@@ -3646,6 +3657,22 @@ mod tests {
             match_response_details(&CMsgGCMatchDetailsResponse::new(), 31415),
             Err(DotaSteamError::MatchRequestFailed(0))
         ));
+    }
+
+    #[test]
+    fn match_detail_jobs_share_the_coordinator_without_the_command_lock() {
+        // Jobs wait on the shared coordinator directly; steam-vent correlates
+        // replies by unique job id, so only ordered commands take the lock.
+        fn shared<T: Send + Sync + 'static>() {}
+        shared::<GameCoordinator>();
+        shared::<DotaSteamClient>();
+        fn job_future<'a>(
+            client: &'a DotaSteamClient,
+        ) -> impl Future<Output = Result<CMsgGCMatchDetailsResponse, DotaSteamError>> + Send + 'a
+        {
+            client.match_details_response(1)
+        }
+        let _ = job_future;
     }
 
     #[test]
