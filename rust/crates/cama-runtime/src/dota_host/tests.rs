@@ -2025,6 +2025,37 @@ async fn manual_abort_after_launch_preserves_the_game_for_review() {
 }
 
 #[tokio::test]
+async fn abort_before_observed_gameplay_is_reviewed_instead_of_failing_every_tick() {
+    let f = Fixture::new(false);
+    f.launch().await;
+    // Players abort during the draft; the game then starts before the next tick.
+    PendingMatchRepository::new(&f.worker.path)
+        .delete_pending_match(1, f.pending)
+        .unwrap();
+    f.running(Some(5));
+    f.port
+        .lobby
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .launch_history
+        .gameplay_observed = true;
+
+    f.worker.tick(&f.port, 150).await.unwrap();
+    assert!(f.state().betting_closed);
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert!(
+        f.session()
+            .last_error
+            .unwrap_or_default()
+            .contains("removed without a recorded result")
+    );
+    assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+    assert!(!f.port.calls.lock().unwrap().iter().any(|s| s == "destroy"));
+}
+
+#[tokio::test]
 async fn lost_launch_is_reviewed_even_if_a_player_leaves_before_allocation() {
     let f = Fixture::new(false);
     f.worker.tick(&f.port, 100).await.unwrap();

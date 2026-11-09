@@ -1410,10 +1410,17 @@ impl DotaHostWorker {
             // Valve game so final identity can be reconciled.
             if self.recorded_id(record).await?.is_none() {
                 let repo = PendingMatchRepository::new(&self.path);
-                blocking(move || {
-                    repo.close_betting_now(guild, pending)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
+                // An abort or recording may have removed the pending match
+                // since launch. Nothing is left to close; record gameplay and
+                // let the tick review the removal instead of failing the
+                // worker into a reconnect loop.
+                blocking(move || match repo.close_betting_now(guild, pending) {
+                    Ok(_)
+                    | Err(
+                        PendingMatchRepositoryError::PendingMatchNotFound(_)
+                        | PendingMatchRepositoryError::MatchAlreadyRecorded(_),
+                    ) => Ok(()),
+                    Err(error) => Err(error.to_string()),
                 })
                 .await?;
             }
