@@ -649,6 +649,15 @@ impl ClientState {
         self.lobby_launch_history = Some((lobby.lobby_id, lobby.launch_history.clone()));
     }
 
+    /// Cache traffic proves a hydrating session ready. A disconnected session
+    /// stays disconnected: its loss was already announced, and a lobby update
+    /// arriving afterwards must not make the client usable again.
+    fn mark_ready(&mut self) {
+        if self.status == CacheStatus::Hydrating {
+            self.status = CacheStatus::Ready;
+        }
+    }
+
     /// The lobby whose cache should be resent, when the current observation is
     /// ageing. A disconnected or empty cache has nothing trustworthy to renew.
     fn lobby_refresh_target(&self) -> Option<u64> {
@@ -1489,7 +1498,7 @@ async fn apply_subscribed(
         {
             return true;
         }
-        state.status = CacheStatus::Ready;
+        state.mark_ready();
         if contains_lobby_type {
             if let Some(lobby) = &mut lobby {
                 state.observe_lobby(lobby);
@@ -1706,7 +1715,7 @@ async fn clear_matching_lobby(
     {
         return;
     }
-    state.status = CacheStatus::Ready;
+    state.mark_ready();
     state.lobby_observed_at = None;
     state.lobby = None;
     drop(state);
@@ -1761,7 +1770,7 @@ async fn apply_lobby(
 ) {
     {
         let mut state = state.write().await;
-        state.status = CacheStatus::Ready;
+        state.mark_ready();
         state.observe_lobby(&mut lobby);
         state.lobby = Some(lobby.clone());
         state.lobby_observed_at = Some(Instant::now());
@@ -3062,6 +3071,54 @@ mod tests {
 
         assert_eq!(state.read().await.status, CacheStatus::Disconnected);
         assert!(state.read().await.lobby.is_none());
+    }
+
+    #[tokio::test]
+    async fn lobby_traffic_after_account_unsubscribe_cannot_restore_readiness() {
+        let mut lobby = CSODOTALobby::new();
+        lobby.set_lobby_id(7001);
+        lobby.set_state(csodotalobby::State::UI);
+        type Apply = for<'a> fn(
+            &'a CSODOTALobby,
+            &'a Arc<RwLock<ClientState>>,
+            &'a broadcast::Sender<DotaSteamEvent>,
+        ) -> futures_util::future::BoxFuture<'a, bool>;
+        let paths: [(&str, Apply); 3] = [
+            ("subscription", |lobby, state, events| {
+                Box::pin(apply_subscribed(
+                    lobby_subscription(lobby, 9),
+                    state,
+                    events,
+                ))
+            }),
+            ("single update", |lobby, state, events| {
+                Box::pin(apply_single(lobby_update(lobby, 9), state, events))
+            }),
+            ("destroy", |lobby, state, events| {
+                Box::pin(apply_single_destroy(lobby_update(lobby, 9), state, events))
+            }),
+        ];
+        for (name, apply) in paths {
+            let state = ready_lobby_state();
+            let (events, _) = broadcast::channel(EVENT_BUFFER);
+            apply_unsubscribed(
+                unsubscribe(SO_OWNER_ACCOUNT, TEST_STEAM_ID),
+                &state,
+                &events,
+            )
+            .await;
+            assert_eq!(state.read().await.status, CacheStatus::Disconnected);
+            // Keep a lobby present so a destroy still has something to match.
+            state.write().await.lobby = Some(map_lobby(&lobby));
+
+            assert!(apply(&lobby, &state, &events).await, "{name}");
+
+            assert_eq!(
+                state.read().await.status,
+                CacheStatus::Disconnected,
+                "{name} restored a session without its account cache"
+            );
+        }
     }
 
     #[test]
