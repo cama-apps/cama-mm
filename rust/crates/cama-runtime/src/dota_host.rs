@@ -66,6 +66,9 @@ const PUBLIC_LOBBY_VISIBILITY: i32 = 0;
 // newer than the launch timeout. Keep the observation window strictly shorter.
 const GC_OBSERVATION_MAX_AGE: Duration = Duration::from_secs(45);
 const LAUNCH_CONFIRMATION_TIMEOUT_SECONDS: i64 = 90;
+/// Same bound as server allocation: a launch never identified by Valve
+/// after this long needs an operator.
+const UNIDENTIFIED_LAUNCH_REVIEW_SECONDS: i64 = 300;
 /// An operator command saved the session while a tick held the older
 /// revision. Nothing was written; the next tick re-reads and continues.
 const STALE_SESSION_SAVE: &str =
@@ -884,6 +887,20 @@ impl DotaHostWorker {
                 return self
                     .finish(port, &mut record, &mut state, match_id, now)
                     .await;
+            }
+            // Launch evidence without any match ID cannot be finished or
+            // safely relaunched; bound the wait instead of holding the
+            // account silently.
+            if state
+                .launch_requested_at
+                .or(state.allocation_observed_at)
+                .is_some_and(|since| {
+                    now.saturating_sub(since) >= UNIDENTIFIED_LAUNCH_REVIEW_SECONDS
+                })
+            {
+                return self.review(&mut record, &mut state,
+                    "Dota shows a launched lobby but never reported its match ID; inspect the lobby, then resume, cancel, or /record the actual game",
+                    now).await;
             }
             return Ok(());
         }

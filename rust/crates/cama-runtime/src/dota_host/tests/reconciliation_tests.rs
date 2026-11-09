@@ -452,3 +452,40 @@ async fn resume_keeps_the_lobby_identity_once_allocation_was_observed() {
             .any(|c| c == "create")
     );
 }
+
+#[tokio::test]
+async fn launched_lobby_without_any_match_id_is_reviewed_after_a_bounded_wait() {
+    let f = Fixture::new(false);
+    f.launch().await;
+    let launched_at = f.state().launch_requested_at.unwrap();
+    {
+        // Back in the lobby UI with a leftover server and no match ID.
+        let mut lobby = f.port.lobby.lock().unwrap();
+        let lobby = lobby.as_mut().unwrap();
+        lobby.stage = LobbyStage::Gathering;
+        lobby.server_id = Some(999);
+        lobby.match_id = None;
+    }
+    f.worker.tick(&f.port, launched_at + 120).await.unwrap();
+    assert_ne!(f.session().phase, Phase::NeedsReview);
+
+    f.worker.tick(&f.port, launched_at + 300).await.unwrap();
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert!(
+        f.session()
+            .last_error
+            .unwrap_or_default()
+            .contains("never reported its match ID")
+    );
+    assert_eq!(
+        f.port
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| *c == "launch")
+            .count(),
+        1
+    );
+    assert!(!f.port.calls.lock().unwrap().iter().any(|c| c == "destroy"));
+}
