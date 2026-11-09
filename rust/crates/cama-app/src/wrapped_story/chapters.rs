@@ -117,6 +117,13 @@ pub fn story_seed(discord_id: i64, year: i32) -> u64 {
 /// Cave-ins in a year that earn their own Press F card.
 pub const PRESS_F_CAVE_INS: i64 = 3;
 
+/// The dig card's cave-in line, for a deck whose Press F card sits under
+/// More stats.
+#[must_use]
+pub fn cave_in_line(cave_ins: i64) -> String {
+    format!("You had {} cave-ins.", format_grouped(cave_ins))
+}
+
 /// How loud a side-game joke can be: the top 5% of the server gets the
 /// extreme lines, everyone else the everyday ones.
 #[must_use]
@@ -474,7 +481,8 @@ pub fn dig_cards(
         "digs".to_owned()
     };
     dig.badge = rank_badge(year.rank, "Dug more than", "digger");
-    // A year of cave-ins gets its own Press F card instead of a line here.
+    // A year of cave-ins gets its own Press F card; the deck adds
+    // `cave_in_line` here only when that card moves to More stats.
     if year.artifacts > 0 {
         let found = plural(year.artifacts, "artifact", "artifacts");
         dig.lines.push(match year.first_finds {

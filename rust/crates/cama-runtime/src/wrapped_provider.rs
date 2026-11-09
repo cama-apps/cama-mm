@@ -16,7 +16,7 @@ use cama_app::wrapped_media::{
     WrappedArtwork, WrappedLayout, WrappedRenderedMedia, WrappedRow, WrappedSlideData,
     WrappedTheme, render_wrapped_media, render_wrapped_slide, vary_beat_palettes,
 };
-use cama_app::wrapped_story::chapters::{months_card, story_seed};
+use cama_app::wrapped_story::chapters::{cave_in_line, months_card, story_seed};
 use cama_app::wrapped_story::{
     HeroRow, MatchDetails, MatchStatsRow, PersonalMoment, PersonalMomentMatch,
     PersonalSummaryInput, PersonalSummaryWrapped, YearMatchRow, flavor_pool, get_flavor,
@@ -1540,6 +1540,14 @@ fn build_slides(
         &year_label,
     ));
     let side_cards = deck::budget_side_cards(&mut side, &raw.activity);
+    // A Press F card moved to More stats leaves its count on the dig card.
+    if side
+        .iter()
+        .any(|slide| slide.kind == deck::to_more_stats("story_dig_cave_in"))
+        && let Some(dig) = side.iter_mut().find(|slide| slide.kind == "story_dig")
+    {
+        dig.lines.push(cave_in_line(raw.activity.dig.cave_ins));
+    }
 
     let mut people = people_slides(
         &raw.people,

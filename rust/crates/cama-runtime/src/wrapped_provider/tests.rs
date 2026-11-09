@@ -2802,6 +2802,56 @@ fn dota_cards_come_before_side_games() {
 }
 
 #[test]
+fn a_cave_in_card_under_more_stats_leaves_its_count_on_the_dig_card() {
+    let fixture = Fixture::league(12);
+    seed_all_activity(&fixture);
+    let slides = league_deck(&fixture, &league_names());
+    assert!(
+        slides
+            .iter()
+            .any(|slide| slide.kind == "more_story_dig_cave_in")
+    );
+    let dig = story_of(&slides)
+        .into_iter()
+        .find(|slide| slide.kind == "story_dig")
+        .expect("the dig card");
+    assert!(
+        dig.lines.iter().any(|line| line == "You had 4 cave-ins."),
+        "{:?}",
+        dig.lines
+    );
+}
+
+#[test]
+fn a_cave_in_card_in_the_story_keeps_the_dig_card_quiet() {
+    let fixture = Fixture::league(12);
+    let connection = Connection::open(&fixture.path).unwrap();
+    for index in 0..10_i64 {
+        let detail = if index < 4 { r#"{"cave_in":1}"# } else { "{}" };
+        connection
+            .execute(
+                "INSERT INTO dig_actions(guild_id,actor_id,action_type,depth_before,depth_after,
+                     jc_delta,detail,created_at)
+                 VALUES(42,100,'dig',?1,?2,2,?3,?4)",
+                params![index * 20, index * 20 + 20, detail, MARCH_2026 + index],
+            )
+            .unwrap();
+    }
+    let slides = league_deck(&fixture, &league_names());
+    let story = story_of(&slides);
+    assert!(story.iter().any(|slide| slide.kind == "story_dig_cave_in"));
+    let dig = story
+        .iter()
+        .find(|slide| slide.kind == "story_dig")
+        .expect("the dig card");
+    assert!(
+        dig.lines.iter().all(|line| !line.contains("cave-in")),
+        "{:?}",
+        dig.lines
+    );
+}
+
+#[test]
 fn a_dota_only_deck_rolls_spare_slots_into_distinct_stories() {
     let fixture = Fixture::league(12);
     let slides = league_deck(&fixture, &league_names());
