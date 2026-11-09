@@ -1495,8 +1495,10 @@ impl GatewayEventObserver for TriviaImageCacheWarmObserver {
         let catalog = Arc::clone(&self.catalog);
         let image_cache = Arc::clone(&self.image_cache);
         *task = Some(tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || warm_image_cache(&image_cache, &catalog))
-                .await
+            match tokio::task::spawn_blocking(move || {
+                warm_image_cache(&image_cache, &catalog, &hero_render_url)
+            })
+            .await
             {
                 Ok(Ok(report)) => info!(
                     newly_cached = report.newly_cached,
@@ -1511,13 +1513,15 @@ impl GatewayEventObserver for TriviaImageCacheWarmObserver {
     }
 }
 
-/// Catalog art first, then the full hero renders Wrapped reads.
+/// Catalog art first, then the full hero renders Wrapped reads, each at
+/// `render_url` of its hero's slug.
 fn warm_image_cache(
     image_cache: &TriviaImageCache,
     catalog: &TriviaCatalog,
+    render_url: &dyn Fn(&str) -> String,
 ) -> Result<TriviaCacheWarmReport, TriviaImageCacheError> {
     let catalog_report = image_cache.warm_catalog(catalog)?;
-    let renders = image_cache.warm_urls(hero_render_urls(catalog))?;
+    let renders = image_cache.warm_urls(hero_render_urls(catalog, render_url))?;
     Ok(TriviaCacheWarmReport {
         newly_cached: catalog_report.newly_cached + renders.newly_cached,
         total_urls: catalog_report.total_urls + renders.total_urls,
@@ -1525,14 +1529,17 @@ fn warm_image_cache(
 }
 
 /// Render URL for every catalog hero, from the slug in its portrait URL.
-fn hero_render_urls(catalog: &TriviaCatalog) -> BTreeSet<String> {
+fn hero_render_urls(
+    catalog: &TriviaCatalog,
+    render_url: &dyn Fn(&str) -> String,
+) -> BTreeSet<String> {
     catalog
         .heroes
         .iter()
         .filter_map(|hero| hero.image_url.as_deref())
         .filter_map(|url| url.rsplit('/').next()?.strip_suffix(".png"))
         .filter(|slug| !slug.is_empty())
-        .map(hero_render_url)
+        .map(render_url)
         .collect()
 }
 

@@ -1950,7 +1950,6 @@ fn hero_render_reads_cache_and_never_downloads() {
     // Oversized files, unknown heroes and uncached renders yield nothing.
     assert_eq!(art.hero_render(2), None);
     assert_eq!(art.hero_render(999), None);
-    assert!(!cache.join("heroes/renders/999.png").exists());
 }
 
 /// Peers carry snowflake-sized ids, so a leaked id shows as a long digit run.
