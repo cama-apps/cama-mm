@@ -796,6 +796,67 @@ fn pinnacle_boss_victory_shows_withheld_profit() {
 }
 
 #[test]
+fn pinnacle_result_points_to_prestige_only_after_final_victory() {
+    let media = DigMediaRuntime::production(&DigRuntimeConfig::default());
+    for (won, phase, next_phase, expected) in [
+        (true, 1, 2, false),
+        (true, 2, 3, false),
+        (false, 3, 3, false),
+        (true, 3, 0, true),
+    ] {
+        let result = pinnacle_boss_projection_fixture(won, phase, next_phase);
+        let response = super::pinnacle_boss_result_response(&result, &media);
+        let hint = boss_projection_field(&response.embeds[0], "Prestige");
+        assert_eq!(hint.is_some(), expected);
+        if let Some(hint) = hint {
+            assert!(hint.value.contains("/dig prestige"));
+            assert!(hint.value.contains("automatically"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn tunnel_info_shows_prestige_ready_only_when_eligible() {
+    let (database, provider, _discord) = fixture();
+    let connection = Connection::open(database.path()).expect("database");
+    let mut progress = serde_json::Map::new();
+    for boundary in cama_app::dig_bosses::BOSS_BOUNDARIES {
+        progress.insert(boundary.to_string(), serde_json::json!("defeated"));
+    }
+    progress.insert("350".to_owned(), serde_json::json!({"status": "defeated"}));
+    connection.execute(
+        "INSERT INTO tunnels (discord_id,guild_id,depth,max_depth,boss_progress) VALUES (?1,?2,400,400,?3)",
+        params![USER as i64, GUILD as i64, serde_json::Value::Object(progress).to_string()],
+    ).expect("eligible tunnel");
+    for (prestige, boss_progress, ready) in [
+        (0, None, true),
+        (cama_app::dig_tunnels::MAX_PRESTIGE, None, false),
+        (0, Some("{}"), false),
+    ] {
+        connection
+            .execute("UPDATE tunnels SET prestige_level=?1", [prestige])
+            .unwrap();
+        if let Some(progress) = boss_progress {
+            connection
+                .execute("UPDATE tunnels SET boss_progress=?1", [progress])
+                .unwrap();
+        }
+        let responder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(command_request(51, "info", Vec::new()), responder.clone())
+            .await
+            .unwrap();
+        let responses = responder.followups.lock().unwrap();
+        let hint = boss_projection_field(&responses[0].embeds[0], "Prestige ready");
+        assert_eq!(hint.is_some(), ready);
+        if let Some(hint) = hint {
+            assert!(hint.value.contains("/dig prestige"));
+        }
+    }
+}
+
+#[test]
 fn boss_neon_pinnacle_gate_selects_terminal_mode_only() {
     let terminal = pinnacle_boss_projection_fixture(true, 3, 0);
     let start = super::boss_start_neon_victory(&boss_call_result(
@@ -1342,6 +1403,54 @@ fn boss_encounter_embed_surfaces_the_carried_wager() {
         format!("**1,500** {JOPACOIN_EMOTE} is already riding on this phase.")
     );
     assert!(!field.value.contains("**1,500** JC "));
+}
+
+#[test]
+fn boss_encounter_identifies_final_phase_before_wagering() {
+    let media = DigMediaRuntime::production(&DigRuntimeConfig::default());
+    for (pinnacle, phase, wager_allowed, final_phase) in [
+        (false, 1, true, true),
+        (false, 1, false, false),
+        (false, 2, true, true),
+        (false, 2, false, false),
+        (false, 3, true, true),
+        (true, 1, true, false),
+        (true, 2, true, false),
+        (true, 3, true, true),
+    ] {
+        let info = cama_app::dig_boss_runtime::DigBossEncounterInfo {
+            boundary: if pinnacle { 350 } else { 100 },
+            boss_id: if pinnacle {
+                "forgotten_king"
+            } else {
+                "grothak"
+            }
+            .to_owned(),
+            boss_name: "Boss".to_owned(),
+            dialogue: "Ready.".to_owned(),
+            is_pinnacle: pinnacle,
+            phase,
+            wager_allowed,
+            carried_wager: None,
+            carried_risk_tier: None,
+            has_scout_lantern: false,
+            luminosity: 100,
+            encounter_key: "phase-status".to_owned(),
+        };
+        for roll in [0.0, 1.0] {
+            let response = super::boss_encounter_response_with_roll(
+                &info,
+                USER as i64,
+                GUILD as i64,
+                &media,
+                Some(roll),
+            );
+            let field = boss_projection_field(&response.embeds[0], "Phase").expect("phase status");
+            assert!(field.value.contains(&format!("Phase {phase}")));
+            assert_eq!(field.value.contains("Final phase"), final_phase);
+            assert_eq!(field.value.contains("More phases remain"), !final_phase);
+        }
+    }
 }
 
 // tests/test_dig_reminder_command.py::test_resumed_pinnacle_encounter_uses_phase_presentation[2]
