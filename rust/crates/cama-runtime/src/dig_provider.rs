@@ -6546,10 +6546,15 @@ impl DigInteractionHandler {
         let target_id = target.map_or(user_id, |(id, _)| id);
         let target_name = self.render_player_name(target_id, guild_id).await;
         let path = self.state.database_path.clone();
-        let info = blocking(move || {
-            cama_app::dig_runtime::DigRuntimeService::sqlite(&path)
+        let (info, can_prestige) = blocking(move || {
+            let info = cama_app::dig_runtime::DigRuntimeService::sqlite(&path)
                 .tunnel_info(target_id, guild_id)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            let can_prestige = DigPrestigeRuntimeService::sqlite(&path)
+                .preview(target_id, guild_id)
+                .map_err(|error| error.to_string())?
+                .can_prestige;
+            Ok::<_, String>((info, can_prestige))
         })
         .await?;
         let Some(info) = info else {
@@ -6573,6 +6578,13 @@ impl DigInteractionHandler {
             )
             .field("Pickaxe", pickaxe_name(info.pickaxe_tier), true)
             .field("Luminosity", format!("{}%", info.luminosity), true);
+        if can_prestige {
+            embed = embed.field(
+                "Prestige ready",
+                "Use `/dig prestige` to review your reset and choose a permanent perk. Prestige is optional and never happens automatically; you can keep digging and return to it later.",
+                false,
+            );
+        }
         if let Some(state) = parse_route_state(info.route_state.as_deref()) {
             let location = format!(
                 "{} ({}–{} blocks)",
@@ -8888,7 +8900,7 @@ const DIG_GUIDE_PAGES: [DigGuidePage; 4] = [
     },
     DigGuidePage {
         title: "Dig Guide — Prestige",
-        description: "**Prestige System**\nOnce you reach a deep enough depth, you can prestige. This resets your tunnel depth to zero but grants:\n- A permanent prestige level\n- A choice of prestige perks\n- Access to higher pickaxe tiers\n- Bragging rights\n\n**Perks**\nEach prestige lets you choose one perk that persists across resets. Use `/dig perks` to see every effect, your active stacks, and which perks are one-time or repeatable.\n\n**Relics**\nSome relics are only available at higher prestige levels.",
+        description: "**Prestige System**\nClear every boss, including the pinnacle's final phase, then use `/dig prestige` to review your reset and choose a permanent perk. Prestige is optional and never happens automatically. You can keep digging and use the command later; you do not need to reach the depth cap. This resets your tunnel depth to zero but grants:\n- A permanent prestige level\n- A choice of prestige perks\n- Access to higher pickaxe tiers\n- Bragging rights\n\n**Perks**\nEach prestige lets you choose one perk that persists across resets. Use `/dig perks` to see every effect, your active stacks, and which perks are one-time or repeatable.\n\n**Relics**\nSome relics are only available at higher prestige levels.",
         color: 0xFF_45_00,
     },
 ];
@@ -10761,6 +10773,23 @@ fn boss_encounter_response_with_roll(
     let mut embed = InteractionEmbed::titled(format!("Boss Encountered: {}!", presentation.name))
         .description(presentation.dialogue)
         .color(ERROR_COLOR);
+    // Regular fights allow wagers only on their final phase; pinnacle wagers
+    // can carry across phases, so wager eligibility alone is not a final flag.
+    let final_phase = if info.is_pinnacle {
+        info.phase == 3
+    } else {
+        info.wager_allowed
+    };
+    let phase_status = if final_phase {
+        "Final phase"
+    } else {
+        "More phases remain"
+    };
+    embed = embed.field(
+        "Phase",
+        format!("Phase {} — **{phase_status}**", info.phase),
+        false,
+    );
     if let Some(wager) = info.carried_wager.filter(|wager| *wager > 0) {
         embed = embed.field(
             "Carried Wager",
@@ -11132,6 +11161,13 @@ fn pinnacle_boss_result_response(
         ),
         false,
     );
+    if result.won && result.phase == 3 && result.next_phase == 0 {
+        embed = embed.field(
+            "Prestige",
+            "Pinnacle cleared. Use `/dig prestige` to check eligibility and review your reset and permanent perk choices. Prestige never happens automatically; you can keep digging and return to it later.",
+            false,
+        );
+    }
     if let Some(mechanic) = result
         .round_log
         .iter()
