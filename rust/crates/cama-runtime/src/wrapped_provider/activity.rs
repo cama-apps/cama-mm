@@ -404,7 +404,7 @@ pub(super) fn card_slide(
             primary,
             secondary,
             value: card.series.get(index).copied().unwrap_or_default(),
-            image_png: None,
+            ..WrappedRow::default()
         })
         .collect();
     if card.style == CardStyle::Curve {

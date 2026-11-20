@@ -1380,6 +1380,7 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         year_rows: Vec::new(),
         year_players: Vec::new(),
         people: PeopleYear::default(),
+        bans: Vec::new(),
         rating_history: Vec::new(),
         gamba_stats: None,
         activity: ActivityData::default(),
@@ -2157,7 +2158,8 @@ fn personal_patch_cards_use_recorded_changes_and_fit_the_story() {
     );
     let story = story_of(&slides);
     let cover = story.first().unwrap();
-    assert!(cover.headline.contains("patch notes"));
+    assert_eq!(cover.stat_value, "20.26");
+    assert!(cover.headline.starts_with("The ") && cover.headline.ends_with(" Update"));
     let patch = story
         .iter()
         .find(|slide| slide.kind == "story_patch")
@@ -2187,7 +2189,7 @@ fn personal_patch_cards_use_recorded_changes_and_fit_the_story() {
             .any(|slide| slide.kind == "more_story_patch_award")
     );
     assert_eq!(story.last().unwrap().badge, awards[0].title);
-    assert!(story.len() <= 21);
+    assert!(story.len() <= 25);
     for slide in std::iter::once(*patch).chain(awards.into_iter().copied()) {
         render_wrapped_slide(slide).expect("actual partial-coverage notes and award copy render");
     }
@@ -2618,7 +2620,7 @@ fn anti_mage_art() -> (TempDir, ArtSources, Vec<u8>) {
 }
 
 #[test]
-fn deck_respects_twenty_card_budget_for_an_all_activity_player() {
+fn deck_respects_the_story_budget_for_an_all_activity_player() {
     let fixture = Fixture::league(12);
     seed_all_activity(&fixture);
     seed_record_games(&fixture);
@@ -2627,19 +2629,21 @@ fn deck_respects_twenty_card_budget_for_an_all_activity_player() {
     let count = |kind: &str| story.iter().filter(|slide| slide.kind == kind).count();
     assert_eq!(story.last().unwrap().kind, "story_finale");
     assert!(
-        story.len() - 1 <= 20,
+        story.len() - 1 <= 24,
         "{} cards before the recap",
         story.len() - 1
     );
     for kind in ["story_intro", "story_games", "story_playtime", "story_hero"] {
         assert_eq!(count(kind), 1, "{kind}");
     }
-    assert!((5..=8).contains(&count("story_distinct")));
     // The 78:12 game makes the cut; the peak GPM and kill games repeat
-    // stories the deck already tells, and their slot goes back to one more
-    // distinct story, so all twenty slots are used.
+    // stories the deck already tells, and their slot goes back to the
+    // distinct stories, which stop at eight.
     assert_eq!(count("story_record"), 1);
-    assert_eq!(story.len() - 1, 20);
+    assert_eq!(count("story_distinct"), 8);
+    // The patch chapter this league's data earns: balance changes and fixes.
+    assert_eq!(count("story_patch"), 1);
+    assert_eq!(count("story_bugfixes"), 1);
     assert_eq!(count("story_hero_year"), 1);
     assert!(count("story_people") <= 2);
     assert_eq!(count("story_persona"), 1);
@@ -2793,7 +2797,7 @@ fn records_never_repeat_a_shown_story() {
             "2 first bloods in parsed games · latest on Anti-Mage"
         ]
     );
-    assert_eq!(story.len() - 1, 20);
+    assert!(story.len() - 1 <= 24);
 }
 
 #[test]
@@ -2855,12 +2859,13 @@ fn dota_cards_come_before_side_games() {
             .zip(last)
             .unwrap_or_else(|| panic!("{kind} in {kinds:?}"))
     };
-    // Distinct stories, then records, then hero stories, then people.
+    // Hero stories sit with the heroes; then distinct stories, records and
+    // people.
     let sections = [
         "story_hero",
+        "story_hero_year",
         "story_distinct",
         "story_record",
-        "story_hero_year",
         "story_people",
     ]
     .map(span);
@@ -3124,4 +3129,245 @@ fn hero_stories_wear_the_hero_render() {
         })
         .expect("the latest finish wears its hero");
     assert!(render_wrapped_slide(clock).is_ok());
+}
+
+/// Game metadata and a warm icon cache for two heroes, Blink Dagger, Tango
+/// and every award icon.
+fn patch_chapter_art() -> (TempDir, ArtSources) {
+    let directory = tempfile::tempdir().unwrap();
+    let dotabase = directory.path().join("dotabase.db");
+    let connection = Connection::open(&dotabase).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE heroes (
+                 id INTEGER PRIMARY KEY,name TEXT,color TEXT,localized_name TEXT,roles TEXT
+             );
+             INSERT INTO heroes VALUES
+                 (1,'npc_dota_hero_antimage','#784094','Anti-Mage','Carry'),
+                 (2,'npc_dota_hero_axe','#b32b2b','Axe','Initiator');
+             CREATE TABLE items (id INTEGER PRIMARY KEY,localized_name TEXT,cost INTEGER,icon TEXT);
+             CREATE TABLE abilities (
+                 id INTEGER PRIMARY KEY,localized_name TEXT,hero_id INTEGER,icon TEXT,innate INTEGER
+             );
+             CREATE TABLE talents (ability_id INTEGER);
+             INSERT INTO abilities VALUES
+                 (10,'Mana Break',1,'/panorama/images/spellicons/antimage_mana_break_png.png',0),
+                 (11,'Blink',1,'/panorama/images/spellicons/antimage_blink_png.png',0),
+                 (20,'Battle Hunger',2,'/panorama/images/spellicons/axe_battle_hunger_png.png',0);",
+        )
+        .unwrap();
+    let cache = directory.path().join("trivia");
+    for folder in ["heroes", "items", "abilities"] {
+        std::fs::create_dir_all(cache.join(folder)).unwrap();
+    }
+    let icon = std::fs::read(repository_assets().join("dig/layers/the_hollow.png")).unwrap();
+    let mut items = vec![("blink", "Blink Dagger", 2250), ("tango", "Tango", 90)];
+    items.extend(
+        cama_app::wrapped_story::personal_patch::AWARDS
+            .iter()
+            .map(|(_, icon, _)| (*icon, "Award Item", 3000))
+            .filter(|(key, _, _)| !matches!(*key, "blink" | "tango")),
+    );
+    for (key, name, cost) in items {
+        connection
+            .execute(
+                "INSERT INTO items(localized_name,cost,icon) VALUES (?1,?2,?3)",
+                params![name, cost, format!("/panorama/images/items/{key}_png.png")],
+            )
+            .unwrap();
+        std::fs::write(cache.join(format!("items/{key}.png")), &icon).unwrap();
+    }
+    for slug in ["antimage_mana_break", "antimage_blink", "axe_battle_hunger"] {
+        std::fs::write(cache.join(format!("abilities/{slug}.png")), &icon).unwrap();
+    }
+    std::fs::write(cache.join("heroes/antimage.png"), &icon).unwrap();
+    let art = ArtSources::for_assets(&repository_assets())
+        .with_hero_portraits(cama_app::hero_lookup::HeroLookup::new(&dotabase), cache)
+        .with_icons(cama_app::dota_icon_lookup::DotaIconLookup::new(&dotabase));
+    (directory, art)
+}
+
+#[test]
+fn patch_chapter_tells_heroes_items_talents_and_fixes_with_game_icons() {
+    let fixture = Fixture::league(12);
+    seed_all_activity(&fixture);
+    let (_directory, art) = patch_chapter_art();
+    let mut raw = WrappedSources::with_art(&fixture.path, art)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    // Twelve dated games: Axe for the first six, Anti-Mage for the rest;
+    // Radiant early and Dire late; cores on even games, supports on odd.
+    let mut games = 0;
+    for row in &mut raw.year_rows {
+        if row.discord_id != OWNER as i64 {
+            continue;
+        }
+        games += 1;
+        let id = row.match_id;
+        row.finished_at = Some(1_767_225_600 + id * 7 * 86_400);
+        row.hero_id = Some(if id <= 6 { 2 } else { 1 });
+        row.side = Some(if id <= 6 { "radiant" } else { "dire" }.to_owned());
+        row.won = Some(id <= 4 || id == 12);
+        row.position = Some(if id % 2 == 0 { 1 } else { 5 });
+        row.kills = Some(10);
+        row.assists = Some(5);
+        row.deaths = Some(if id == 3 { 15 } else { 4 });
+        row.items = Some(vec![("blink".to_owned(), 1), ("tango".to_owned(), 3)]);
+    }
+    assert_eq!(games, 12);
+    raw.bans = vec![(1, 4)];
+    let slides = build_slides(
+        raw,
+        &league_names(),
+        OWNER as i64,
+        "Guild Owner",
+        2026,
+        3,
+        3,
+    );
+    let story = story_of(&slides);
+    let card = |kind: &str| {
+        *story
+            .iter()
+            .find(|slide| slide.kind == kind)
+            .unwrap_or_else(|| panic!("{kind} in the story"))
+    };
+
+    let heroes = card("story_hero_patch");
+    assert_eq!(heroes.layout, WrappedLayout::HeroPatch);
+    let names = heroes
+        .rows
+        .iter()
+        .map(|row| (row.primary.as_str(), row.tag.as_str()))
+        .collect::<Vec<_>>();
+    assert!(names.contains(&("Axe", "REMOVED")), "{names:?}");
+    assert!(
+        names
+            .iter()
+            .any(|(name, tag)| *name == "Anti-Mage" && matches!(*tag, "NEW" | "BANNED")),
+        "{names:?}"
+    );
+    let anti_mage = heroes
+        .rows
+        .iter()
+        .find(|row| row.primary == "Anti-Mage")
+        .unwrap();
+    assert!(anti_mage.image_png.is_some());
+    assert_eq!(anti_mage.icons.len(), 2);
+    assert!(heroes.rows.iter().all(|row| !row.secondary.is_empty()));
+
+    let items = card("story_items");
+    assert_eq!(items.layout, WrappedLayout::ItemPatch);
+    let signature = &items.rows[0];
+    assert_eq!(
+        (signature.primary.as_str(), signature.tag.as_str()),
+        ("Blink Dagger", "SIGNATURE")
+    );
+    assert!(
+        signature.secondary.contains("12"),
+        "{}",
+        signature.secondary
+    );
+    assert!(items.rows.iter().all(|row| row.image_png.is_some()));
+    assert!(items.rows.iter().any(|row| row.primary == "Tango"));
+
+    let talents = card("story_talents");
+    assert_eq!(talents.layout, WrappedLayout::Talents);
+    assert_eq!(
+        talents
+            .rows
+            .iter()
+            .map(|row| row.tag.as_str())
+            .collect::<Vec<_>>(),
+        ["25", "20", "15", "10"]
+    );
+    assert!(
+        talents.rows.iter().all(|row| row.value.abs() == 1.0
+            && !row.primary.is_empty()
+            && !row.secondary.is_empty())
+    );
+
+    let fixes = card("story_bugfixes");
+    assert_eq!(fixes.layout, WrappedLayout::BugFixes);
+    assert!(fixes.rows.iter().all(|row| !row.primary.contains('{')));
+    // The fifteen-death Axe game is named by its hero.
+    assert!(
+        fixes
+            .rows
+            .iter()
+            .any(|row| row.primary.contains("15") && row.primary.contains("Axe")),
+        "{:?}",
+        fixes
+            .rows
+            .iter()
+            .map(|row| &row.primary)
+            .collect::<Vec<_>>()
+    );
+    let known = fixes
+        .rows
+        .iter()
+        .filter(|row| row.tag == "KNOWN ISSUE")
+        .count();
+    assert!(known <= 1);
+    if known == 1 {
+        assert_eq!(fixes.rows.last().unwrap().tag, "KNOWN ISSUE");
+    }
+
+    // The cover carries the version; awards wear their item icon.
+    let cover = story.first().unwrap();
+    assert_eq!(
+        (cover.kind.as_str(), cover.stat_value.as_str()),
+        ("story_intro", "20.26")
+    );
+    for award in story
+        .iter()
+        .filter(|slide| slide.kind == "story_patch_award")
+    {
+        assert!(award.art_png.is_some(), "{}", award.title);
+    }
+    // Every story card after the cover names its section, and all of them
+    // share the background variation that belongs to this player.
+    let seed = story_seed(OWNER as i64, 2026);
+    for slide in &story {
+        assert_eq!(slide.seed, seed, "{}", slide.kind);
+        assert_eq!(
+            slide.section.is_empty(),
+            slide.kind == "story_intro",
+            "{}",
+            slide.kind
+        );
+    }
+    assert_eq!(heroes.section, "HERO UPDATES");
+    assert_eq!(fixes.section, "BUG FIXES");
+    // The chapter runs in patch-notes order and stays inside the budget.
+    let position = |kind: &str| story.iter().position(|slide| slide.kind == kind).unwrap();
+    assert!(position("story_hero") < position("story_hero_patch"));
+    assert!(position("story_hero_patch") < position("story_items"));
+    assert!(position("story_items") < position("story_talents"));
+    assert!(position("story_talents") < position("story_bugfixes"));
+    assert!(story.len() - 1 <= 24, "{} cards", story.len() - 1);
+    for slide in [heroes, items, talents, fixes] {
+        render_wrapped_slide(slide).expect("patch chapter cards render");
+    }
+}
+
+#[test]
+fn patch_chapter_is_absent_without_the_data_for_it() {
+    let fixture = Fixture::league(2);
+    let slides = league_deck(&fixture, &league_names());
+    for kind in [
+        "story_hero_patch",
+        "story_items",
+        "story_talents",
+        "story_bugfixes",
+    ] {
+        assert!(slides.iter().all(|slide| slide.kind != kind), "{kind}");
+    }
+    // Without a story to name it, the update takes the name of the player.
+    let cover = slides
+        .iter()
+        .find(|slide| slide.kind == "story_intro")
+        .unwrap();
+    assert_eq!(cover.headline, "The Guild Owner Update");
 }
