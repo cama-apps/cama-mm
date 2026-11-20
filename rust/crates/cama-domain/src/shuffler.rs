@@ -496,16 +496,16 @@ impl Default for BalancedShuffler {
             use_openskill: false,
             use_jopacoin: false,
             off_role_multiplier: 0.98,
-            off_role_flat_value_penalty: 72.0,
-            off_role_flat_penalty: 740.0,
+            off_role_flat_value_penalty: 65.0,
+            off_role_flat_penalty: 810.0,
             role_matchup_delta_weight: ROLE_MATCHUP_DELTA_WEIGHT,
             exclusion_penalty_weight: 72.0,
             rd_priority_weight: 0.2,
             recent_match_penalty_weight: 340.0,
             soft_avoid_penalty: 160.0,
-            package_deal_penalty: 80.0,
-            package_deal_split_penalty: 80.0,
-            rating_spread_multiplier: 0.18,
+            package_deal_penalty: 88.0,
+            package_deal_split_penalty: 88.0,
+            rating_spread_multiplier: 0.20,
             role_assignment_provider: Arc::new(GlobalRoleAssignmentProvider),
             diagnostics: Arc::new(DiagnosticCounters::default()),
             tie_breaker: Arc::new(|count| {
@@ -2998,12 +2998,12 @@ mod tests {
         let roles = ["2", "1", "3", "4", "5"].map(str::to_owned);
         let metrics = shuffler.role_assignment_metrics(&[&player], &roles, &[3_000.0]);
 
-        assert_eq!(metrics.team_value, 2_868.0);
-        assert_eq!(metrics.role_values, [0.0, 2_868.0, 0.0, 0.0, 0.0]);
+        assert_eq!(metrics.team_value, 2_875.0);
+        assert_eq!(metrics.role_values, [0.0, 2_875.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_740_per_player() {
+    fn test_default_off_role_goodness_adds_810_per_player() {
         let team1_players = (0..5)
             .map(|index| {
                 player(
@@ -3043,7 +3043,7 @@ mod tests {
             super::ADJUSTED_VALUE_DIFF_WEIGHT,
         );
 
-        assert_eq!(score, 1_480.0);
+        assert_eq!(score, 1_620.0);
     }
 
     #[test]
@@ -3709,7 +3709,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 470.0);
+        approx(score, 520.0);
     }
 
     #[test]
@@ -3786,7 +3786,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -2_459.0);
+        approx(selection.preselection_score, -2_409.0);
     }
 
     #[test]
@@ -3827,7 +3827,7 @@ mod tests {
                 .iter()
                 .map(|player| player.mmr.expect("fixture MMR"))
                 .collect::<HashSet<_>>(),
-            HashSet::from([650, 800, 950, 1_000, 1_525])
+            HashSet::from([650, 800, 1_000, 1_275, 1_525])
         );
     }
 
@@ -3875,7 +3875,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_182.0);
+        approx(matchup.total_score, -2_012.0);
     }
 
     #[test]
@@ -4068,7 +4068,7 @@ mod tests {
             consider_roles: false,
             rd_priority_weight: 0.0,
             // Doubled avoidance must outweigh the 200-rating split at the current parity weight.
-            soft_avoid_penalty: 500.0,
+            soft_avoid_penalty: 550.0,
             ..BalancedShuffler::default()
         };
         let target_low_priority = HashSet::from([1001]);
@@ -4122,7 +4122,7 @@ mod tests {
         };
         approx(
             shuffler.calculate_rating_spread_penalty(&[1_000.0, 1_500.0, 2_000.0]),
-            180.0,
+            200.0,
         );
     }
 
@@ -4180,7 +4180,7 @@ mod tests {
             consider_roles: false,
             ..BalancedShuffler::default()
         };
-        assert_eq!(shuffler.rating_spread_multiplier, 0.18);
+        assert_eq!(shuffler.rating_spread_multiplier, 0.20);
     }
 
     #[test]
@@ -4245,7 +4245,7 @@ mod tests {
         let shuffler = BalancedShuffler::default();
         assert_eq!(
             shuffler.calculate_package_deal_penalty(&team1_ids, &team2_ids, Some(&deals), None,),
-            80.0
+            88.0
         );
     }
 
@@ -4589,7 +4589,7 @@ mod tests {
         assert_eq!(
             shuffler
                 .calculate_package_deal_split_penalty(&selected, &excluded, Some(&deals), None,),
-            80.0
+            88.0
         );
     }
 
@@ -5354,9 +5354,9 @@ mod tests {
             .shuffle_from_pool(&players, PoolOptions::default())
             .expect("550-point pool shuffle");
         // The stronger team-delta weight needs a larger off-role penalty to favor this roster.
-        let actual = configured_shuffler(Some(2_300.0))
+        let actual = configured_shuffler(Some(2_600.0))
             .shuffle_from_pool(&players, PoolOptions::default())
-            .expect("2300-point pool shuffle");
+            .expect("2600-point pool shuffle");
         let excluded_ids = |result: &PoolResult| {
             result
                 .excluded
@@ -5375,7 +5375,7 @@ mod tests {
         assert_eq!(
             off_roles(&actual),
             0,
-            "a 2300-point penalty should prefer the lower-off-role roster"
+            "a 2600-point penalty should prefer the lower-off-role roster"
         );
     }
 
@@ -5827,8 +5827,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 1_910.0);
-        approx(score(0.5), 1_660.0);
+        approx(score(1.0), 2_060.0);
+        approx(score(0.5), 1_810.0);
     }
 
     #[test]
@@ -5867,7 +5867,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 350.0);
-        approx(matchup.total_score, 820.0);
+        approx(matchup.total_score, 870.0);
     }
 
     #[test]
@@ -5972,7 +5972,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 2_130.0);
+        approx(common.2, 2_330.0);
         assert_eq!(common, fallback);
     }
 
@@ -6865,7 +6865,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 470.0);
+        approx(score, 520.0);
     }
 
     #[test]
@@ -7329,9 +7329,9 @@ mod tests {
                     "Pin11:12|Pin4:5",
                 ],
                 [
-                    0xc0b4_7a94_34b7_f050,
+                    0xc0b4_6215_00d8_4cee,
                     0x40c4_691c_16a1_25f0,
-                    0x40c4_4f74_6f72_8e71,
+                    0x40c4_52f4_6f72_8e71,
                 ],
                 8_316,
             ),
@@ -7343,7 +7343,7 @@ mod tests {
                     "Pin11:12|Pin2:3|Pin4:5",
                 ],
                 [
-                    0xc0b4_8c18_d710_f23b,
+                    0xc0b4_62ce_6ac3_3989,
                     0x40c4_e283_716a_3639,
                     0x40c4_e18b_78d9_d30b,
                 ],

@@ -630,7 +630,32 @@ impl MatchRuntimeFixture {
         responder
     }
 
+    /// Fill a lobby and, once it is large enough for `/readycheck`, pass the
+    /// ready check `/shuffle` requires. Fixture players have just joined, so
+    /// the ready check confirms all of them.
     async fn populate_lobby(&self, player_ids: &[i64], lobby_kind: LobbyKind) {
+        self.populate_lobby_unready(player_ids, lobby_kind).await;
+        if player_ids.len() < 10 {
+            return;
+        }
+        self.dispatch_lobby_command("readycheck", player_ids[0], lobby_kind)
+            .await;
+        let confirmed = self
+            .provider
+            .handler
+            .lobbies
+            .snapshot(GUILD, lobby_kind)
+            .expect("fixture lobby snapshot")
+            .confirmed_player_ids
+            .expect("fixture ready check");
+        assert_eq!(
+            confirmed,
+            player_ids.iter().copied().collect::<BTreeSet<_>>(),
+            "fixture ready check must confirm the whole lobby"
+        );
+    }
+
+    async fn populate_lobby_unready(&self, player_ids: &[i64], lobby_kind: LobbyKind) {
         let Some((&creator, remaining)) = player_ids.split_first() else {
             panic!("fixture lobby cannot be empty");
         };
@@ -810,6 +835,7 @@ impl MatchRuntimeFixture {
                 source_lobby_message_id: None,
                 guild_id: GUILD,
                 lobby_kind: LobbyKind::Open,
+                shuffled_by_id: player_ids.first().copied().unwrap_or_default(),
                 player_ids,
                 excluded_conditional_ids,
                 lobby_wait_minutes: HashMap::new(),
@@ -4483,9 +4509,9 @@ fn production_goodness_weights_team_value_and_role_deltas() {
     let goodness =
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
-    // 100 value difference at 4.7 plus a 100 lane-matchup delta at 0.30;
+    // 100 value difference at 5.2 plus a 100 lane-matchup delta at 0.30;
     // subtract 29% of the 15,100 total active rating.
-    assert!((goodness - (-3_879.0)).abs() < 1e-9, "{goodness}");
+    assert!((goodness - (-3_829.0)).abs() < 1e-9, "{goodness}");
 }
 
 #[test]
@@ -6407,14 +6433,10 @@ async fn wait_for_sent(discord: &PublicationProbeDiscord, expected: usize) {
 }
 
 #[test]
-fn test_shuffle_roster_ignores_legacy_conditional_players() {
-    let regular_ids = (1..10).collect::<Vec<_>>();
-    let snapshot = roster_snapshot(regular_ids.clone(), None, 10);
+fn test_shuffle_roster_requires_a_ready_check() {
+    let snapshot = roster_snapshot((1..13).collect(), None, 10);
 
-    let (selected, excluded) = selected_roster(&snapshot);
-
-    assert_eq!(selected, regular_ids);
-    assert!(excluded.is_empty());
+    assert_eq!(selected_roster(&snapshot), None);
 }
 
 #[test]
@@ -6427,26 +6449,56 @@ fn test_readycheck_nonresponders_are_implicit_conditional_exclusions() {
         .collect::<BTreeSet<_>>();
     let snapshot = roster_snapshot(player_ids.clone(), Some(confirmed), 10);
 
-    let (selected, excluded) = selected_roster(&snapshot);
+    let (selected, excluded) = selected_roster(&snapshot).expect("passed ready check");
 
     assert_eq!(selected, player_ids[..10]);
     assert_eq!(excluded, player_ids[10..]);
 }
 
 #[test]
-fn test_readycheck_below_threshold_does_not_change_shuffle_roster() {
+fn test_readycheck_below_threshold_blocks_shuffle() {
     let player_ids = (1..13).collect::<Vec<_>>();
     let confirmed = player_ids[..9]
         .iter()
         .copied()
         .chain([999])
         .collect::<BTreeSet<_>>();
-    let snapshot = roster_snapshot(player_ids.clone(), Some(confirmed), 10);
+    let snapshot = roster_snapshot(player_ids, Some(confirmed), 10);
 
-    let (selected, excluded) = selected_roster(&snapshot);
+    assert_eq!(selected_roster(&snapshot), None);
+}
 
-    assert_eq!(selected, player_ids);
-    assert!(excluded.is_empty());
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_shuffle_preconditions_require_a_passed_ready_check() {
+    let fixture = MatchRuntimeFixture::new();
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    fixture
+        .populate_lobby_unready(&player_ids, LobbyKind::Open)
+        .await;
+    let responder = Arc::new(RecordingMatchResponder::default());
+
+    fixture
+        .provider
+        .handler
+        .handle_shuffle(
+            inferred_shuffle_command_context(player_ids[0]),
+            responder.clone(),
+        )
+        .await
+        .expect("missing ready check is rejected cleanly");
+
+    assert_eq!(
+        responder.contents(),
+        [
+            "❌ 🍽️ All You Can Feed needs a passed ready check before `/shuffle`. Run `/readycheck` and wait for 10 players to confirm."
+        ]
+    );
+    assert!(
+        PendingMatchRepository::new(fixture.database.path())
+            .pending_matches(GUILD)
+            .expect("read pending matches")
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6603,6 +6655,10 @@ async fn test_shuffle_preconditions_allow_regular_lobby_member() {
         .single_pending_match(GUILD)
         .expect("read regular shuffle")
         .expect("regular shuffle persists");
+    assert_eq!(
+        pending.state.extra.get("shuffled_by_id"),
+        Some(&json!(player_ids[0]))
+    );
     assert!(pending.state.extra.contains_key("dota_hosting"));
     assert_eq!(
         DotaHostingOptions::from_extra(&pending.state.extra).unwrap(),
@@ -6894,8 +6950,8 @@ async fn test_execute_shuffle_refreshes_pool_exactly_once_after_finalize() {
     assert_eq!(wager_updates, 2, "opened betting in both shuffle copies");
     assert_eq!(
         updates.len() - refreshes.len() - wager_updates,
-        2,
-        "closed source controls"
+        3,
+        "closed source controls and the shuffled ready check"
     );
     assert!(
         fixture
@@ -7017,7 +7073,7 @@ fn test_readycheck_nonresponders_are_forwarded_to_normal_shuffle() {
         Some(all_ids[..10].iter().copied().collect()),
         10,
     );
-    let (selected, nonresponders) = selected_roster(&snapshot);
+    let (selected, nonresponders) = selected_roster(&snapshot).expect("passed ready check");
 
     let prepared = fixture.prepare_shuffle(selected, "glicko", nonresponders.clone());
 
@@ -7214,6 +7270,37 @@ async fn shuffle_embed_footer_labels_rating_win_chances() {
             "Match #{} | Radiant win chance: Glicko 61.2% | OpenSkill 48.8%",
             prepared.pending.pending_match_id
         )
+    );
+}
+
+#[tokio::test]
+async fn shuffle_embed_names_the_player_who_shuffled() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    let prepared = fixture.prepare_shuffle(player_ids.clone(), "glicko", Vec::new());
+    discord.set_member(
+        u64::try_from(GUILD).expect("fixture guild ID"),
+        u64::try_from(player_ids[0]).expect("fixture player ID"),
+        "Shuffler Server Name",
+    );
+
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+    let balance = embed
+        .fields
+        .iter()
+        .find(|field| field.name == "📊 Balance")
+        .expect("balance field");
+
+    assert!(
+        balance
+            .value
+            .contains("**Shuffled by:** Shuffler Server Name")
     );
 }
 
@@ -7452,6 +7539,7 @@ async fn test_shuffle_embed_never_renders_ids_for_unresolved_excluded_player() {
         .expect("balance field");
 
     assert!(balance.value.contains("**Excluded:** Unknown player"));
+    assert!(balance.value.contains("**Shuffled by:** Unknown player"));
     assert!(!balance.value.contains(&excluded_id.to_string()));
     assert!(!balance.value.contains("<@"));
     assert!(!balance.value.contains(&format!("shuffle-{excluded_id}")));
@@ -7576,6 +7664,57 @@ async fn test_publication_sends_overlap_and_confirmation_error_waits_for_posts()
             .expect("read failed publication")
             .is_some()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lobby_channel_shuffle_message_pings_the_match_players() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    let prepared = fixture.prepare_shuffle(player_ids.clone(), "glicko", Vec::new());
+    let pending_match_id = prepared.pending.pending_match_id;
+
+    fixture
+        .provider
+        .handler
+        .finalize_shuffle(
+            shuffle_context(Some(200)),
+            Arc::new(RecordingMatchResponder::default()),
+            publication_snapshot(LobbyKind::Open, None),
+            prepared,
+        )
+        .await
+        .expect("shuffle publishes");
+
+    let expected_ids = player_ids
+        .iter()
+        .map(|id| u64::try_from(*id).expect("fixture player ID"))
+        .collect::<BTreeSet<_>>();
+    let expected_mentions = expected_ids
+        .iter()
+        .map(|id| format!("<@{id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let sent = discord.sent_messages();
+    let shuffle_message = |channel: u64| {
+        &sent
+            .iter()
+            .find(|(channel_id, message)| {
+                *channel_id == channel && !message.response.embeds.is_empty()
+            })
+            .expect("shuffle message")
+            .1
+    };
+    let lobby = shuffle_message(100);
+    assert_eq!(lobby.response.content, expected_mentions);
+    assert_eq!(
+        lobby.allowed_mentions,
+        DiscordAllowedMentions::Users(expected_ids)
+    );
+    let command = shuffle_message(200);
+    assert_eq!(command.response.content, "");
+    assert_eq!(command.allowed_mentions, DiscordAllowedMentions::None);
+    abort_betting_tasks(&fixture, pending_match_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

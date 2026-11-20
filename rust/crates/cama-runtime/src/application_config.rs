@@ -501,13 +501,13 @@ impl ApplicationConfig {
                 neon_dig_chance: p.f64("NEON_DIG_CHANCE", 0.12),
                 new_player_exclusion_boost: 4,
                 new_player_mmr_discount: i64::from(migration.new_player_mmr_discount),
-                off_role_flat_value_penalty: 72.0,
-                off_role_flat_penalty: 740.0,
+                off_role_flat_value_penalty: 65.0,
+                off_role_flat_penalty: 810.0,
                 off_role_multiplier: 0.98,
                 openskill_shuffle_chance: 0.05,
                 package_deal_games_duration: p.i64("PACKAGE_DEAL_GAMES_DURATION", 10),
-                package_deal_penalty: 80.0,
-                package_deal_split_penalty: 80.0,
+                package_deal_penalty: 88.0,
+                package_deal_split_penalty: 88.0,
                 pet_hunger_decay_per_day: p.i64("PET_HUNGER_DECAY_PER_DAY", 20),
                 pingedash_cooldown_seconds: p.i64("PINGEDASH_COOLDOWN_SECONDS", 86400),
                 pingedash_cost: p.i64("PINGEDASH_COST", 10),
@@ -580,7 +580,7 @@ impl ApplicationConfig {
                 wrapped_min_bets: p.i64("WRAPPED_MIN_BETS", 3),
                 wrapped_min_games: p.i64("WRAPPED_MIN_GAMES", 3),
                 recent_match_penalty_weight: 340.0,
-                rating_spread_multiplier: 0.18,
+                rating_spread_multiplier: 0.20,
                 pingedkevin_cost: p.i64("PINGEDASH_COST", 10),
                 pingedkevin_cooldown_seconds: p.i64("PINGEDASH_COOLDOWN_SECONDS", 86_400),
             },
@@ -897,11 +897,11 @@ mod tests {
     fn test_new_player_exclusion_boost_defaults_to_four() {
         let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
         assert_eq!(config.values.new_player_exclusion_boost, 4);
-        assert_eq!(config.values.off_role_flat_value_penalty, 72.0);
-        assert_eq!(config.values.off_role_flat_penalty, 740.0);
+        assert_eq!(config.values.off_role_flat_value_penalty, 65.0);
+        assert_eq!(config.values.off_role_flat_penalty, 810.0);
         assert_eq!(config.values.soft_avoid_penalty, 160.0);
-        assert_eq!(config.values.package_deal_penalty, 80.0);
-        assert_eq!(config.values.package_deal_split_penalty, 80.0);
+        assert_eq!(config.values.package_deal_penalty, 88.0);
+        assert_eq!(config.values.package_deal_split_penalty, 88.0);
     }
 
     #[test]

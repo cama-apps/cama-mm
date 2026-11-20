@@ -2316,7 +2316,7 @@ async fn live_readycheck_reaches_quorum_once_with_explicit_user_allowlists() {
         vec![lobby_option(LobbyKind::Open)],
     )
     .await;
-    let announcement = ready_announcement(LobbyKind::Open, 2);
+    let announcement = format!("{}\n<@10> <@20>", ready_announcement(LobbyKind::Open, 2));
     let sent = transport.sent_messages();
     assert_eq!(
         sent.iter()
@@ -2325,15 +2325,15 @@ async fn live_readycheck_reaches_quorum_once_with_explicit_user_allowlists() {
         1,
         "one readycheck generation emits the quorum announcement exactly once"
     );
-    assert!(sent.iter().any(|sent| {
-        sent.channel_id == 9
-            && sent.message.response.content == announcement
-            && sent
-                .message
-                .response
-                .content
-                .ends_with("You can `/shuffle` now; only ready players will be included.")
-    }));
+    assert!(
+        sent.iter().any(|sent| {
+            sent.channel_id == 9
+                && sent.message.response.content == announcement
+                && sent.message.allowed_mentions
+                    == DiscordAllowedMentions::Users(BTreeSet::from([10, 20]))
+        }),
+        "the quorum announcement pings the confirmed players"
+    );
     assert!(sent.iter().filter(|sent| sent.message.response.content.contains("<@")).all(
         |sent| matches!(sent.message.allowed_mentions, DiscordAllowedMentions::Users(ref users) if !users.is_empty())
             || sent.message.allowed_mentions == DiscordAllowedMentions::None
@@ -2786,7 +2786,61 @@ async fn swept_readycheck_expires_and_stops_updating() {
             .expect("lobby snapshot")
             .confirmed_player_ids,
         None,
-        "an expired ready check no longer gates the shuffle roster"
+        "an expired ready check no longer counts toward `/shuffle`"
+    );
+}
+
+#[tokio::test]
+async fn shuffle_marks_the_ready_check_as_shuffled() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = unconfirmed_readycheck_fixture(&database, transport.clone()).await;
+    let thread_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .thread_id
+            .expect("lobby thread")
+            .0,
+    )
+    .expect("Discord lobby thread");
+
+    assert!(
+        provider
+            .match_lobby_port()
+            .reset_after_shuffle(42, LobbyKind::Open)
+            .await
+            .expect("reset shuffled lobby")
+    );
+
+    let state = transport.state.lock().expect("transport state");
+    let repaints = state
+        .edits
+        .iter()
+        .filter(|(channel, message, _)| *channel == thread_id && *message == 5_000)
+        .map(|(_, _, message)| &message.response)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        repaints.len(),
+        1,
+        "the shuffle repaints the ready check once"
+    );
+    let embed = &repaints[0].embeds[0];
+    assert_eq!(
+        embed.description.as_deref(),
+        Some("🔀 This lobby has been shuffled.")
+    );
+    assert_eq!(
+        embed.footer.as_deref(),
+        Some("Shuffled — reactions no longer count")
+    );
+    assert_eq!(
+        embed
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["✅ Confirmed Ready (1)"],
+        "a shuffled ready check lists only the players who confirmed"
     );
 }
 
@@ -3855,7 +3909,7 @@ async fn live_readycheck_reconciles_button_join_and_leave_against_the_active_gen
         transport
             .sent_messages()
             .iter()
-            .filter(|sent| sent.message.response.content == announcement)
+            .filter(|sent| sent.message.response.content.starts_with(&announcement))
             .count(),
         1
     );
@@ -5557,7 +5611,7 @@ async fn shuffle_retires_both_controls_and_keeps_the_match_thread_open() {
                 .title
                 .as_deref()
                 .unwrap()
-                .contains("Match Created")
+                .contains("Shuffled")
         );
     }
     assert!(
@@ -5975,15 +6029,23 @@ async fn manual_ready_survives_expiry_and_is_shown_in_the_next_check_without_a_p
         .find(|field| field.name.starts_with("✅ Confirmed Ready"))
         .expect("confirmed players");
     assert!(confirmed.value.contains("Away One"));
+    let announcement = ready_announcement(LobbyKind::Open, 2);
     assert!(
         new_messages
             .iter()
-            .all(|sent| !sent.message.response.content.contains("<@20>"))
+            .filter(|sent| !sent.message.response.content.starts_with(&announcement))
+            .all(|sent| !sent.message.response.content.contains("<@20>")),
+        "only the quorum announcement may ping an already-confirmed player"
     );
     assert_eq!(
         new_messages
             .iter()
-            .filter(|sent| sent.message.response.content == ready_announcement(LobbyKind::Open, 2))
+            .filter(|sent| {
+                sent.message
+                    .response
+                    .content
+                    .starts_with(&ready_announcement(LobbyKind::Open, 2))
+            })
             .count(),
         1
     );

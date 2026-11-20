@@ -98,6 +98,7 @@ async fn seed_failure_compensates_pending_and_first_game_claim() {
             source_lobby_message_id: Some(123),
             guild_id: GUILD,
             lobby_kind: LobbyKind::Open,
+            shuffled_by_id: 99,
             player_ids,
             excluded_conditional_ids: Vec::new(),
             lobby_wait_minutes: HashMap::new(),

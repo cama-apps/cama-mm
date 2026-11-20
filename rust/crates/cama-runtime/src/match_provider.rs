@@ -1586,6 +1586,7 @@ struct PrepareShuffleRequest {
     source_lobby_message_id: Option<u64>,
     guild_id: i64,
     lobby_kind: LobbyKind,
+    shuffled_by_id: i64,
     player_ids: Vec<i64>,
     excluded_conditional_ids: Vec<i64>,
     lobby_wait_minutes: HashMap<i64, i64>,
@@ -2460,7 +2461,17 @@ impl MatchHandler {
             .await;
         }
 
-        let (player_ids, excluded_conditional_ids) = selected_roster(&snapshot);
+        let Some((player_ids, excluded_conditional_ids)) = selected_roster(&snapshot) else {
+            return followup_ephemeral(
+                &responder,
+                &format!(
+                    "❌ {} needs a passed ready check before `/shuffle`. Run `/readycheck` and wait for {} players to confirm.",
+                    lobby_kind.label(),
+                    snapshot.ready_threshold
+                ),
+            )
+            .await;
+        };
         let reserved_ids = player_ids.iter().copied().collect::<BTreeSet<_>>();
         match self
             .lobbies
@@ -2516,6 +2527,7 @@ impl MatchHandler {
             source_lobby_message_id: snapshot.lobby_message_id,
             guild_id: context.guild_id,
             lobby_kind,
+            shuffled_by_id: context.user_id,
             player_ids,
             excluded_conditional_ids,
             lobby_wait_minutes,
@@ -5127,8 +5139,14 @@ impl MatchHandler {
             .collect::<Vec<_>>();
         let players_repository = self.players.clone();
         let guild_id = pending.guild_id;
+        let shuffled_by_id = pending
+            .state
+            .extra
+            .get("shuffled_by_id")
+            .and_then(serde_json::Value::as_i64);
         let mut player_ids = participant_ids.clone();
         player_ids.extend(&pending.state.excluded_player_ids);
+        player_ids.extend(shuffled_by_id);
         player_ids.sort_unstable();
         player_ids.dedup();
         let player_ids_for_query = player_ids.clone();
@@ -5308,6 +5326,12 @@ impl MatchHandler {
                 .collect::<Vec<_>>()
                 .join(", ");
             balance_info.push_str(&format!("\n**Excluded:** {names}"));
+        }
+        if let Some(shuffled_by_id) = shuffled_by_id {
+            balance_info.push_str(&format!(
+                "\n**Shuffled by:** {}",
+                escape_discord_text(&player_names.resolve(shuffled_by_id))
+            ));
         }
         embed = embed
             .field("📊 Balance", balance_info, false)
@@ -6240,23 +6264,16 @@ fn blind_bet_display(blind: &serde_json::Value, is_bomb_pot: bool) -> String {
     }
 }
 
-fn selected_roster(snapshot: &MatchLobbySnapshot) -> (Vec<i64>, Vec<i64>) {
-    let Some(confirmed) = snapshot.confirmed_player_ids.as_ref() else {
-        return (snapshot.player_ids.clone(), Vec::new());
-    };
-    let confirmed_count = snapshot
-        .player_ids
-        .iter()
-        .filter(|player_id| confirmed.contains(player_id))
-        .count();
-    if confirmed_count < snapshot.ready_threshold {
-        return (snapshot.player_ids.clone(), Vec::new());
-    }
-    snapshot
+/// Split the lobby into ready-check confirmed players and non-responders.
+/// `None` until the live ready check has reached the ready threshold.
+fn selected_roster(snapshot: &MatchLobbySnapshot) -> Option<(Vec<i64>, Vec<i64>)> {
+    let confirmed = snapshot.confirmed_player_ids.as_ref()?;
+    let (selected, excluded): (Vec<i64>, Vec<i64>) = snapshot
         .player_ids
         .iter()
         .copied()
-        .partition(|player_id| confirmed.contains(player_id))
+        .partition(|player_id| confirmed.contains(player_id));
+    (selected.len() >= snapshot.ready_threshold).then_some((selected, excluded))
 }
 
 fn lobby_wait_minutes(
