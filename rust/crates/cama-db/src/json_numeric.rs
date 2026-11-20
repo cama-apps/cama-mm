@@ -15,8 +15,8 @@ use serde_json::Value;
 pub struct WrappedPurchaseFacts {
     /// Divine Rapiers bought; zero without a purchase log.
     pub rapier_count: i64,
-    /// A JSON object of tracked-item purchase counts, or `None` (SQL NULL)
-    /// when the player has no `purchase_log`.
+    /// A JSON object of purchase counts for every item key, or `None` (SQL
+    /// NULL) when the player has no `purchase_log`.
     pub item_counts: Option<String>,
 }
 
@@ -32,7 +32,7 @@ pub fn wrapped_purchase_facts(
             item_counts: None,
         });
     };
-    let counts = cama_domain::wrapped_distinct::tracked_item_counts(
+    let counts = cama_domain::wrapped_distinct::purchase_counts(
         purchases
             .iter()
             .filter_map(|purchase| purchase.get("key").and_then(Value::as_str)),
@@ -153,13 +153,16 @@ mod tests {
     #[test]
     fn purchase_facts_come_from_one_read_of_the_log() {
         let player = json!({"purchase_log": [
-            {"key": "rapier"}, {"key": "magic_wand"}, {"key": "rapier"}, {"key": "tango"}
+            {"key": "rapier"}, {"key": "magic_wand"}, {"key": "rapier"}, {"key": "tango"},
+            {"key": "recipe_magic_wand"}, {"key": ""}, {"time": 30}
         ]});
         assert_eq!(
             wrapped_purchase_facts(player.as_object()).unwrap(),
             WrappedPurchaseFacts {
                 rapier_count: 2,
-                item_counts: Some(r#"{"magic_wand":1,"rapier":2}"#.to_owned()),
+                item_counts: Some(
+                    r#"{"magic_wand":1,"rapier":2,"recipe_magic_wand":1,"tango":1}"#.to_owned()
+                ),
             }
         );
         let empty = json!({"purchase_log": []});

@@ -3,13 +3,18 @@ use chrono::{TimeZone, Utc};
 use super::*;
 
 #[test]
-fn tracked_item_counts_keep_only_tracked_keys_and_rapiers() {
-    let counts = tracked_item_counts([
+fn purchase_counts_keep_every_key() {
+    let counts = purchase_counts([
         "magic_wand",
         "blink",
         "magic_wand",
         "rapier",
         "ward_observer",
+        "tango",
+        "tpscroll",
+        "tango",
+        "recipe_magic_wand",
+        "",
     ]);
     assert_eq!(
         counts,
@@ -17,9 +22,14 @@ fn tracked_item_counts_keep_only_tracked_keys_and_rapiers() {
             ("blink".to_owned(), 1),
             ("magic_wand".to_owned(), 2),
             ("rapier".to_owned(), 1),
+            ("recipe_magic_wand".to_owned(), 1),
+            ("tango".to_owned(), 2),
+            ("tpscroll".to_owned(), 1),
+            ("ward_observer".to_owned(), 1),
         ])
     );
-    assert!(tracked_item_counts(["ward_observer"]).is_empty());
+    assert!(purchase_counts([""]).is_empty());
+    assert!(purchase_counts([]).is_empty());
 }
 
 const SINGLE_GAME_KEYS: &[&str] = &[

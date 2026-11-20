@@ -1234,7 +1234,10 @@ fn test_wrapped_refresh_preserves_buybacks_and_item_counts_across_link_changes()
             )
             .expect("read item facts")
     };
-    let expected = (Some(3), Some(r#"{"blink":1,"magic_wand":2}"#.to_owned()));
+    let expected = (
+        Some(3),
+        Some(r#"{"blink":1,"magic_wand":2,"ward_observer":1}"#.to_owned()),
+    );
     assert_eq!(read(&fixture), expected);
 
     link(&fixture, 100, 99_999, false, 20);
