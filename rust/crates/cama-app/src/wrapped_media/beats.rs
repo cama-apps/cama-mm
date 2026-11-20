@@ -10,6 +10,7 @@
 use super::stage::{
     Align, DESCENT, FIRST_BASELINE, FOOTER_NAME, Face, HEIGHT, PILL_HEIGHT, Stage, WIDTH,
     block_height, count_up, fit_text, fit_text_within, pill_extent, pill_size, text_width,
+    whole_word_size,
 };
 use super::*;
 
@@ -133,17 +134,7 @@ impl Type {
     /// fit the column, so a long word shrinks instead of breaking mid-word,
     /// but never below the minimum: a word too wide even there breaks.
     fn size_for(self, text: &str) -> f32 {
-        let widest = text
-            .split_whitespace()
-            .map(|word| text_width(word, self.size, self.face))
-            .fold(0.0_f32, f32::max);
-        if widest <= COLUMN as f32 {
-            self.size
-        } else {
-            (self.size * COLUMN as f32 / widest)
-                .floor()
-                .max(self.minimum)
-        }
+        whole_word_size(text, self.face, self.size, COLUMN).max(self.minimum)
     }
 }
 

@@ -4,7 +4,7 @@
 
 use super::stage::{
     Align, Face, HEIGHT, Stage, WIDTH, block_height, count_up, ink_height, text_width,
-    tracked_width,
+    tracked_width, whole_word_size,
 };
 use super::*;
 
@@ -222,23 +222,38 @@ fn picture(
     }
 }
 
+/// The room a change line's diamond takes before it.
+const BULLET_INDENT: i32 = 26;
+
 /// Change lines with a small diamond before each one. A line too long for
 /// its row wraps under itself, and the diamond stays with its first row.
+/// Centered, the lines stay flush with each other and center as one block.
 fn bulleted(
     stage: &mut Stage<'_>,
     text: &str,
     rect: (i32, i32, i32, i32),
     size: f32,
     (ink, bullet): (Rgba, Rgba),
+    align: Align,
     rise: (f32, f32),
 ) {
-    const INDENT: i32 = 26;
     let (left, top, width, height) = rect;
-    let column = width - INDENT;
-    let (fitted, _) = stage.fit(text, Face::Medium, size, column, height);
+    let column = width - BULLET_INDENT;
+    let (fitted, set) = stage.fit(text, Face::Medium, size, column, height);
+    // Under a centered name the lines center as one block, diamonds and all.
+    let left = match align {
+        Align::Left => left,
+        Align::Center => {
+            let widest = set
+                .iter()
+                .map(|row| text_width(row, fitted, Face::Medium))
+                .fold(0.0_f32, f32::max);
+            left + ((column as f32 - widest) / 2.0).max(0.0) as i32
+        }
+    };
     stage.block(
         text,
-        (left + INDENT, top, column, height),
+        (left + BULLET_INDENT, top, column, height),
         size,
         Face::Medium,
         ink,
@@ -343,7 +358,7 @@ fn hero_blocks(slide: &WrappedSlideData) -> (i32, HeroBlock) {
                 name: (INNER, name_top, INNER_WIDTH, name),
                 name_size: 52.0,
                 strip: (INNER, strip_top, icon),
-                changes: (INNER + 44, changes_top, INNER_WIDTH - 88, changes_height),
+                changes: (INNER, changes_top, INNER_WIDTH, changes_height),
                 change_size: 30.0,
                 stamp_size: 26.0,
                 align: Align::Center,
@@ -382,6 +397,30 @@ pub(super) fn heroes(stage: &mut Stage<'_>) {
         let top = first + index as i32 * (block.height + GAP);
         hero(stage, index, row, top, block, row_window(index, count));
     }
+}
+
+/// Where row `index` sets the hero `name`: the box, as `(left, offset, width,
+/// height)` from the block's top, the size the name starts from, and whether
+/// it centers in that box top to bottom.
+fn hero_name(
+    stage: &Stage<'_>,
+    index: usize,
+    name: &str,
+    block: HeroBlock,
+) -> ((i32, i32, i32, i32), f32, bool) {
+    let icons = stage.row_icons.get(index).map_or(0, Vec::len);
+    let (left, offset, width, height) = block.name;
+    // With no ability icons under it, a name beside its portrait centers on
+    // the portrait.
+    let centered = icons == 0 && block.align == Align::Left;
+    let set = if centered {
+        (left, block.portrait.1, width, block.portrait.3)
+    } else {
+        (left, offset, width, height)
+    };
+    // A one-word name wider than its box shrinks; it never breaks.
+    let size = whole_word_size(name, Face::Black, block.name_size, width);
+    (set, size, centered)
 }
 
 fn hero(
@@ -430,27 +469,29 @@ fn hero(
         (INSET, color),
         span(0.1, 0.42),
     );
-    let (left, offset, width, height) = block.name;
-    if icons == 0 && block.align == Align::Left {
-        // With no ability icons under it, the name centers on the portrait.
+    let ((left, offset, width, height), name_size, centered) =
+        hero_name(stage, index, &row.primary, block);
+    let name = (left, top + offset, width, height);
+    let rise = span(0.22, 0.48);
+    if centered {
         stage.centered_block(
             &row.primary,
-            (left, portrait.1, width, portrait.3),
-            block.name_size,
+            name,
+            name_size,
             Face::Black,
             PAPER,
             block.align,
-            span(0.22, 0.48),
+            rise,
         );
     } else {
         stage.block(
             &row.primary,
-            (left, top + offset, width, height),
-            block.name_size,
+            name,
+            name_size,
             Face::Black,
             PAPER,
             block.align,
-            span(0.22, 0.48),
+            rise,
         );
     }
     let strip_width = icons * icon + (icons - 1).max(0) * 8;
@@ -501,6 +542,7 @@ fn hero(
         (left, top + offset - lift, width, height),
         block.change_size,
         (PAPER, color),
+        block.align,
         span(0.55, 0.8),
     );
     // The verdict hangs off the portrait's corner, clear of the hero's face.
@@ -757,29 +799,29 @@ fn item_figure(
         );
         return;
     }
-    // The figure keeps to just over half the column, so its words have room.
-    let figure_room = width * 11 / 20;
-    let size = geometry.figure_size.min(height as f32 / 1.17);
-    let natural = text_width(figure, size, Face::Display);
-    let figure_width = natural.min(figure_room as f32).ceil() as i32;
+    let (size, room) = figure_split(stage, figure, words, (width, height), geometry);
     stage.stat_in(
         Face::Display,
         figure,
         &spun,
-        (left, top, figure_room, height),
-        geometry.figure_size,
+        (left, top, room, height),
+        size,
         p.accent,
         Align::Left,
         rise,
     );
-    let words_left = left + figure_width + 14;
-    stage.centered_block(
+    // The words center on the figure's own height.
+    let words_width = width - room - FIGURE_GAP;
+    let rows = two_rows(geometry.line_size);
+    let (fitted, set) = stage.fit(words, Face::Medium, geometry.line_size, words_width, rows);
+    let block = block_height(set.len(), fitted, Face::Medium).ceil() as i32;
+    stage.block(
         words,
         (
-            words_left,
-            top + 2,
-            left + width - words_left,
-            (size * 0.96) as i32,
+            left + room + FIGURE_GAP,
+            top + 2 + ((size * 0.96) as i32 - block).max(0) / 2,
+            words_width,
+            rows,
         ),
         geometry.line_size,
         Face::Medium,
@@ -787,6 +829,49 @@ fn item_figure(
         Align::Left,
         span(0.5, 0.76),
     );
+}
+
+/// The gap between a figure and the words beside it.
+const FIGURE_GAP: i32 = 14;
+/// The smallest the words beside a figure are set.
+const FIGURE_WORDS_FLOOR: f32 = 22.0;
+
+/// The height of two rows of words at `size`: the most a figure has beside it.
+fn two_rows(size: f32) -> i32 {
+    block_height(2, size, Face::Medium).ceil() as i32
+}
+
+/// How a row's line, `width` by `height`, is shared: the size its figure is
+/// set at and the room the figure takes, the words getting the rest.
+fn figure_split(
+    stage: &mut Stage<'_>,
+    figure: &str,
+    words: &str,
+    (width, height): (i32, i32),
+    geometry: ItemRow,
+) -> (f32, i32) {
+    let size = geometry.figure_size.min(height as f32 / 1.17);
+    let natural = text_width(figure, size, Face::Display);
+    let tall = two_rows(geometry.line_size);
+    // The figure keeps to just over half the column. A wide one gives up a
+    // fifth of that for words near their design size, and whatever it takes
+    // for words that read on two rows.
+    let full = natural.min((width * 11 / 20) as f32).ceil() as i32;
+    let mut room = full;
+    while room > width * 3 / 10 {
+        let column = width - room - FIGURE_GAP;
+        let (fitted, set) = stage.fit(words, Face::Medium, geometry.line_size, column, tall);
+        let wanted = if room * 5 >= full * 4 {
+            geometry.line_size - 3.0
+        } else {
+            FIGURE_WORDS_FLOOR
+        };
+        if fitted >= wanted && set.len() <= 2 {
+            break;
+        }
+        room -= 6;
+    }
+    (size.min(size * room as f32 / natural), room)
 }
 
 /// Where a fixed issue puts its pieces: the first row's top, the distance
@@ -1016,7 +1101,7 @@ mod tests {
                     Face::Medium,
                     block.change_size,
                     25.0,
-                    width - 26,
+                    width - BULLET_INDENT,
                     height,
                 );
                 // Four ability icons fit beside or under the name.
@@ -1120,6 +1205,99 @@ mod tests {
 
     fn rgb(color: Rgba) -> [u8; 3] {
         [color.0[0], color.0[1], color.0[2]]
+    }
+
+    #[test]
+    fn every_hero_name_keeps_its_words_whole_in_every_hero_block() {
+        let names = cama_domain::hero_catalog::hero_names()
+            .values()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"Earthshaker") && names.contains(&"Legion Commander"));
+        let (portrait, icon) = (flat(256, 144, GREEN), flat(128, 128, BLUE));
+        // One, two and three heroes, with and without ability icons under
+        // the name, with and without a cached portrait beside it.
+        for rows in 1..=3 {
+            for icons in [0, 4] {
+                for with_portrait in [false, true] {
+                    let mut slide = slide("story_hero_patch", rows, true, false);
+                    for row in &mut slide.rows {
+                        row.image_png = with_portrait.then(|| portrait.clone());
+                        row.icons = vec![icon.clone(); icons];
+                    }
+                    let stage = Stage::new(&slide);
+                    let (_, block) = hero_blocks(&slide);
+                    for index in 0..rows {
+                        assert_eq!(stage.row_art[index].is_some(), with_portrait);
+                        assert_eq!(stage.row_icons[index].len(), icons);
+                        for name in &names {
+                            let ((_, _, width, height), size, _) =
+                                hero_name(&stage, index, name, block);
+                            assert_fits(name, Face::Black, size, 32.0, width, height);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_hero_change_the_deck_writes_keeps_to_its_own_row_at_reading_size() {
+        let sets = crate::wrapped_story::hero_patch::widest_lines();
+        assert!(sets.len() > 20, "{} sets", sets.len());
+        for rows in 1..=3 {
+            let slide = slide("story_hero_patch", rows, true, false);
+            let (_, block) = hero_blocks(&slide);
+            let (_, _, width, height) = block.changes;
+            let column = width - BULLET_INDENT;
+            for lines in &sets {
+                let text = lines.join("\n");
+                // Three heroes set their lines at 26; no card goes below it.
+                assert_fits(&text, Face::Medium, block.change_size, 26.0, column, height);
+                let (_, set) = fit_text(&text, Face::Medium, block.change_size, column, height);
+                assert_eq!(set, *lines, "{rows} heroes: a line wraps");
+            }
+        }
+    }
+
+    #[test]
+    fn every_item_line_the_deck_writes_keeps_its_words_readable_beside_its_figure() {
+        let lines = crate::wrapped_story::item_patch::widest_lines();
+        assert!(lines.len() > 40, "{} lines", lines.len());
+        for rows in 1..=4 {
+            let slide = slide("story_items", rows, false, false);
+            let (_, row) = item_rows(&slide);
+            let mut stage = Stage::new(&slide);
+            let (_, _, width, height) = row.line;
+            for line in &lines {
+                let (figure, words) = leading_figure(line).expect("a line opens with its figure");
+                if row.align == Align::Center {
+                    // A lone item's words run the card's width under its
+                    // figure, which leaves them a quarter of the box.
+                    let size = row.line_size;
+                    assert_fits(words, Face::Medium, size, size, width, height / 4);
+                    continue;
+                }
+                let (size, room) = figure_split(&mut stage, figure, words, (width, height), row);
+                let column = width - room - FIGURE_GAP;
+                let tall = two_rows(row.line_size);
+                assert_fits(
+                    words,
+                    Face::Medium,
+                    row.line_size,
+                    FIGURE_WORDS_FLOOR,
+                    column,
+                    tall,
+                );
+                let (fitted, set) = fit_text(words, Face::Medium, row.line_size, column, tall);
+                assert!(set.len() <= 2, "{rows} items: {line:?} takes {set:?}");
+                // The figure stays the loudest thing in its row.
+                assert!(
+                    size >= fitted * 2.5,
+                    "{rows} items: {figure:?} at {size} beside words at {fitted}"
+                );
+            }
+        }
     }
 
     /// Every change to one row reaches the finished card.

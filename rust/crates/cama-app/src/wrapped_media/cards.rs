@@ -118,18 +118,52 @@ fn section_tag(stage: &mut Stage<'_>, label: &str, ink: Rgba) {
     } else {
         SIZE
     };
-    let width = tracked_width(&tag, size, Face::Bold, size * TRACKING);
+    let tracking = size * TRACKING;
+    let left = (WIDTH - MARGIN) as f32 - tracked_width(&tag, size, Face::Bold, tracking);
     // The year label's baseline.
     let baseline = 44.0 + 23.0 * super::stage::FIRST_BASELINE;
-    stage.tracked(
-        &tag,
-        (WIDTH - MARGIN) as f32 - width,
-        baseline,
-        size,
-        Face::Bold,
-        ink,
-        size * TRACKING,
-    );
+    if stage.slide.layout != WrappedLayout::TwoBeat {
+        stage.tracked(&tag, left, baseline, size, Face::Bold, ink, tracking);
+        return;
+    }
+    // A two-beat setup grows a shape under the tag and then wipes to another
+    // color, so the tag is set as a mask of its own coverage and every pixel
+    // of it takes an ink that reads on what is under it.
+    let (black, white) = (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255));
+    let mask = Canvas::new(WRAPPED_SLIDE_WIDTH, TOP as usize, black);
+    let surface = std::mem::replace(&mut stage.canvas, mask);
+    stage.tracked(&tag, left, baseline, size, Face::Bold, white, tracking);
+    let mask = std::mem::replace(&mut stage.canvas, surface);
+    let inks = [ink, stage.palette.on_accent];
+    for (index, coverage) in mask.pixels.chunks_exact(4).enumerate() {
+        if coverage[0] == 0 {
+            continue;
+        }
+        let under = &stage.canvas.pixels[index * 4..index * 4 + 3];
+        let ink = readable_on(Rgba::rgb(under[0], under[1], under[2]), &inks);
+        stage.canvas.set(
+            (index % mask.width) as i32,
+            (index / mask.width) as i32,
+            ink.scaled_alpha(f32::from(coverage[0]) / 255.0),
+        );
+    }
+}
+
+/// The first of `inks` that reads as body text on `surface`. When none does,
+/// black or white, whichever stands out more: one of the two always reads.
+pub(super) fn readable_on(surface: Rgba, inks: &[Rgba]) -> Rgba {
+    use super::stage::contrast;
+    let (black, white) = (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255));
+    inks.iter()
+        .copied()
+        .find(|ink| contrast(*ink, surface) >= 4.5)
+        .unwrap_or_else(|| {
+            if contrast(black, surface) >= contrast(white, surface) {
+                black
+            } else {
+                white
+            }
+        })
 }
 
 /// The rows a layout should show, derived from legacy `lines`/`series` copy

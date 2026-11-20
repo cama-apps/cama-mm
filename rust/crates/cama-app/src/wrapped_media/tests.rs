@@ -690,21 +690,7 @@ fn two_beat_punchlines_settle_before_the_final_hold() {
 
 #[test]
 fn every_punchline_keeps_its_text_readable() {
-    fn luminance(color: Rgba) -> f32 {
-        let channel = |value: u8| {
-            let value = f32::from(value) / 255.0;
-            if value <= 0.03928 {
-                value / 12.92
-            } else {
-                ((value + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * channel(color.0[0]) + 0.7152 * channel(color.0[1]) + 0.0722 * channel(color.0[2])
-    }
-    fn contrast(a: Rgba, b: Rgba) -> f32 {
-        let (a, b) = (luminance(a), luminance(b));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    }
+    use stage::contrast;
     for treatment in WrappedPunch::ALL {
         for theme in ROAST_PALETTES.into_iter().chain(POPOFF_PALETTES) {
             let look = beats::look(theme, treatment);
@@ -1589,43 +1575,42 @@ fn tagged(primary: &str, secondary: &str, tag: &str, value: f64) -> WrappedRow {
     row
 }
 
-/// The four patch chapters at their fullest: every row, the longest copy the
-/// deck sends, and detailed art in every slot.
+/// The four patch chapters at their fullest: every row, the longest hero and
+/// item lines the story functions write, 80-character fixes, and detailed
+/// art in every slot.
 fn patch_chapters() -> Vec<WrappedSlideData> {
+    use crate::wrapped_story::{hero_patch, item_patch};
+    let mut changes = hero_patch::widest_lines();
+    changes.sort_by_key(|lines| std::cmp::Reverse(lines.iter().map(String::len).sum::<usize>()));
     let mut heroes = WrappedSlideData::new("story_hero_patch", "Hero updates");
     heroes.headline = "5 heroes rebalanced across 186 picks.".to_owned();
-    heroes.rows = vec![
-        tagged(
-            "Keeper of the Light",
-            "Win rate increased from 40% to 67%.\nRemoved from Captain's Mode.",
-            "REMOVED",
-            -1.0,
-        ),
-        tagged(
-            "Queen of Pain",
-            "Win rate increased from 48% to 62%.",
-            "BUFFED",
-            1.0,
-        ),
-        tagged("Crystal Maiden", "Added to the hero pool.", "NEW", 0.0),
-    ];
+    heroes.rows = [
+        ("Keeper of the Light", "REMOVED", -1.0),
+        ("Queen of Pain", "BUFFED", 1.0),
+        ("Crystal Maiden", "NEW", 0.0),
+    ]
+    .into_iter()
+    .zip(&changes)
+    .map(|((hero, tag, value), lines)| tagged(hero, &lines.join("\n"), tag, value))
+    .collect();
     for row in &mut heroes.rows {
         row.image_png = Some(textured(256, 144));
         row.icons = vec![textured(128, 128); 4];
     }
 
+    let mut lines = item_patch::widest_lines();
+    lines.sort_by_key(|line| std::cmp::Reverse(line.len()));
     let mut items = WrappedSlideData::new("story_items", "Item updates");
-    items.rows = vec![
-        tagged("Black King Bar", "41 of 48 games", "SIGNATURE", 0.0),
-        tagged(
-            "Aghanim's Scepter",
-            "Purchased after the fight ended.",
-            "NERF",
-            -1.0,
-        ),
-        tagged("Observer Ward", "+212 placed this year", "BUFF", 1.0),
-        tagged("Divine Rapier", "3 bought. 3 lost.", "", 0.0),
-    ];
+    items.rows = [
+        ("Black King Bar", "SIGNATURE", 0.0),
+        ("Aghanim's Scepter", "NERF", -1.0),
+        ("Observer Ward", "BUFF", 1.0),
+        ("Divine Rapier", "", 0.0),
+    ]
+    .into_iter()
+    .zip(&lines)
+    .map(|((item, tag, value), line)| tagged(item, line, tag, value))
+    .collect();
     for row in &mut items.rows {
         row.image_png = Some(textured(88, 64));
     }
@@ -1752,6 +1737,93 @@ fn section_tag_sits_on_the_year_line_and_nowhere_else() {
             let row = y * WRAPPED_SLIDE_WIDTH * 4;
             let label = row..row + 280 * 4;
             assert!(plain.pixels[label.clone()] == long.pixels[label]);
+        }
+    }
+}
+
+/// The lowest contrast any letter of a section tag reaches against what is
+/// behind it at `t`. A letter's solid strokes carry its ink, so each run of
+/// tagged columns is read at its strongest pixel.
+fn section_tag_contrast(slide: &WrappedSlideData, t: f32) -> f32 {
+    let mut tagged = slide.clone();
+    tagged.section = "Gameplay".to_owned();
+    assert!(slide.section.is_empty());
+    let behind = stage::Stage::new(slide).paint(t).pixels.clone();
+    let shown = stage::Stage::new(&tagged).paint(t).pixels.clone();
+    let color = |pixels: &[u8], x: usize, y: usize| {
+        let offset = (y * WRAPPED_SLIDE_WIDTH + x) * 4;
+        Rgba::rgb(pixels[offset], pixels[offset + 1], pixels[offset + 2])
+    };
+    let (mut letters, mut lowest, mut letter) = (0, f32::MAX, 0.0_f32);
+    // The tag ends at the margin, so a clear column follows its last letter.
+    for x in 0..WRAPPED_SLIDE_WIDTH {
+        let strongest = (44..72)
+            .map(|y| (color(&shown, x, y), color(&behind, x, y)))
+            .filter(|(ink, surface)| ink != surface)
+            .map(|(ink, surface)| stage::contrast(ink, surface))
+            .reduce(f32::max);
+        match strongest {
+            Some(strongest) => letter = letter.max(strongest),
+            // A clear column closes the letter before it.
+            None if letter > 0.0 => {
+                letters += 1;
+                lowest = lowest.min(letter);
+                letter = 0.0;
+            }
+            None => {}
+        }
+    }
+    assert!(letters >= 6, "{:?}: {letters} letters at {t}", slide.theme);
+    lowest
+}
+
+#[test]
+fn section_tag_reads_on_every_two_beat_palette_through_both_beats() {
+    let palettes = ROAST_PALETTES.into_iter().chain(POPOFF_PALETTES);
+    let mut faint = Vec::new();
+    let mut sample = |theme: WrappedTheme, treatment: WrappedPunch, moments: &[f32]| {
+        let mut slide = two_beat(treatment);
+        slide.theme = theme;
+        for t in moments {
+            let contrast = section_tag_contrast(&slide, *t);
+            if contrast < 4.5 {
+                faint.push(format!("{theme:?} {treatment:?} at {t}: {contrast:.1}"));
+            }
+        }
+    };
+    // Each palette's setup with its corner shape growing in and then held,
+    // the wipe as its stripe crosses the tag, and the punchline.
+    for theme in palettes.clone() {
+        sample(theme, WrappedPunch::Plain, &[0.1, 0.4, 0.52, 1.0]);
+    }
+    // Each meme's own colors arriving over a setup and then finished; the
+    // setup under them takes each palette in turn.
+    for (treatment, theme) in WrappedPunch::ALL.into_iter().zip(palettes.clone().cycle()) {
+        sample(theme, treatment, &[0.52, 1.0]);
+    }
+    assert!(faint.is_empty(), "{faint:#?}");
+
+    // Whatever else ends up behind the tag, the ink it takes reads there.
+    for theme in palettes {
+        let p = stage::palette(theme);
+        for treatment in WrappedPunch::ALL {
+            let inks = [p.fg, beats::look(theme, treatment).quiet];
+            for step in 0..=u8::MAX {
+                for surface in [
+                    Rgba::rgb(step, step, step),
+                    Rgba::rgb(step, 0, u8::MAX - step),
+                    Rgba::rgb(u8::MAX, step, 0),
+                    Rgba::rgb(0, u8::MAX - step, step),
+                ] {
+                    for preferred in inks {
+                        let ink = cards::readable_on(surface, &[preferred, p.on_accent]);
+                        assert!(
+                            stage::contrast(ink, surface) >= 4.5,
+                            "{theme:?} {treatment:?}: {ink:?} on {surface:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 }

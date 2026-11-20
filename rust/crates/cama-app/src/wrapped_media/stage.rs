@@ -128,6 +128,21 @@ pub(super) fn block_height(rows: usize, size: f32, face: Face) -> f32 {
     size * (FIRST_BASELINE + DESCENT + (rows - 1) as f32 * face.leading())
 }
 
+/// `size`, lowered just enough for the widest word of `value` to fit `width`.
+/// Starting a fit from here makes a long word shrink instead of breaking
+/// inside itself.
+pub(super) fn whole_word_size(value: &str, face: Face, size: f32, width: i32) -> f32 {
+    let widest = value
+        .split_whitespace()
+        .map(|word| text_width(word, size, face))
+        .fold(0.0_f32, f32::max);
+    if widest <= width as f32 {
+        size
+    } else {
+        (size * width as f32 / widest).floor()
+    }
+}
+
 /// Wrap on measured glyph widths, shrinking until the block fits its box. Only
 /// extreme input reaches the visible ellipsis.
 pub(super) fn fit_text(
@@ -468,6 +483,24 @@ pub(super) fn palette(theme: WrappedTheme) -> Palette {
         soft,
         on_accent,
     }
+}
+
+/// The WCAG contrast ratio between two colors: 4.5 reads as body text, 3 as
+/// large display type.
+pub(super) fn contrast(a: Rgba, b: Rgba) -> f32 {
+    fn luminance(color: Rgba) -> f32 {
+        let channel = |value: u8| {
+            let value = f32::from(value) / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.0[0]) + 0.7152 * channel(color.0[1]) + 0.0722 * channel(color.0[2])
+    }
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -956,23 +989,6 @@ mod tests {
 
     #[test]
     fn every_theme_keeps_its_text_readable() {
-        fn luminance(color: Rgba) -> f32 {
-            let channel = |value: u8| {
-                let value = f32::from(value) / 255.0;
-                if value <= 0.03928 {
-                    value / 12.92
-                } else {
-                    ((value + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * channel(color.0[0])
-                + 0.7152 * channel(color.0[1])
-                + 0.0722 * channel(color.0[2])
-        }
-        fn contrast(a: Rgba, b: Rgba) -> f32 {
-            let (a, b) = (luminance(a), luminance(b));
-            (a.max(b) + 0.05) / (a.min(b) + 0.05)
-        }
         for theme in [
             WrappedTheme::Plain,
             WrappedTheme::Cover,

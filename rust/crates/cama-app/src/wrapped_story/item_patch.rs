@@ -81,138 +81,186 @@ const CONSUMABLES: &[(&str, &str, &[&str])] = &[
         "tango",
         "Tango",
         &[
-            "{n} purchased. Trees filed a complaint.",
-            "{n} purchased. The forest has noticed.",
+            "{n} bought. The trees complained.",
+            "{n} bought. The forest noticed.",
         ],
     ),
     (
         "tpscroll",
         "Town Portal Scroll",
         &[
-            "{n} purchased. Arrival times varied.",
-            "{n} purchased. Boots of Travel remain optional.",
+            "{n} bought. Arrival times varied.",
+            "{n} bought. Still arrived late.",
         ],
     ),
     (
         "clarity",
         "Clarity",
         &[
-            "{n} purchased. Mana problems persist.",
-            "{n} purchased. Still out of mana.",
+            "{n} bought. Mana problems persist.",
+            "{n} bought. Still out of mana.",
         ],
     ),
     (
         "flask",
         "Healing Salve",
         &[
-            "{n} purchased. Laning remains hazardous.",
-            "{n} purchased. Health remained a concern.",
+            "{n} bought. Laning remains unsafe.",
+            "{n} bought. HP remained a concern.",
         ],
     ),
     (
         "enchanted_mango",
         "Enchanted Mango",
         &[
-            "{n} purchased. A balanced diet.",
-            "{n} purchased. Fruit intake exceeds guidelines.",
+            "{n} bought. A balanced diet.",
+            "{n} bought. Fruit quota exceeded.",
         ],
     ),
     (
         "faerie_fire",
         "Faerie Fire",
         &[
-            "{n} purchased. Each bought a little more time.",
-            "{n} purchased. Emergency snacks approved.",
+            "{n} bought. Each bought some time.",
+            "{n} bought. Emergency snacks only.",
         ],
     ),
     (
         "smoke_of_deceit",
         "Smoke of Deceit",
         &[
-            "{n} purchased. Ganks were attempted.",
-            "{n} purchased. Somebody had a plan.",
+            "{n} bought. Ganks were attempted.",
+            "{n} bought. Somebody had a plan.",
         ],
     ),
     (
         "dust",
         "Dust of Appearance",
         &[
-            "{n} purchased. Invisible heroes filed a complaint.",
-            "{n} purchased. Nowhere left to hide.",
+            "{n} bought. Invisibility revoked.",
+            "{n} bought. Nowhere left to hide.",
         ],
     ),
     (
         "ward_observer",
         "Observer Ward",
         &[
-            "{n} purchased. The map has been seen.",
-            "{n} purchased. Vision budget approved.",
+            "{n} bought. The map has been seen.",
+            "{n} bought. Vision budget spent.",
         ],
     ),
     (
         "ward_sentry",
         "Sentry Ward",
         &[
-            "{n} purchased. Enemy wards were inconvenienced.",
-            "{n} purchased. Dewarding is a lifestyle.",
+            "{n} bought. Enemy wards objected.",
+            "{n} bought. A dewarding lifestyle.",
         ],
     ),
     (
         "tome_of_knowledge",
         "Tome of Knowledge",
         &[
-            "{n} purchased. Studying continues.",
-            "{n} purchased. Experience was for sale.",
+            "{n} bought. Studying continues.",
+            "{n} bought. XP was for sale.",
         ],
     ),
     (
         "bottle",
         "Bottle",
         &[
-            "{n} purchased. Runes sold separately.",
-            "{n} purchased. Refills not included.",
+            "{n} bought. Runes sold separately.",
+            "{n} bought. Refills not included.",
         ],
     ),
 ];
 
 const SIGNATURE: &[&str] = &[
-    "Built in {g} of {n} {sample}.",
-    "Built in {g} of {n} {sample}. No changes planned.",
-    "Built in {g} of {n} {sample}. Considered core.",
+    "{g} of {n} {sample}.",
+    "{g} of {n} {sample}. As usual.",
+    "{g} of {n} {sample}. Core.",
 ];
 const WIN_RATE_BUFF: &[&str] = &[
     "{p}% wins in {g} games with it.",
-    "{p}% wins in {g} games with it. Buy it again.",
+    "{p}% wins in {g} games. Buy again.",
 ];
 const WIN_RATE_NERF: &[&str] = &[
     "{p}% wins in {g} games with it.",
-    "{p}% wins in {g} games with it. Reconsider.",
+    "{p}% wins in {g} games. Reconsider.",
 ];
 const RAPIER_ONE_WON: &[&str] = &[
-    "{n} purchased in one game. The game was won.",
-    "{n} purchased in one game. It worked.",
+    "{n} in one game. The game was won.",
+    "{n} in one game. It worked.",
 ];
 const RAPIER_ONE_LOST: &[&str] = &[
-    "{n} purchased in one game. The game was lost.",
-    "{n} purchased in one game. It did not help.",
+    "{n} in one game. Lost anyway.",
+    "{n} in one game. It did not help.",
 ];
 const RAPIER_MANY: &[&str] = &[
-    "{n} purchased in {g} games. {w} won.",
-    "{n} purchased across {g} games. Won {w}.",
+    "{n} bought in {g} games. {w} won.",
+    "{n} across {g} games. Won {w}.",
 ];
 const ABSENT: &[&str] = &[
-    "Purchased in 0 of {n} games as a core. Bold.",
-    "Purchased in 0 of {n} core games. Working as intended.",
-    "Purchased in 0 of {n} core games. Magic immunity: optional.",
+    "0 of {n} core games. Bold.",
+    "0 of {n} core games. By design.",
+    "0 of {n} core games. Optional.",
 ];
 const MIDAS: &[&str] = &[
-    "Purchased in {g} of {n} {sample}. Won {w} of them.",
-    "Purchased in {g} of {n} {sample}. {w} of them were won.",
+    "{g} of {n} {sample}. Won {w}.",
+    "{g} of {n} {sample}. {w} won.",
 ];
 const GEM: &[&str] = &[
-    "{n} purchased. Final owner not recorded.",
-    "{n} purchased. Custody was not tracked.",
+    "{n} bought. Owner not recorded.",
+    "{n} bought. Custody not tracked.",
 ];
+
+/// Rapiers bought across games whose results are not all known.
+fn rapier_undecided(count: &str, played: usize) -> String {
+    format!(
+        "{count} bought in {}.",
+        count_noun(played as i64, "game", "games")
+    )
+}
+
+/// A Midas habit across games whose results are not all known.
+fn midas_undecided(bought: &str, logged: &str, sample: &str) -> String {
+    format!("{bought} of {logged} {sample}.")
+}
+
+/// Every line an item can carry, each at its widest: a four-digit pile,
+/// three-digit game counts, a 100% rate, and partial purchase logs. Each
+/// opens with the figure its card sets large. For fit checks.
+#[must_use]
+pub fn widest_lines() -> Vec<String> {
+    const SAMPLE: &str = "parsed games";
+    let fill = |pools: &[&[&str]], count: &str| {
+        let wide = [
+            ("n", count),
+            ("g", "888"),
+            ("w", "888"),
+            ("p", "100"),
+            ("sample", SAMPLE),
+        ];
+        pools
+            .iter()
+            .flat_map(|pool| pool.iter())
+            .map(|template| format_flavor(template, &wide))
+            .collect::<Vec<_>>()
+    };
+    let piles = CONSUMABLES
+        .iter()
+        .map(|(_, _, lines)| *lines)
+        .chain([RAPIER_ONE_WON, RAPIER_ONE_LOST, RAPIER_MANY, GEM])
+        .collect::<Vec<_>>();
+    let mut lines = fill(&piles, "1,204");
+    lines.extend(fill(
+        &[SIGNATURE, WIN_RATE_BUFF, WIN_RATE_NERF, ABSENT, MIDAS],
+        "888",
+    ));
+    lines.push(rapier_undecided("1,204", 888));
+    lines.push(midas_undecided("888", "888", SAMPLE));
+    lines
+}
 
 struct Log<'a> {
     game: &'a DistinctMatch,
@@ -413,10 +461,7 @@ pub fn item_updates(
             let count = format_grouped(bought);
             let line = match (games.len(), decided == games.len()) {
                 (0, _) => return None,
-                (played, false) => format!(
-                    "{count} purchased in {}.",
-                    count_noun(played as i64, "game", "games")
-                ),
+                (played, false) => rapier_undecided(&count, played),
                 (1, true) => write(
                     if wins == 1 {
                         RAPIER_ONE_WON
@@ -469,7 +514,7 @@ pub fn item_updates(
                     ],
                 )
             } else {
-                format!("Purchased in {bought} of {logged} {sample}.")
+                midas_undecided(&bought, &logged, sample)
             };
             Some((item, line))
         })
@@ -584,7 +629,7 @@ mod tests {
             (signature.key.as_str(), signature.name.as_str()),
             ("blink", "Blink Dagger")
         );
-        assert!(signature.line.starts_with("Built in 4 of 6 games."));
+        assert!(signature.line.starts_with("4 of 6 games."));
         assert_eq!(signature.direction, None);
 
         // Games without a log shrink the sample, and the line says so.
@@ -598,7 +643,7 @@ mod tests {
             note(&updates, ItemNote::Signature)
                 .unwrap()
                 .line
-                .starts_with("Built in 4 of 6 parsed games.")
+                .starts_with("4 of 6 parsed games.")
         );
 
         // Two games is a purchase, not a signature.
@@ -625,13 +670,13 @@ mod tests {
         let updates = item_updates(&rows(4, 1), 7, &catalog(), 0);
         let rate = note(&updates, ItemNote::WinRate).expect("win rate");
         assert_eq!(rate.key, "bfury");
-        assert!(rate.line.starts_with("80% wins in 5 games with it."));
+        assert!(rate.line.starts_with("80% wins in 5 games"));
         assert_eq!(rate.direction, Some(BalanceDirection::Buff));
         assert_eq!(note(&updates, ItemNote::Signature).unwrap().key, "blink");
 
         let updates = item_updates(&rows(1, 4), 7, &catalog(), 0);
         let rate = note(&updates, ItemNote::WinRate).expect("win rate");
-        assert!(rate.line.starts_with("20% wins in 5 games with it."));
+        assert!(rate.line.starts_with("20% wins in 5 games"));
         assert_eq!(rate.direction, Some(BalanceDirection::Nerf));
 
         // 60% is not lopsided.
@@ -664,7 +709,7 @@ mod tests {
         let updates = item_updates(&rows, 7, &catalog(), 0);
         let consumable = note(&updates, ItemNote::Consumable).expect("consumable");
         assert_eq!(consumable.key, "tpscroll");
-        assert!(consumable.line.starts_with("30 purchased."));
+        assert!(consumable.line.starts_with("30 bought."));
 
         // Everyone buys scrolls; nobody else buys ten Dust.
         rows.extend((1..=10).map(|id| DistinctMatch {
@@ -678,7 +723,7 @@ mod tests {
             (consumable.key.as_str(), consumable.name.as_str()),
             ("dust", "Dust of Appearance")
         );
-        assert!(consumable.line.starts_with("10 purchased."));
+        assert!(consumable.line.starts_with("10 bought."));
 
         // Nine of anything is not a habit.
         let rows = (1..=9)
@@ -712,17 +757,14 @@ mod tests {
         assert_eq!(
             both,
             BTreeSet::from([
-                "4 purchased in 2 games. 1 won.".to_owned(),
-                "4 purchased across 2 games. Won 1.".to_owned(),
+                "4 bought in 2 games. 1 won.".to_owned(),
+                "4 across 2 games. Won 1.".to_owned(),
             ])
         );
-        assert_eq!(
-            line(&rows([Some(true), None]), 0),
-            "4 purchased in 2 games."
-        );
+        assert_eq!(line(&rows([Some(true), None]), 0), "4 bought in 2 games.");
         let mut single = rows([Some(false), Some(true)]);
         single[1].items = Some(Vec::new());
-        assert!(line(&single, 0).starts_with("2 purchased in one game."));
+        assert!(line(&single, 0).starts_with("2 in one game."));
         assert!(
             RAPIER_ONE_LOST
                 .iter()
@@ -743,7 +785,7 @@ mod tests {
         let updates = item_updates(&rows(15), 7, &catalog(), 0);
         let oddity = note(&updates, ItemNote::Oddity).expect("oddity");
         assert_eq!(oddity.key, "black_king_bar");
-        assert!(oddity.line.starts_with("Purchased in 0 of 15 "));
+        assert!(oddity.line.starts_with("0 of 15 core games."));
         assert!(item_updates(&rows(14), 7, &catalog(), 0).is_empty());
         // One purchase as a core and the absence is gone.
         let mut bought = rows(15);
@@ -780,11 +822,11 @@ mod tests {
         };
         let midas = oddity(&rows(&[("hand_of_midas", 1)])).expect("midas");
         assert_eq!(midas.key, "hand_of_midas");
-        assert!(midas.line.starts_with("Purchased in 3 of 6 games."));
+        assert!(midas.line.starts_with("3 of 6 games."));
         assert!(midas.line.contains('2'));
         let gem = oddity(&rows(&[("gem", 1)])).expect("gem");
         assert_eq!(gem.name, "Gem of True Sight");
-        assert!(gem.line.starts_with("3 purchased."));
+        assert!(gem.line.starts_with("3 bought."));
         assert!(oddity(&rows(&[("gem", 1)])[1..]).is_none());
         let both = oddity(&rows(&[("gem", 1), ("hand_of_midas", 1), ("rapier", 1)])).unwrap();
         assert_eq!(both.key, "rapier");
@@ -792,7 +834,7 @@ mod tests {
             .into_iter()
             .map(|row| DistinctMatch { won: None, ..row })
             .collect::<Vec<_>>();
-        assert_eq!(oddity(&unknown).unwrap().line, "Purchased in 3 of 6 games.");
+        assert_eq!(oddity(&unknown).unwrap().line, "3 of 6 games.");
     }
 
     fn busy_year() -> Vec<DistinctMatch> {
@@ -852,13 +894,6 @@ mod tests {
             item_updates(&rows, 7, &catalog(), 5)
         );
 
-        let wide = [
-            ("n", "12,345"),
-            ("g", "1234"),
-            ("w", "1234"),
-            ("p", "100"),
-            ("sample", "parsed games"),
-        ];
         let pools = CONSUMABLES.iter().map(|(_, _, lines)| *lines).chain([
             SIGNATURE,
             WIN_RATE_BUFF,
@@ -870,15 +905,28 @@ mod tests {
             MIDAS,
             GEM,
         ]);
+        let mut templates = 0;
         for pool in pools {
             assert!(pool.len() >= 2);
-            for template in pool {
-                let line = format_flavor(template, &wide);
-                assert!(!line.contains('{'), "{template}");
-                assert!(line.chars().count() <= 64, "{line}");
-                assert!(line.ends_with('.'), "{line}");
-            }
+            templates += pool.len();
         }
         assert_eq!(CONSUMABLES.len(), 12);
+
+        // The card sets a line's leading figure large and the words after it
+        // small beside it, so the figure leads and the words stay few.
+        const MAX_WORDS: usize = 30;
+        let lines = widest_lines();
+        assert_eq!(lines.len(), templates + 2);
+        for line in lines {
+            assert!(!line.contains('{'), "{line}");
+            assert!(line.ends_with('.'), "{line}");
+            let (figure, words) = line.split_once(' ').expect("a figure, then words");
+            assert!(
+                figure.starts_with(|character: char| character.is_ascii_digit())
+                    && figure.chars().count() <= 5,
+                "{line}"
+            );
+            assert!(words.chars().count() <= MAX_WORDS, "{line}");
+        }
     }
 }

@@ -43,8 +43,8 @@ const NEW_LINES: &[&str] = &[
     "Now enabled in drafts.",
 ];
 const REMOVED_LINES: &[&str] = &[
-    "Removed from the hero pool after {n} games.",
-    "Removed from the rotation after {n} games.",
+    "Removed from the pool after {n} games.",
+    "Rotated out after {n} games.",
     "Disabled after {n} games.",
 ];
 const REMOVED_LOSING: &[&str] = &[
@@ -57,17 +57,101 @@ const REMOVED_WINNING: &[&str] = &[
     "Win rate was {p}%. Removed anyway.",
 ];
 const BANNED_LINES: &[&str] = &[
-    "Banned by opponents in {n} of your games.",
-    "Opponents spent a ban on it in {n} of your games.",
+    "Banned against you in {n} games.",
+    "Opponents spent {n} bans on it.",
 ];
 const BANNED_WINNING: &[&str] = &[
-    "{p}% wins in the {n} games it got through.",
-    "{p}% wins in {n} games when left open. They had a point.",
+    "Got through {n} times. {p}% wins.",
+    "{p}% wins unbanned. They had a point.",
 ];
 const BANNED_LOSING: &[&str] = &[
     "{p}% wins in {n} games when left open.",
-    "{p}% wins in {n} games. The bans were generous.",
+    "{p}% wins unbanned. Generous of them.",
 ];
+
+/// A new hero's record: its games and, when every result is known, its wins.
+fn new_record(count: usize, rate: Option<usize>) -> String {
+    rate.map_or_else(
+        || format!("{count} games."),
+        |rate| format!("{count} games, {rate}% wins."),
+    )
+}
+
+fn win_rate_line(up: bool, before: usize, after: usize) -> String {
+    format!("Win rate {} from {before}% to {after}%.", moved(up))
+}
+
+fn kda_line(before: f64, after: f64) -> String {
+    format!(
+        "KDA {} from {before:.1} to {after:.1}.",
+        moved(after > before)
+    )
+}
+
+fn deaths_line(before: f64, after: f64) -> String {
+    format!(
+        "Avg deaths {} from {before:.1} to {after:.1}.",
+        moved(after > before)
+    )
+}
+
+/// Every set of lines one hero can carry, each at its widest: three-digit
+/// game counts, two-digit averages, and the highest rate its pool allows.
+/// For fit checks.
+#[must_use]
+pub fn widest_lines() -> Vec<Vec<String>> {
+    const GAMES: usize = 888;
+    let fill = |template: &str, rate: usize| {
+        format_flavor(
+            template,
+            &[("n", &GAMES.to_string()), ("p", &rate.to_string())],
+        )
+    };
+    let filled = |pool: &[&str], rate: usize| {
+        pool.iter()
+            .map(|template| fill(template, rate))
+            .collect::<Vec<_>>()
+    };
+    // A removed hero's losing rate stops at 49%, and bans stop looking
+    // generous at 55%.
+    let pools = [
+        (NEW_LINES, vec![new_record(GAMES, Some(100))]),
+        (
+            REMOVED_LINES,
+            [filled(REMOVED_LOSING, 49), filled(REMOVED_WINNING, 100)].concat(),
+        ),
+        (
+            BANNED_LINES,
+            [filled(BANNED_WINNING, 100), filled(BANNED_LOSING, 54)].concat(),
+        ),
+    ];
+    let mut sets = Vec::new();
+    for (openings, closings) in pools {
+        for opening in openings {
+            for closing in &closings {
+                sets.push(vec![fill(opening, 0), closing.clone()]);
+            }
+        }
+    }
+    // A buff or a nerf carries the two stats that moved furthest.
+    for stats in [
+        [
+            win_rate_line(true, 80, 100),
+            kda_line(10.5, 26.0),
+            deaths_line(12.5, 10.0),
+        ],
+        [
+            win_rate_line(false, 100, 80),
+            kda_line(26.0, 10.5),
+            deaths_line(10.0, 12.5),
+        ],
+    ] {
+        for (first, second) in [(0, 1), (0, 2), (1, 2)] {
+            sets.push(vec![stats[first].clone(), stats[second].clone()]);
+        }
+    }
+    sets
+}
 
 /// Up to three hero updates for `player_id`: different tags first, the most
 /// striking first, and never the same hero twice. `bans` lists, per hero, how
@@ -158,13 +242,7 @@ pub fn hero_updates(
             let (wins, known) = counted(only, |game| game.won);
             let rate = (known == count).then(|| percent(wins, known));
             let lines = if tag == HeroChangeTag::New {
-                vec![
-                    line(NEW_LINES, hero, count, 0),
-                    rate.map_or_else(
-                        || format!("{count} games."),
-                        |rate| format!("{count} games, {rate}% wins."),
-                    ),
-                ]
+                vec![line(NEW_LINES, hero, count, 0), new_record(count, rate)]
             } else {
                 let mut lines = vec![line(REMOVED_LINES, hero, count, 0)];
                 lines.extend(rate.map(|rate| {
@@ -264,11 +342,10 @@ fn shifts(early: &[&DistinctMatch], late: &[&DistinctMatch]) -> Vec<(f64, bool, 
             shifts.push((
                 swing as f64 / needed as f64,
                 after > before,
-                format!(
-                    "Win rate {} from {}% to {}%.",
-                    moved(after > before),
+                win_rate_line(
+                    after > before,
                     percent(early_wins, early_known),
-                    percent(late_wins, late_known)
+                    percent(late_wins, late_known),
                 ),
             ));
         }
@@ -297,7 +374,7 @@ fn shifts(early: &[&DistinctMatch], late: &[&DistinctMatch]) -> Vec<(f64, bool, 
             shifts.push((
                 delta.abs() / KDA_SWING,
                 delta > 0.0,
-                format!("KDA {} from {before:.1} to {after:.1}.", moved(delta > 0.0)),
+                kda_line(before, after),
             ));
         }
     }
@@ -315,10 +392,7 @@ fn shifts(early: &[&DistinctMatch], late: &[&DistinctMatch]) -> Vec<(f64, bool, 
             shifts.push((
                 delta.abs() / DEATHS_SWING,
                 delta < 0.0,
-                format!(
-                    "Deaths per game {} from {before:.1} to {after:.1}.",
-                    moved(delta > 0.0)
-                ),
+                deaths_line(before, after),
             ));
         }
     }
@@ -429,10 +503,7 @@ mod tests {
             tags(&updates),
             [(1, HeroChangeTag::Buffed), (2, HeroChangeTag::Buffed)]
         );
-        assert_eq!(
-            updates[0].lines,
-            ["Deaths per game reduced from 8.0 to 5.0."]
-        );
+        assert_eq!(updates[0].lines, ["Avg deaths reduced from 8.0 to 5.0."]);
 
         for row in rows.iter_mut().skip(6) {
             row.deaths = Some(2);
@@ -442,7 +513,7 @@ mod tests {
             updates[0].lines,
             [
                 "KDA increased from 1.5 to 6.0.",
-                "Deaths per game reduced from 8.0 to 2.0."
+                "Avg deaths reduced from 8.0 to 2.0."
             ]
         );
 
@@ -544,8 +615,14 @@ mod tests {
         assert!(banned(&[(2, 13)]).is_empty());
         let updates = banned(&[(2, 9)]);
         assert_eq!(tags(&updates), [(2, HeroChangeTag::Banned)]);
-        assert!(updates[0].lines[0].contains("in 9 of your games"));
-        assert!(updates[0].lines[1].starts_with("100% wins in"));
+        assert!(
+            BANNED_LINES
+                .iter()
+                .any(|template| format_flavor(template, &[("n", "9")]) == updates[0].lines[0])
+        );
+        assert!(BANNED_WINNING.iter().any(|template| {
+            format_flavor(template, &[("n", "12"), ("p", "100")]) == updates[0].lines[1]
+        }));
 
         // Without dates there is no timeline, but bans still tell a story.
         let undated = rows
@@ -639,6 +716,8 @@ mod tests {
 
     #[test]
     fn every_line_is_short_and_never_names_a_hero() {
+        // The longest a line may run and still sit on one row of its card.
+        const MAX_LINE: usize = 40;
         for pool in [
             NEW_LINES,
             REMOVED_LINES,
@@ -650,10 +729,20 @@ mod tests {
         ] {
             assert!(pool.len() >= 2);
             for template in pool {
-                let line = format_flavor(template, &[("n", "1234"), ("p", "100")]);
+                let line = format_flavor(template, &[("n", "888"), ("p", "100")]);
                 assert!(!line.contains('{'), "{template}");
-                assert!(line.chars().count() <= 60, "{line}");
+                assert!(line.chars().count() <= MAX_LINE, "{line}");
                 assert!(line.ends_with('.'), "{line}");
+            }
+        }
+        // Every pairing of those pools and of the stat lines, at its widest.
+        let sets = widest_lines();
+        assert_eq!(sets.len(), 3 + 3 * 5 + 2 * 4 + 6);
+        for lines in &sets {
+            assert_eq!(lines.len(), 2);
+            for line in lines {
+                assert!(!line.contains('{'), "{line}");
+                assert!(line.chars().count() <= MAX_LINE, "{line}");
             }
         }
         let wide = |value: i64| {
@@ -671,7 +760,7 @@ mod tests {
         let mut early = early.iter().collect::<Vec<_>>();
         let late = late.iter().collect::<Vec<_>>();
         for (_, _, line) in shifts(&early, &late) {
-            assert!(line.chars().count() <= 60, "{line}");
+            assert!(line.chars().count() <= MAX_LINE, "{line}");
         }
         early.truncate(2);
         assert!(shifts(&early, &late).is_empty());

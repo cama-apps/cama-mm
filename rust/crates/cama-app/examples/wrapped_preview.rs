@@ -947,7 +947,8 @@ fn measured_chapter_cards() -> Vec<WrappedSlideData> {
 }
 
 /// Hero updates: a full card with real art, the same card with nothing
-/// cached and the longest copy, and one and two heroes.
+/// cached and the longest copy, one and two heroes, and long one-word names
+/// under the widest lines the deck writes.
 fn hero_update_cards() -> Vec<WrappedSlideData> {
     let hero = |name: &str, slug: &str, tag: &str, value: f64, changes: &str, icons: &[&str]| {
         let mut row = tagged(name, changes, tag, value);
@@ -1029,11 +1030,66 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
     solo_bare.rows = vec![willow];
     solo_bare.rows[0].image_png = None;
     solo_bare.rows[0].icons.clear();
-    vec![full, bare, duo, solo, solo_bare]
+
+    // One-word names wider than their box, each under the longest lines the
+    // story functions write for its verdict.
+    let sets = cama_app::wrapped_story::hero_patch::widest_lines();
+    let longest = |opening: &str| {
+        sets.iter()
+            .filter(|lines| lines[0].starts_with(opening))
+            .max_by_key(|lines| lines.iter().map(String::len).sum::<usize>())
+            .map(|lines| lines.join("\n"))
+            .unwrap_or_default()
+    };
+    let shaker = hero(
+        "Earthshaker",
+        "earthshaker",
+        "BANNED",
+        0.0,
+        &longest("Opponents"),
+        &["fissure", "enchant_totem", "aftershock", "echo_slam"],
+    );
+    let dawn = hero(
+        "Dawnbreaker",
+        "dawnbreaker",
+        "NERFED",
+        -1.0,
+        &longest("Win rate reduced"),
+        &[
+            "fire_wreath",
+            "celestial_hammer",
+            "luminosity",
+            "solar_guardian",
+        ],
+    );
+    let legion = hero(
+        "Legion Commander",
+        "legion_commander",
+        "REMOVED",
+        -1.0,
+        &longest("Removed"),
+        &[],
+    );
+    let mut duo_long = bare.clone();
+    duo_long.kind = "story_hero_patch_duo_long".to_owned();
+    duo_long.rows = vec![shaker.clone(), legion.clone()];
+    let mut trio_long = bare.clone();
+    trio_long.kind = "story_hero_patch_trio_long".to_owned();
+    trio_long.rows = vec![dawn.clone(), shaker.clone(), legion];
+    let mut solo_long = solo.clone();
+    solo_long.kind = "story_hero_patch_solo_long".to_owned();
+    solo_long.rows = vec![shaker];
+    let mut solo_stats = solo.clone();
+    solo_stats.kind = "story_hero_patch_solo_stats".to_owned();
+    solo_stats.rows = vec![dawn];
+    vec![
+        full, bare, duo, solo, solo_bare, duo_long, trio_long, solo_long, solo_stats,
+    ]
 }
 
 /// Item updates: four icons, the same card with nothing cached and long
-/// names, and one and two items.
+/// names, one and two items, and the widest figures beside the longest lines
+/// the deck writes.
 fn item_update_cards() -> Vec<WrappedSlideData> {
     let item = |name: &str, key: &str, tag: &str, value: f64, line: &str| {
         let mut row = tagged(name, line, tag, value);
@@ -1094,7 +1150,38 @@ fn item_update_cards() -> Vec<WrappedSlideData> {
     let mut solo = bare.clone();
     solo.kind = "story_items_solo".to_owned();
     solo.rows = vec![blink];
-    vec![full, bare, trio, duo, solo]
+
+    // The widest figures with the longest lines the story functions write.
+    let lines = cama_app::wrapped_story::item_patch::widest_lines();
+    let longest = |opening: &str| {
+        lines
+            .iter()
+            .filter(|line| line.starts_with(opening))
+            .max_by_key(|line| line.len())
+            .map_or("", String::as_str)
+    };
+    let wide_rows = vec![
+        item(
+            "Dust of Appearance",
+            "dust",
+            "STOCKED",
+            0.0,
+            longest("1,204 bought. Nowhere"),
+        ),
+        item("Desolator", "desolator", "BUFF", 1.0, longest("100%")),
+        item("Blink Dagger", "blink", "SIGNATURE", 0.0, longest("888 of")),
+        item("Black King Bar", "black_king_bar", "", 0.0, longest("0 of")),
+    ];
+    let mut wide = bare.clone();
+    wide.kind = "story_items_wide".to_owned();
+    wide.rows = wide_rows.clone();
+    let mut wide_trio = bare.clone();
+    wide_trio.kind = "story_items_wide_trio".to_owned();
+    wide_trio.rows = wide_rows[..3].to_vec();
+    let mut wide_solo = bare.clone();
+    wide_solo.kind = "story_items_wide_solo".to_owned();
+    wide_solo.rows = wide_rows[..1].to_vec();
+    vec![full, bare, trio, duo, solo, wide, wide_trio, wide_solo]
 }
 
 /// Talents: a full tree with the longest options, and a tree that stopped
