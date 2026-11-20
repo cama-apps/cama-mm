@@ -2699,3 +2699,82 @@ async fn rally_is_unchanged_without_queue_hype() {
     assert_eq!(state.channel_messages.len(), 2);
     assert!(state.message_edits.is_empty());
 }
+
+#[tokio::test]
+async fn neon_text_is_model_written_off_the_callers_path() {
+    let database = database();
+    let server = RouteServer::start(Vec::new());
+    let discord = Arc::new(MockDiscord::default());
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        discord.clone(),
+        config(),
+    );
+    let template = cama_app::neon_degen::ansi_block("[QUEUE] Client: Display 7\nPosition: 8");
+
+    // Without a model the block is sent inline, exactly as rendered.
+    provider
+        .handler
+        .deliver_neon_text(70, 42, 7, template.clone(), false)
+        .await
+        .expect("inline Neon send");
+    assert_eq!(
+        discord
+            .state
+            .lock()
+            .expect("Discord state")
+            .channel_messages[0]
+            .1
+            .response
+            .content,
+        template
+    );
+
+    let ai = crate::test_support::ScriptedAi::held("[11:00:00.001] STATUS: SEATED");
+    provider
+        .attach_neon_llm(NeonLlm::new(
+            ai.service(),
+            Arc::new(crate::match_provider::ProductionBettingPlayerContext::new(
+                database.path(),
+                Arc::new(crate::discord_transport::DiscordIdPlayerNameResolver),
+            )),
+        ))
+        .expect("attach Neon model");
+    provider
+        .handler
+        .deliver_neon_text(70, 42, 7, template, false)
+        .await
+        .expect("detached Neon send");
+    assert_eq!(
+        discord
+            .state
+            .lock()
+            .expect("Discord state")
+            .channel_messages
+            .len(),
+        1,
+        "the caller returned while the model was still held"
+    );
+
+    ai.release();
+    for _ in 0..1_000 {
+        if discord
+            .state
+            .lock()
+            .expect("Discord state")
+            .channel_messages
+            .len()
+            == 2
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let state = discord.state.lock().expect("Discord state");
+    assert_eq!(state.channel_messages[1].0, 70);
+    assert_eq!(
+        state.channel_messages[1].1.response.content,
+        cama_app::neon_degen::ansi_block("[11:00:00.001] STATUS: SEATED")
+    );
+}

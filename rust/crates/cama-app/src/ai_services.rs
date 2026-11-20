@@ -1393,16 +1393,33 @@ pub fn build_flavor_prompt(input: &FlavorPromptInput) -> (String, String, Option
         _ => (
             format!(
                 "You are a snarky commentator for a Dota 2 gambling Discord. Generate a \
-                 SHORT personalized roast. PG-13, no slurs.\nExamples:\n{examples}"
+                 SHORT (1-2 sentences) roast. Be funny, sarcastic and PERSONALIZED: reference \
+                 the player's SPECIFIC history when it is embarrassing (for example \"your \
+                 12th loan\"). Use only the stats supplied; never invent numbers. PG-13, no \
+                 slurs.\nExamples:\n{examples}"
             ),
             format!(
-                "Event: {}\nPlayer: {username}\nBalance: {} jopacoin\nGenerate a \
-                 PERSONALIZED roast.",
+                "Event: {}\n{}Player: {username}\n{}Generate a PERSONALIZED roast.",
                 input.event_type,
-                context_integer(&input.player_context, "balance").unwrap_or(0)
+                fact_line("Event details", &input.event_details, &[]),
+                fact_line("Player history", &input.player_context, &["username"]),
             ),
             None,
         ),
+    }
+}
+
+/// `label: key=value, ...` over the present facts, or nothing when none are.
+fn fact_line(label: &str, facts: &BTreeMap<String, Value>, skip: &[&str]) -> String {
+    let rendered = facts
+        .iter()
+        .filter(|(key, value)| !skip.contains(&key.as_str()) && !matches!(value, Value::Null))
+        .map(|(key, value)| format!("{key}={}", render_value(Some(value))))
+        .collect::<Vec<_>>();
+    if rendered.is_empty() {
+        String::new()
+    } else {
+        format!("{label}: {}\n", rendered.join(", "))
     }
 }
 

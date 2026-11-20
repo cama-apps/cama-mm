@@ -787,6 +787,20 @@ async fn run_serve() -> ExitCode {
         error!(%error, "queue hype composition refused startup");
         return ExitCode::from(1);
     }
+    if let Some(neon_llm) = cama_runtime::neon_llm::NeonLlm::production(
+        &config.db_path,
+        &application_config,
+        production_ai_service.clone(),
+        Arc::new(DiscordGuildPlayerNameResolver::new(
+            discord_transport.clone(),
+        )),
+    ) && let Err(error) = betting_provider
+        .attach_neon_llm(neon_llm.clone())
+        .and_then(|()| registration_provider.attach_neon_llm(neon_llm))
+    {
+        error!(%error, "Neon model composition refused startup");
+        return ExitCode::from(1);
+    }
     let draft_provider = match DraftRegistrationProvider::new_with_reminder_scheduler_and_neon(
         &config.db_path,
         &application_config,

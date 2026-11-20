@@ -6159,7 +6159,7 @@ impl GuildAiConfigPort for ProductionBettingGuildAiConfig {
     }
 }
 
-struct ProductionBettingPlayerContext {
+pub(crate) struct ProductionBettingPlayerContext {
     shop: ShopRuntimeRepository,
     gambling: GamblingStatsRepository,
     loans: LoanRepository,
@@ -6167,7 +6167,10 @@ struct ProductionBettingPlayerContext {
 }
 
 impl ProductionBettingPlayerContext {
-    fn new(path: impl AsRef<Path>, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+    pub(crate) fn new(
+        path: impl AsRef<Path>,
+        player_names: Arc<dyn GuildPlayerNameResolver>,
+    ) -> Self {
         Self {
             shop: ShopRuntimeRepository::new(path.as_ref()),
             gambling: GamblingStatsRepository::new(path.as_ref()),

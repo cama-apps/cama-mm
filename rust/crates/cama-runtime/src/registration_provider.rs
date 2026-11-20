@@ -50,6 +50,7 @@ use crate::discord_transport::{
     cached_guild_player_names, resolve_guild_player_names,
 };
 use crate::ids::signed_id;
+use crate::neon_llm::NeonLlm;
 use crate::option_ext::{boolean_option, integer_option, string_option, user_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -174,6 +175,7 @@ impl PlayerRegistrationProvider {
                 rally_cooldowns: Mutex::new(BTreeMap::new()),
                 ready_cooldowns: Mutex::new(BTreeMap::new()),
                 queue_hype: OnceLock::new(),
+                neon_llm: OnceLock::new(),
             }),
         }
     }
@@ -185,6 +187,15 @@ impl PlayerRegistrationProvider {
             .queue_hype
             .set(hype)
             .map_err(|_| "registration queue hype was already attached".to_owned())
+    }
+
+    /// Let a model write this provider's Neon terminal text. Without this
+    /// every message keeps its prewritten text.
+    pub fn attach_neon_llm(&self, llm: NeonLlm) -> Result<(), String> {
+        self.handler
+            .neon_llm
+            .set(llm)
+            .map_err(|_| "registration Neon model was already attached".to_owned())
     }
 
     /// Side-effect hook that must be attached to `LobbyRegistrationProvider`
@@ -463,6 +474,7 @@ struct PlayerRegistrationHandler {
     rally_cooldowns: Mutex<BTreeMap<(u64, LobbyKindKey, usize, u64), Instant>>,
     ready_cooldowns: Mutex<BTreeMap<(u64, LobbyKindKey), Instant>>,
     queue_hype: OnceLock<Arc<QueueHype>>,
+    neon_llm: OnceLock<NeonLlm>,
 }
 
 struct RegistrationDraftNeonObserver {
@@ -618,13 +630,8 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
         ) else {
             return Ok(());
         };
-        self.discord
-            .send_message(
-                channel_id,
-                DiscordMessage::silent(InteractionResponse::message(text).without_mentions()),
-            )
+        self.deliver_neon_text(channel_id, event.guild_id, event.player_id, text, false)
             .await
-            .map(|_| ())
     }
 
     async fn gamba_spectator(&self, event: LobbyGambaSpectator) -> Result<(), String> {
@@ -640,24 +647,14 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
         let Some(text) = result.and_then(|result| result.text_block) else {
             return Ok(());
         };
-        let receipt = self
-            .discord
-            .send_message(
-                event.channel_id,
-                DiscordMessage::silent(InteractionResponse::message(text).without_mentions()),
-            )
-            .await?;
-        let discord = self.discord.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(NEON_DELETE_DELAY).await;
-            if let Err(error) = discord
-                .delete_message(receipt.channel_id, receipt.message_id)
-                .await
-            {
-                debug!(%error, "failed to delete gamba spectator Neon message");
-            }
-        });
-        Ok(())
+        self.deliver_neon_text(
+            event.channel_id,
+            event.guild_id,
+            event.player_id,
+            text,
+            true,
+        )
+        .await
     }
 
     async fn lobby_reset(
@@ -999,6 +996,33 @@ impl PlayerRegistrationHandler {
         }
         Ok(())
     }
+}
+
+/// Send one Neon terminal block, deleting it after the usual delay when asked.
+async fn send_neon_text(
+    discord: Arc<dyn DiscordTransport>,
+    channel_id: u64,
+    text: String,
+    delete: bool,
+) -> Result<(), String> {
+    let receipt = discord
+        .send_message(
+            channel_id,
+            DiscordMessage::silent(InteractionResponse::message(text).without_mentions()),
+        )
+        .await?;
+    if delete {
+        tokio::spawn(async move {
+            tokio::time::sleep(NEON_DELETE_DELAY).await;
+            if let Err(error) = discord
+                .delete_message(receipt.channel_id, receipt.message_id)
+                .await
+            {
+                debug!(%error, "failed to delete Neon message");
+            }
+        });
+    }
+    Ok(())
 }
 
 /// Whether a lobby joined at `joined_at_ns` would be the game day's first
@@ -1442,28 +1466,38 @@ impl PlayerRegistrationHandler {
         ) else {
             return;
         };
-        match self
-            .discord
-            .send_message(
-                channel_id,
-                DiscordMessage::silent(InteractionResponse::message(text).without_mentions()),
-            )
+        if let Err(error) = self
+            .deliver_neon_text(channel_id, guild_id, context.user_id, text, true)
             .await
         {
-            Ok(receipt) => {
-                let discord = self.discord.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(NEON_DELETE_DELAY).await;
-                    if let Err(error) = discord
-                        .delete_message(receipt.channel_id, receipt.message_id)
-                        .await
-                    {
-                        debug!(%error, "failed to delete registration Neon message");
-                    }
-                });
-            }
-            Err(error) => debug!(%error, "failed to send registration Neon message"),
+            debug!(%error, "failed to send registration Neon message");
         }
+    }
+
+    /// Send a Neon terminal block about `subject`. With a model attached the
+    /// text is rewritten and sent off the caller's path, so no interaction or
+    /// gateway event waits on the model.
+    async fn deliver_neon_text(
+        &self,
+        channel_id: u64,
+        guild_id: u64,
+        subject: u64,
+        text: String,
+        delete: bool,
+    ) -> Result<(), String> {
+        let discord = Arc::clone(&self.discord);
+        let Some(llm) = self.neon_llm.get().cloned() else {
+            return send_neon_text(discord, channel_id, text, delete).await;
+        };
+        tokio::spawn(async move {
+            let text = llm
+                .text(guild_id as i64, i64::try_from(subject).ok(), text)
+                .await;
+            if let Err(error) = send_neon_text(discord, channel_id, text, delete).await {
+                debug!(%error, "failed to send Neon message");
+            }
+        });
+        Ok(())
     }
 
     async fn handle_mmr_button(

@@ -1599,9 +1599,7 @@ async fn production_prediction_neon_posts_real_media_and_deletes_after_exactly_s
     fixture.player(TRADER, 1_000);
     let sleep = Arc::new(ImmediatePredictionNeonSleep::default());
     let neon = ProductionPredictionNeonPort::with_test_ports(
-        &fixture.path,
         PredictionNeonConfig {
-            ai_features_default: false,
             bigwin_floor: 0.05,
             bigwin_full_payout: 5_000,
             bigwin_min_payout: 500,
@@ -1663,9 +1661,7 @@ async fn production_prediction_neon_preserves_threshold_chance_and_cooldown_gate
     let fixture = Fixture::migrated();
     fixture.player(TRADER, 1_000);
     let neon = ProductionPredictionNeonPort::with_test_ports(
-        &fixture.path,
         PredictionNeonConfig {
-            ai_features_default: false,
             bigwin_floor: 0.05,
             bigwin_full_payout: 5_000,
             bigwin_min_payout: 500,
@@ -2180,4 +2176,52 @@ async fn market_announcements_name_admins_and_ping_participants_beside_their_nam
             crate::registration::InteractionAllowedMentions::Users(vec![ADMIN as u64])
         );
     }
+}
+
+#[tokio::test]
+async fn prediction_big_win_text_is_model_written_when_a_model_is_attached() {
+    let fixture = Fixture::migrated();
+    fixture.player(TRADER, 1_000);
+    let ai = crate::test_support::ScriptedAi::replying("[12:00:00.001] STATUS: OVERPAID");
+    let mut neon = ProductionPredictionNeonPort::with_test_ports(
+        PredictionNeonConfig {
+            bigwin_floor: 0.05,
+            bigwin_full_payout: 5_000,
+            bigwin_min_payout: 500,
+            cooldown_seconds: 60,
+            enabled: true,
+        },
+        fixture.discord.clone(),
+        Arc::new(FixedPredictionNeonRandom(true)),
+        Arc::new(ImmediatePredictionNeonSleep::default()),
+    );
+    neon.neon_llm = Some(NeonLlm::new(
+        ai.service(),
+        Arc::new(crate::match_provider::ProductionBettingPlayerContext::new(
+            &fixture.path,
+            Arc::new(DiscordIdPlayerNameResolver),
+        )),
+    ));
+
+    neon.on_big_win(PredictionBigWin {
+        discord_id: TRADER,
+        guild_id: GUILD,
+        channel_id: COMMAND_CHANNEL,
+        payout: 3_200,
+    })
+    .await
+    .expect("send prediction Neon");
+
+    let sends = fixture.discord.sends.lock().expect("channel sends");
+    assert_eq!(
+        sends[0].1.response.content,
+        ansi_block("[12:00:00.001] STATUS: OVERPAID")
+    );
+    assert_eq!(sends[0].1.response.attachments.len(), 1);
+    let requests = ai.requests();
+    assert!(
+        requests[0].messages[1]
+            .content
+            .contains("[LEDGER] +3,200 JC settled.")
+    );
 }

@@ -55,6 +55,7 @@ pub mod mana_auto_assign_worker;
 pub mod mana_provider;
 pub mod manashop_debt_worker;
 pub mod match_provider;
+pub mod neon_llm;
 pub(crate) mod pet_death_delivery;
 pub(crate) mod pet_flavor_runtime;
 pub mod pet_provider;

@@ -63,6 +63,7 @@ use crate::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::ids::signed_id;
 use crate::match_provider::pacific_mana_day;
+use crate::neon_llm::NeonLlm;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
@@ -201,6 +202,12 @@ impl ShopRegistrationProvider {
                 openskill_algorithm_fingerprint: config.migration.openskill.algorithm_fingerprint(),
             },
         );
+        let neon_llm = NeonLlm::production(
+            &path,
+            config,
+            ai_service.clone(),
+            Arc::clone(&player_name_resolver),
+        );
         let flavor = ai_service.map(|ai| {
             Arc::new(
                 FlavorTextService::new(
@@ -247,6 +254,7 @@ impl ShopRegistrationProvider {
                 package_deal_cancellation_rates: Mutex::new(BTreeMap::new()),
                 mana_rates: Mutex::new(BTreeMap::new()),
                 neon: Mutex::new(neon),
+                neon_llm,
             }),
             player_names,
         })
@@ -393,6 +401,7 @@ struct ShopInteractionHandler {
     package_deal_cancellation_rates: Mutex<BTreeMap<(i64, i64), VecDeque<Instant>>>,
     mana_rates: Mutex<BTreeMap<(i64, i64), VecDeque<Instant>>>,
     neon: Mutex<NeonDegenService>,
+    neon_llm: Option<NeonLlm>,
 }
 
 trait ShopClock: Send + Sync {
@@ -2804,7 +2813,7 @@ impl ShopInteractionHandler {
             neon.on_cooldown_hit(user_id, Some(guild_id), "double_or_nothing")
         });
         if let Some(result) = result {
-            self.send_neon(channel_id, result).await;
+            self.send_neon(context, channel_id, result).await;
         }
     }
 
@@ -2832,11 +2841,19 @@ impl ShopInteractionHandler {
             )
         });
         if let Some(result) = result {
-            self.send_neon(channel_id, result).await;
+            self.send_neon(context, channel_id, result).await;
         }
     }
 
-    async fn send_neon(&self, channel_id: i64, result: NeonResult) {
+    async fn send_neon(&self, context: &CommandContext, channel_id: i64, mut result: NeonResult) {
+        if let Some(llm) = &self.neon_llm
+            && let Some(canned) = result.text_block.take()
+        {
+            result.text_block = Some(
+                llm.text(context.guild_id, Some(context.user_id), canned)
+                    .await,
+            );
+        }
         let mut response = InteractionResponse::message(
             result.text_block.or(result.footer_text).unwrap_or_default(),
         )

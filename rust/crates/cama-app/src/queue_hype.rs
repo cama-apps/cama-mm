@@ -261,11 +261,13 @@ fn usable_line(raw: &str, names: &[String], max_chars: usize) -> Option<String> 
         .chars()
         .take(max_chars)
         .collect::<String>();
-    // A nickname such as "Mr.Bean" must not make the line read as a link.
+    // A nickname such as "Mr.Bean" must not make the line read as a link, so
+    // names whose only offence is a dot are exempt. A name carrying a scheme
+    // or link syntax is not, and a line repeating it is rejected.
     let mut names = names
         .iter()
         .map(|name| sanitize_detail(name))
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && !contains_link_or_markup(&name.replace('.', " ")))
         .collect::<Vec<_>>();
     names.sort_by_key(|name| std::cmp::Reverse(name.len()));
     let masked = names.iter().fold(line.clone(), |text, name| {
@@ -293,6 +295,9 @@ fn seeded<T>(items: &[T], seed: u64) -> Option<&T> {
     (!items.is_empty()).then(|| &items[(mix(seed) % items.len() as u64) as usize])
 }
 
+/// A prewritten bait pool and the slot values it can be filled with.
+type BaitOption = (&'static [&'static str], Vec<(&'static str, String)>);
+
 fn hype_fallback(facts: &HypeFacts, seed: u64) -> String {
     let side = escape_discord_text(&facts.winning_side);
     let winner = facts
@@ -302,8 +307,7 @@ fn hype_fallback(facts: &HypeFacts, seed: u64) -> String {
         .map(|name| escape_discord_text(name));
     let loser = seeded(&facts.losers, seed.wrapping_add(3)).map(|name| escape_discord_text(name));
 
-    let mut options: Vec<(&[&str], Vec<(&str, String)>)> =
-        vec![(BAIT_GENERIC, vec![("side", side.clone())])];
+    let mut options: Vec<BaitOption> = vec![(BAIT_GENERIC, vec![("side", side.clone())])];
     if let Some(loser) = &loser {
         options.push((BAIT_BLAME_LOSER, vec![("loser", loser.clone())]));
     }
@@ -574,6 +578,31 @@ mod tests {
             all_bait()
                 .iter()
                 .all(|line| !line.contains("<@") && !line.contains('/'))
+        );
+    }
+
+    #[test]
+    fn a_link_shaped_nickname_is_not_exempt_from_the_link_filter() {
+        for nickname in [
+            "https://evil.example/x",
+            "javascript:alert",
+            "[x](evil.example)",
+        ] {
+            let names = vec![nickname.to_owned(), "Mr.Bean".to_owned()];
+            assert_eq!(
+                usable_line(&format!("{nickname} fed again."), &names, 400),
+                None,
+                "{nickname}"
+            );
+        }
+        let names = vec!["Mr.Bean".to_owned()];
+        assert_eq!(
+            usable_line("Mr.Bean fed. See evil.example now.", &names, 400),
+            None
+        );
+        assert_eq!(
+            usable_line("Mr.Bean fed again.", &names, 400).as_deref(),
+            Some("Mr.Bean fed again.")
         );
     }
 
