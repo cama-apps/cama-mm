@@ -618,7 +618,9 @@ impl WrappedLiveRepository {
                     wf.actions_per_min, wf.rapier_count, wf.buybacks, wf.item_counts,
                     wf.comeback, wf.throw,
                     rh.expected_team_win_prob, rh.rating - rh.rating_before,
-                    p.timezone, mp.firstblood_claimed, mp.roshans_killed
+                    p.timezone, mp.firstblood_claimed, mp.roshans_killed,
+                    mp.derived_role, mp.last_hits_at_10, mp.teamfight_participation,
+                    mp.net_worth, mp.denies, mp.tower_damage
                FROM match_participants AS mp
                JOIN matches AS m ON m.match_id = mp.match_id
                JOIN players AS p ON p.discord_id = mp.discord_id AND p.guild_id = ?1
@@ -675,6 +677,15 @@ impl WrappedLiveRepository {
                 rating_delta: row.get(28)?,
                 first_blood: row.get::<_, Option<i64>>(30)?.map(|claimed| claimed != 0),
                 roshans: row.get(31)?,
+                position: row
+                    .get::<_, Option<String>>(32)?
+                    .and_then(|role| role.trim().parse::<i64>().ok())
+                    .filter(|position| (1..=5).contains(position)),
+                last_hits_at_10: row.get(33)?,
+                teamfight_participation: row.get(34)?,
+                net_worth: row.get(35)?,
+                denies: row.get(36)?,
+                tower_damage: row.get(37)?,
             });
             players
                 .entry(discord_id)

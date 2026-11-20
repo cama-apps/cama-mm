@@ -136,6 +136,15 @@ pub struct DistinctMatch {
     /// Parsed games only; `None` when unknown.
     pub first_blood: Option<bool>,
     pub roshans: Option<i64>,
+    /// The position actually played, 1 (safe-lane carry) to 5 (hard support),
+    /// from `match_participants.derived_role`; `None` when it was not derived.
+    pub position: Option<i64>,
+    pub last_hits_at_10: Option<i64>,
+    /// Share of the team's fights joined, 0.0 to 1.0.
+    pub teamfight_participation: Option<f64>,
+    pub net_worth: Option<i64>,
+    pub denies: Option<i64>,
+    pub tower_damage: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
