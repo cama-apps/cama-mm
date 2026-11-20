@@ -1,15 +1,19 @@
 //! Export deterministic Wrapped artwork for visual review.
-//! `cargo run -p cama-app --example wrapped_preview -- <output-directory> [--still] [--patch-only]`
+//! `cargo run -p cama-app --example wrapped_preview -- <output-directory> [--still] [--patch-only]
+//! [--only <kind-substring>] [--seed <number>] [--frames <progress,progress,...>]`
 //!
 //! Every name and number here is invented. The deck follows the order
 //! `/wrapped` sends it in and takes its jokes from the real copy pools, then
 //! adds one card for each punchline treatment the deck did not show. `--still`
-//! skips the GIFs for a quick layout pass. Hero portraits and full-body renders
-//! come from the Steam image cache that production warms
-//! (`STEAM_IMAGE_CACHE_ROOT`, default `.cache`) when it is present.
+//! skips the GIFs for a quick layout pass, `--only` keeps the cards whose kind
+//! contains a string, `--seed` gives every card a player's background
+//! variation, and `--frames` also writes the reveal at each progress from 0
+//! to 1. Hero portraits, full-body renders, item icons and ability icons come
+//! from the Steam image cache that production warms (`STEAM_IMAGE_CACHE_ROOT`,
+//! default `.cache`) when it is present.
 use cama_app::wrapped_media::{
     WrappedArtwork, WrappedBeat, WrappedLayout, WrappedPunch, WrappedRow, WrappedSlideData,
-    WrappedTheme, render_wrapped_media, render_wrapped_slide,
+    WrappedTheme, render_wrapped_frame, render_wrapped_media, render_wrapped_slide,
 };
 use cama_app::wrapped_story::personal_patch::{BalanceDirection, personal_patch};
 use cama_app::wrapped_story::roast_pools::{
@@ -59,6 +63,21 @@ fn hero_image(slug: &str, render: bool) -> Option<Vec<u8>> {
         path.push("renders");
     }
     std::fs::read(path.join(format!("{slug}.png"))).ok()
+}
+
+/// A cached game icon from `folder` of the trivia cache: `items` by
+/// purchase-log key, `abilities` by slug.
+fn icon_image(folder: &str, name: &str) -> Option<Vec<u8>> {
+    let path = cama_app::trivia_image_cache::production_trivia_cache_path().join(folder);
+    std::fs::read(path.join(format!("{name}.png"))).ok()
+}
+
+/// One row of a patch chapter: its name, line, stamp and buff-or-nerf sign.
+fn tagged(primary: &str, secondary: &str, tag: &str, value: f64) -> WrappedRow {
+    let mut row = WrappedRow::new(primary, secondary);
+    row.tag = tag.to_owned();
+    row.value = value;
+    row
 }
 
 /// A real Camagotchi card, drawn the way `/pet` draws one.
@@ -486,8 +505,9 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
 
     let mut intro = card("story_intro", "Your year");
     intro.theme = WrappedTheme::Patch;
-    intro.headline = "Your\n2026\npatch notes".to_owned();
-    intro.stat_value = PLAYER.to_owned();
+    intro.stat_value = "20.26".to_owned();
+    intro.headline = "The Bloodbath\nUpdate".to_owned();
+    intro.stat_label = PLAYER.to_owned();
     deck.push(intro);
     deck.extend(patch_gallery());
 
@@ -539,10 +559,14 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     heroes.art_png = hero_image("queenofpain", true);
     let recap_heroes = heroes.rows.clone();
     deck.push(heroes);
+    deck.extend(hero_update_cards());
+    deck.extend(item_update_cards());
+    deck.extend(talent_cards());
 
     let (distinct, stories) = distinct_cards();
     deck.extend(distinct);
     deck.extend(personal_cards());
+    deck.extend(bug_fix_cards());
     deck.extend(side_cards(assets));
 
     let (title, subtitle) = persona_title(&stories, SEED);
@@ -581,8 +605,257 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     for (index, slide) in deck.iter_mut().enumerate() {
         slide.chapter_index = index;
         slide.chapter_count = count;
+        if slide.section.is_empty() {
+            slide.section = section(&slide.kind).to_owned();
+        }
     }
     deck
+}
+
+/// The chapter a card's kind belongs to, as the deck tags it.
+fn section(kind: &str) -> &'static str {
+    match kind {
+        "story_games" | "story_playtime" => "General",
+        kind if kind.contains("story_patch_award") => "Superlatives",
+        kind if kind.starts_with("story_patch") => "General",
+        kind if kind.starts_with("story_hero") => "Hero updates",
+        kind if kind.starts_with("story_items") => "Item updates",
+        kind if kind.starts_with("story_talents") => "Talents",
+        "story_distinct" | "story_record" => "Gameplay",
+        kind if kind.starts_with("story_bugfixes") => "Bug fixes",
+        _ => "",
+    }
+}
+
+/// Hero updates: a full card with real art, the same card with nothing
+/// cached and the longest copy, and one and two heroes.
+fn hero_update_cards() -> Vec<WrappedSlideData> {
+    let hero = |name: &str, slug: &str, tag: &str, value: f64, changes: &str, icons: &[&str]| {
+        let mut row = tagged(name, changes, tag, value);
+        row.image_png = hero_image(slug, false);
+        row.icons = icons
+            .iter()
+            .filter_map(|ability| icon_image("abilities", &format!("{slug}_{ability}")))
+            .collect();
+        row
+    };
+    let queen = hero(
+        "Queen of Pain",
+        "queenofpain",
+        "BUFFED",
+        1.0,
+        "Win rate increased from 48% to 62%.\nNow first-picked. Nobody objected.",
+        &["shadow_strike", "blink", "scream_of_pain", "sonic_wave"],
+    );
+    let pudge = hero(
+        "Pudge",
+        "pudge",
+        "NERFED",
+        -1.0,
+        "Win rate reduced from 51% to 37%.\nMeat Hook accuracy unchanged.",
+        &["meat_hook", "rot", "dismember"],
+    );
+    let keeper = hero(
+        "Keeper of the Light",
+        "keeper_of_the_light",
+        "NEW",
+        0.0,
+        "Added to the hero pool.\nWin rate increased from 40% to 67%.",
+        &["illuminate"],
+    );
+    let maiden = hero(
+        "Crystal Maiden",
+        "crystal_maiden",
+        "BANNED",
+        -1.0,
+        "Banned against you in 14 games.\nTaken as a compliment.",
+        &["crystal_nova", "frostbite", "freezing_field"],
+    );
+    let willow = hero(
+        "Dark Willow",
+        "dark_willow",
+        "REMOVED",
+        -1.0,
+        "Removed from the hero pool.\nLast seen in March.",
+        &["bramble_maze", "shadow_realm", "cursed_crown"],
+    );
+
+    let mut full = card("story_hero_patch", "Hero updates");
+    full.headline = "5 heroes rebalanced across 186 picks.".to_owned();
+    full.rows = vec![queen.clone(), pudge.clone(), keeper.clone()];
+
+    let mut bare = styled(
+        "story_hero_patch_bare",
+        "Hero updates",
+        WrappedLayout::HeroPatch,
+        WrappedTheme::PatchHeroes,
+    );
+    bare.rows = vec![keeper, maiden.clone(), willow.clone()];
+    for row in &mut bare.rows {
+        row.image_png = None;
+        row.icons.clear();
+    }
+
+    let mut duo = bare.clone();
+    duo.kind = "story_hero_patch_duo".to_owned();
+    duo.rows = vec![maiden, pudge];
+
+    let mut solo = bare.clone();
+    solo.kind = "story_hero_patch_solo".to_owned();
+    solo.headline = "One hero. One opinion.".to_owned();
+    solo.rows = vec![queen];
+
+    let mut solo_bare = solo.clone();
+    solo_bare.kind = "story_hero_patch_solo_bare".to_owned();
+    solo_bare.rows = vec![willow];
+    solo_bare.rows[0].image_png = None;
+    solo_bare.rows[0].icons.clear();
+    vec![full, bare, duo, solo, solo_bare]
+}
+
+/// Item updates: four icons, the same card with nothing cached and long
+/// names, and one and two items.
+fn item_update_cards() -> Vec<WrappedSlideData> {
+    let item = |name: &str, key: &str, tag: &str, value: f64, line: &str| {
+        let mut row = tagged(name, line, tag, value);
+        row.image_png = icon_image("items", key);
+        row
+    };
+    let blink = item("Blink Dagger", "blink", "SIGNATURE", 0.0, "41 of 48 games");
+    let bar = item(
+        "Black King Bar",
+        "black_king_bar",
+        "NERF",
+        -1.0,
+        "Purchased after the fight ended.",
+    );
+    let ward = item(
+        "Observer Ward",
+        "ward_observer",
+        "BUFF",
+        1.0,
+        "+212 placed this year",
+    );
+    let rapier = item("Divine Rapier", "rapier", "", 0.0, "3 bought. 3 lost.");
+
+    let mut full = card("story_items", "Item updates");
+    full.rows = vec![blink.clone(), bar.clone(), ward.clone(), rapier.clone()];
+
+    let mut bare = styled(
+        "story_items_bare",
+        "Item updates",
+        WrappedLayout::ItemPatch,
+        WrappedTheme::PatchItems,
+    );
+    bare.rows = vec![
+        tagged(
+            "Aghanim's Scepter",
+            "68% win rate when built",
+            "SIGNATURE",
+            0.0,
+        ),
+        tagged(
+            "Smoke of Deceit",
+            "Purchased in every game you lost.",
+            "NERF",
+            -1.0,
+        ),
+        tagged("Town Portal Scroll", "1,204 bought", "BUFF", 1.0),
+        tagged("Hand of Midas", "0 before minute 20", "", 0.0),
+    ];
+
+    let mut trio = bare.clone();
+    trio.kind = "story_items_trio".to_owned();
+    trio.rows = vec![ward, rapier, blink.clone()];
+
+    let mut duo = bare.clone();
+    duo.kind = "story_items_duo".to_owned();
+    duo.rows = vec![bar, blink.clone()];
+
+    let mut solo = bare.clone();
+    solo.kind = "story_items_solo".to_owned();
+    solo.rows = vec![blink];
+    vec![full, bare, trio, duo, solo]
+}
+
+/// Talents: a full tree with the longest options, and a tree that stopped
+/// growing at level 15.
+fn talent_cards() -> Vec<WrappedSlideData> {
+    let level = |tag: &str, left: &str, right: &str, value: f64| tagged(left, right, tag, value);
+    let mut full = card("story_talents", "Talents");
+    full.rows = vec![
+        level("25", "+1.5s Hex Duration", "-2s Blink Cooldown", -1.0),
+        level("20", "+25 Attack Speed", "+40 Sonic Wave Dmg", 1.0),
+        level("15", "+300 Health", "+400 Night Vision", 1.0),
+        level("10", "+8 Strength", "+20 Damage", -1.0),
+    ];
+    full.lines = lines(&["Most picked at each level across 48 games."]);
+
+    let mut sparse = styled(
+        "story_talents_sparse",
+        "Talents",
+        WrappedLayout::Talents,
+        WrappedTheme::PatchTalents,
+    );
+    sparse.rows = vec![
+        level("20", "+25 Attack Speed", "+12% Spell Amp", 0.0),
+        level("15", "+300 Health", "+30 Movement Speed", -1.0),
+        level("10", "+8 Strength", "+20 Damage", 1.0),
+    ];
+    sparse.lines = lines(&["Level 20 reached in 4 of 48 games."]);
+
+    let mut pair = sparse.clone();
+    pair.kind = "story_talents_pair".to_owned();
+    pair.rows.remove(0);
+    pair.lines.clear();
+    vec![full, sparse, pair]
+}
+
+/// Bug fixes: four 80-character lines with portraits and a known issue, and
+/// two short ones with nothing cached.
+fn bug_fix_cards() -> Vec<WrappedSlideData> {
+    let fix = |line: &str, hero: Option<&str>, tag: &str| {
+        let mut row = tagged(line, "", tag, 0.0);
+        row.image_png = hero.and_then(|slug| hero_image(slug, false));
+        row
+    };
+    let mut full = card("story_bugfixes", "Bug fixes");
+    full.headline = "Resolved during the 2026 season.".to_owned();
+    full.rows = vec![
+        fix(
+            "Fixed an issue where the player would buy back and immediately die again anyway.",
+            Some("pudge"),
+            "",
+        ),
+        fix(
+            "Fixed Black King Bar being purchased only after the team fight had already ended",
+            None,
+            "",
+        ),
+        fix(
+            "Fixed an issue where wards were placed exclusively on the high ground cliff. OK.",
+            Some("crystal_maiden"),
+            "",
+        ),
+        fix(
+            "Sonic Wave still occasionally targets the single enemy hero who is already dead.",
+            Some("queenofpain"),
+            "KNOWN ISSUE",
+        ),
+    ];
+    full.lines = lines(&["No further fixes are planned."]);
+
+    let mut sparse = styled(
+        "story_bugfixes_sparse",
+        "Bug fixes",
+        WrappedLayout::BugFixes,
+        WrappedTheme::PatchFixes,
+    );
+    sparse.rows = vec![
+        fix("Fixed a rare case where the courier was used.", None, ""),
+        fix("Deaths before minute five persist.", None, "KNOWN ISSUE"),
+    ];
+    vec![full, sparse]
 }
 
 /// Signed changes, a long profile, a sparse history, and an earned superlative.
@@ -667,7 +940,15 @@ fn patch_gallery() -> Vec<WrappedSlideData> {
     alternate.title = "Side selection\ndisabled".to_owned();
     alternate.stat_value = "67% Radiant · 80% Dire".to_owned();
     alternate.stat_label = "Won 4/6 on Radiant and 4/5 on Dire; known results only.".to_owned();
-    vec![changes, long, sparse, medal, alternate]
+    // The medal wears the item an award is named for; without one it is a crest.
+    medal.art_png = icon_image("items", "black_king_bar");
+    let mut rapier = alternate.clone();
+    rapier.kind = "more_story_patch_award".to_owned();
+    rapier.title = "Fully committed".to_owned();
+    rapier.stat_value = "3 Rapiers".to_owned();
+    rapier.stat_label = "Bought in 3 of 48 games. Lost all three.".to_owned();
+    rapier.art_png = icon_image("items", "rapier");
+    vec![changes, long, sparse, medal, alternate, rapier]
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -676,19 +957,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .nth(1)
             .ok_or("provide an output directory")?,
     );
-    let still_only = std::env::args().any(|argument| argument == "--still");
-    let patch_only = std::env::args().any(|argument| argument == "--patch-only");
+    let arguments = std::env::args().collect::<Vec<_>>();
+    let flag = |name: &str| arguments.iter().any(|argument| argument == name);
+    let value = |name: &str| {
+        let position = arguments.iter().position(|argument| argument == name)?;
+        arguments.get(position + 1)
+    };
+    let (still_only, patch_only) = (flag("--still"), flag("--patch-only"));
+    let only = value("--only");
+    let seed = value("--seed")
+        .map(|seed| seed.parse::<u64>())
+        .transpose()?;
+    let frames = value("--frames")
+        .map(|list| {
+            list.split(',')
+                .map(str::parse::<f32>)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     std::fs::create_dir_all(&output)?;
     let assets = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets");
-    for (index, slide) in deck(assets).iter().enumerate() {
-        if patch_only && slide.theme != WrappedTheme::Patch && slide.kind != "story_patch_award" {
+    for (index, slide) in deck(assets).iter_mut().enumerate() {
+        let patch_chapter = slide.theme == WrappedTheme::Patch
+            || slide.kind.ends_with("story_patch_award")
+            || matches!(
+                slide.layout,
+                WrappedLayout::HeroPatch
+                    | WrappedLayout::ItemPatch
+                    | WrappedLayout::Talents
+                    | WrappedLayout::BugFixes
+            );
+        if (patch_only && !patch_chapter) || only.is_some_and(|only| !slide.kind.contains(only)) {
             continue;
         }
+        slide.seed = seed.unwrap_or(0);
+        let slide = &*slide;
         let stem = format!("{index:02}-{}", slide.kind);
         std::fs::write(
             output.join(format!("{stem}.png")),
             render_wrapped_slide(slide)?,
         )?;
+        for progress in &frames {
+            let name = format!("{stem}-at-{:03}.png", (progress * 100.0).round() as i32);
+            std::fs::write(output.join(name), render_wrapped_frame(slide, *progress)?)?;
+        }
         if still_only {
             continue;
         }

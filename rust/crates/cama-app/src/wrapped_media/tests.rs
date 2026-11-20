@@ -141,20 +141,28 @@ fn patch_notes_and_medal_evidence_fit_at_readable_sizes() {
 fn patch_cover_and_awards_finish_on_the_same_still_and_fit_discord() {
     let mut cover = WrappedSlideData::new("story_intro", "Your gameplay update");
     cover.theme = WrappedTheme::Patch;
-    cover.headline = "Your\n2026\npatch notes".to_owned();
-    cover.stat_value = "Alexandria".to_owned();
+    cover.stat_value = "20.26".to_owned();
+    cover.headline = "The Bloodbath\nUpdate".to_owned();
+    cover.stat_label = "Alexandria".to_owned();
     let mut award = WrappedSlideData::new("story_patch_award", "The Last Building Standing");
     award.layout = WrappedLayout::Award;
     award.theme = WrappedTheme::Awards;
     award.stat_value = "12,480".to_owned();
     award.stat_label =
         "Building damage per game\n#1 of 24 eligible players\nAcross 48 tracked games".to_owned();
+    award.art_png = Some(textured(88, 64));
     for slide in [cover, award] {
         let media = render_wrapped_media(&slide, true).unwrap();
         assert_eq!(media.filename, "wrapped_slide.gif");
         assert!(media.bytes.len() < MAX_ANIMATION_BYTES);
         let (frames, delays) = play(&media.bytes);
-        assert!(frames.len() > 10 && frames.len() <= motion::FRAMES);
+        // The award keeps the short reveal; the cover takes its own pace.
+        let most = if slide.layout == WrappedLayout::Award {
+            motion::FRAMES
+        } else {
+            motion::pace(&slide).0
+        };
+        assert!(frames.len() > 10 && frames.len() <= most);
         assert!(*frames.last().unwrap() == still_through_palette(&media.bytes, &slide));
         assert_eq!(*delays.last().unwrap(), 600);
         assert_eq!(
@@ -188,7 +196,11 @@ fn measured_patch_with_partial_coverage_fits_without_losing_the_denominator() {
     }
 }
 
-const ALL_KINDS: [&str; 13] = [
+const ALL_KINDS: [&str; 17] = [
+    "story_hero_patch",
+    "story_items",
+    "story_talents",
+    "story_bugfixes",
     "story_intro",
     "story_superlative",
     "story_moment",
@@ -204,7 +216,11 @@ const ALL_KINDS: [&str; 13] = [
     "chart_gamba",
 ];
 
-const ALL_LAYOUTS: [WrappedLayout; 13] = [
+const ALL_LAYOUTS: [WrappedLayout; 17] = [
+    WrappedLayout::HeroPatch,
+    WrappedLayout::ItemPatch,
+    WrappedLayout::Talents,
+    WrappedLayout::BugFixes,
     WrappedLayout::Cover,
     WrappedLayout::BigNumber,
     WrappedLayout::TopList,
@@ -1538,4 +1554,412 @@ fn two_beat_cards_hold_each_beat_long_enough_to_read() {
         .map(|delay| u32::from(*delay))
         .sum::<u32>();
     assert!((700..=760).contains(&reveal), "{reveal} hundredths");
+}
+
+/// Art with busy detail: the worst case for a reveal's size.
+fn textured(width: usize, height: usize) -> Vec<u8> {
+    let mut image = Canvas::new(width, height, Rgba::rgb(0, 0, 0));
+    let mut state = 0x2545_F491_u32;
+    for pixel in image.pixels.chunks_exact_mut(4) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        pixel[..3].copy_from_slice(&state.to_le_bytes()[..3]);
+    }
+    encode_png(&image)
+}
+
+fn flat(width: usize, height: usize, color: [u8; 3]) -> Vec<u8> {
+    let [red, green, blue] = color;
+    encode_png(&Canvas::new(width, height, Rgba::rgb(red, green, blue)))
+}
+
+fn count_of(canvas: &Canvas, color: [u8; 3]) -> usize {
+    canvas
+        .pixels
+        .chunks_exact(4)
+        .filter(|pixel| pixel[..3] == color)
+        .count()
+}
+
+fn tagged(primary: &str, secondary: &str, tag: &str, value: f64) -> WrappedRow {
+    let mut row = WrappedRow::new(primary, secondary);
+    row.tag = tag.to_owned();
+    row.value = value;
+    row
+}
+
+/// The four patch chapters at their fullest: every row, the longest copy the
+/// deck sends, and detailed art in every slot.
+fn patch_chapters() -> Vec<WrappedSlideData> {
+    let mut heroes = WrappedSlideData::new("story_hero_patch", "Hero updates");
+    heroes.headline = "5 heroes rebalanced across 186 picks.".to_owned();
+    heroes.rows = vec![
+        tagged(
+            "Keeper of the Light",
+            "Win rate increased from 40% to 67%.\nRemoved from Captain's Mode.",
+            "REMOVED",
+            -1.0,
+        ),
+        tagged(
+            "Queen of Pain",
+            "Win rate increased from 48% to 62%.",
+            "BUFFED",
+            1.0,
+        ),
+        tagged("Crystal Maiden", "Added to the hero pool.", "NEW", 0.0),
+    ];
+    for row in &mut heroes.rows {
+        row.image_png = Some(textured(256, 144));
+        row.icons = vec![textured(128, 128); 4];
+    }
+
+    let mut items = WrappedSlideData::new("story_items", "Item updates");
+    items.rows = vec![
+        tagged("Black King Bar", "41 of 48 games", "SIGNATURE", 0.0),
+        tagged(
+            "Aghanim's Scepter",
+            "Purchased after the fight ended.",
+            "NERF",
+            -1.0,
+        ),
+        tagged("Observer Ward", "+212 placed this year", "BUFF", 1.0),
+        tagged("Divine Rapier", "3 bought. 3 lost.", "", 0.0),
+    ];
+    for row in &mut items.rows {
+        row.image_png = Some(textured(88, 64));
+    }
+
+    let mut talents = WrappedSlideData::new("story_talents", "Talents");
+    talents.rows = vec![
+        tagged("+1.5s Hex Duration", "-2s Blink Cooldown", "25", -1.0),
+        tagged("+25 Attack Speed", "+40 Sonic Wave Dmg", "20", 1.0),
+        tagged("+300 Health", "+400 Night Vision", "15", 1.0),
+        tagged("+8 Strength", "+20 Damage", "10", -1.0),
+    ];
+    talents.lines = vec!["Most picked at each level across 48 games.".to_owned()];
+
+    let mut fixes = WrappedSlideData::new("story_bugfixes", "Bug fixes");
+    fixes.headline = "Resolved during the 2026 season.".to_owned();
+    fixes.rows = [
+        "Fixed an issue where the player would buy back and immediately die again anyway.",
+        "Fixed Black King Bar being purchased only after the team fight had already ended",
+        "Fixed an issue where wards were placed exclusively on the high ground cliff. OK.",
+        "Sonic Wave still occasionally targets the single enemy hero who is already dead.",
+    ]
+    .into_iter()
+    .map(|line| tagged(line, "", "", 0.0))
+    .collect();
+    fixes.rows[3].tag = "KNOWN ISSUE".to_owned();
+    for row in &mut fixes.rows {
+        row.image_png = Some(textured(256, 144));
+    }
+    fixes.lines = vec!["No further fixes are planned.".to_owned()];
+
+    let mut cards = vec![heroes, items, talents, fixes];
+    for card in &mut cards {
+        card.username = "Alexandria".to_owned();
+        card.year_label = "Cama Wrapped 2026".to_owned();
+        card.section = card.title.clone();
+        card.seed = 7;
+    }
+    cards
+}
+
+#[test]
+fn patch_chapters_reveal_slowly_end_on_the_still_and_fit_discord() {
+    for slide in patch_chapters() {
+        let layout = slide.layout;
+        let media = render_wrapped_media(&slide, true).unwrap();
+        assert_eq!(media.filename, "wrapped_slide.gif", "{layout:?}");
+        assert!(
+            media.bytes.len() < MAX_ANIMATION_BYTES,
+            "{layout:?} is {} bytes",
+            media.bytes.len()
+        );
+        let (frames, delays) = play(&media.bytes);
+        let (most, delay) = motion::pace(&slide);
+        assert_eq!(delay, 4, "{layout:?} plays at full frame rate");
+        assert!(
+            frames.len() > motion::FRAMES && frames.len() <= most,
+            "{layout:?} plays {} frames",
+            frames.len()
+        );
+        assert_ne!(frames[0], *frames.last().unwrap());
+        assert!(
+            *frames.last().unwrap() == still_through_palette(&media.bytes, &slide),
+            "{layout:?} final frame is not the still card"
+        );
+        assert_eq!(*delays.last().unwrap(), 600, "the finished card holds");
+        assert!(delays[..delays.len() - 1].iter().all(|delay| *delay >= 2));
+        // Rows arrive one at a time over about four and a half seconds.
+        let reveal = delays[..delays.len() - 1]
+            .iter()
+            .map(|delay| u32::from(*delay))
+            .sum::<u32>();
+        assert!(
+            (380..=500).contains(&reveal),
+            "{layout:?}: {reveal} hundredths"
+        );
+        assert_eq!(
+            render_wrapped_media(&slide, false).unwrap().filename,
+            "wrapped_slide.png"
+        );
+    }
+}
+
+#[test]
+fn patch_chapters_settle_before_the_final_hold() {
+    // Below the progress bar, which fills across the whole reveal, every
+    // chapter is finished a moment before its last frame.
+    let below_bar = 40 * WRAPPED_SLIDE_WIDTH * 4;
+    for slide in patch_chapters() {
+        let mut stage = stage::Stage::new(&slide);
+        let early = stage.paint(0.5).pixels[below_bar..].to_vec();
+        let held = stage.paint(0.985).pixels[below_bar..].to_vec();
+        let done = &stage.paint(1.0).pixels[below_bar..];
+        assert!(early != done, "{:?} reveals row by row", slide.layout);
+        assert!(held == done, "{:?} is still moving", slide.layout);
+    }
+}
+
+#[test]
+fn section_tag_sits_on_the_year_line_and_nowhere_else() {
+    let band = 44 * WRAPPED_SLIDE_WIDTH * 4..72 * WRAPPED_SLIDE_WIDTH * 4;
+    for layout in ALL_LAYOUTS {
+        let mut slide = busy("custom");
+        slide.layout = layout;
+        slide.rows = vec![WrappedRow::new("7", "times"), WrappedRow::new("9", "wins")];
+        let plain = stage::render_still(&slide);
+        slide.section = "Hero updates".to_owned();
+        let tagged = stage::render_still(&slide);
+        assert!(
+            plain.pixels[band.clone()] != tagged.pixels[band.clone()],
+            "{layout:?} shows no section"
+        );
+        assert!(plain.pixels[..band.start] == tagged.pixels[..band.start]);
+        assert!(plain.pixels[band.end..] == tagged.pixels[band.end..]);
+        // The year label keeps the left of the line to itself.
+        for y in 44..72 {
+            let row = y * WRAPPED_SLIDE_WIDTH * 4;
+            let left = row..row + 360 * 4;
+            assert!(plain.pixels[left.clone()] == tagged.pixels[left]);
+        }
+        // A tag far too long for the line shrinks instead of covering it.
+        slide.section = "An unreasonably long chapter name that keeps going".to_owned();
+        let long = stage::render_still(&slide);
+        for y in 44..72 {
+            let row = y * WRAPPED_SLIDE_WIDTH * 4;
+            let label = row..row + 280 * 4;
+            assert!(plain.pixels[label.clone()] == long.pixels[label]);
+        }
+    }
+}
+
+#[test]
+fn a_seed_moves_the_background_shapes_and_never_the_type() {
+    use WrappedLayout::{
+        Bars, BigNumber, BugFixes, Cover, Curve, HeroPatch, ItemPatch, Persona, Recap, Spotlight,
+        Talents, Tiles, TopList,
+    };
+    for (layout, theme) in [
+        (Cover, WrappedTheme::Cover),
+        (BigNumber, WrappedTheme::Queue),
+        (BigNumber, WrappedTheme::QueueAlt),
+        (TopList, WrappedTheme::Heroes),
+        (Bars, WrappedTheme::Months),
+        (BigNumber, WrappedTheme::Squad),
+        (BigNumber, WrappedTheme::Rivals),
+        (Curve, WrappedTheme::Rating),
+        (Curve, WrappedTheme::GambaUp),
+        (BigNumber, WrappedTheme::Dig),
+        (Spotlight, WrappedTheme::Pet),
+        (BigNumber, WrappedTheme::PetGrave),
+        (Tiles, WrappedTheme::Mafia),
+        (Tiles, WrappedTheme::MafiaRed),
+        (Persona, WrappedTheme::Persona),
+        (Recap, WrappedTheme::Recap),
+        (HeroPatch, WrappedTheme::PatchHeroes),
+        (ItemPatch, WrappedTheme::PatchItems),
+        (Talents, WrappedTheme::PatchTalents),
+        (BugFixes, WrappedTheme::PatchFixes),
+    ] {
+        let mut slide = busy("custom");
+        slide.layout = layout;
+        slide.theme = theme;
+        slide.rows = vec![WrappedRow::new("7", "times"), WrappedRow::new("9", "wins")];
+        let plain = stage::render_still(&slide);
+        slide.seed = 41;
+        let first = stage::render_still(&slide);
+        slide.seed = 9_000_000_007;
+        let second = stage::render_still(&slide);
+        assert!(plain.pixels != first.pixels, "{theme:?} ignores its seed");
+        assert!(
+            first.pixels != second.pixels,
+            "{theme:?} looks the same for two players"
+        );
+        // Type is drawn over the shapes: every pixel of solid ink stays ink.
+        let ink = stage::palette(theme).fg.0;
+        for seeded in [&first, &second] {
+            let kept = plain
+                .pixels
+                .chunks_exact(4)
+                .zip(seeded.pixels.chunks_exact(4))
+                .all(|(before, after)| before != ink || after == ink);
+            assert!(kept, "{theme:?}: a seed moved the type");
+        }
+        // The same player always gets the same card.
+        assert!(second.pixels == stage::render_still(&slide).pixels);
+    }
+    // A two-beat setup's corner shape moves too; its finished punchline,
+    // which has no shape, does not.
+    let mut beat = two_beat(WrappedPunch::Plain);
+    let still = stage::render_still(&beat);
+    let setup = stage::Stage::new(&beat).paint(0.4).pixels.clone();
+    beat.seed = 41;
+    assert!(still.pixels == stage::render_still(&beat).pixels);
+    assert!(setup != stage::Stage::new(&beat).paint(0.4).pixels);
+}
+
+#[test]
+fn patch_chapter_palettes_stand_apart_from_each_other_and_their_neighbors() {
+    let chapters = [
+        WrappedTheme::PatchHeroes,
+        WrappedTheme::PatchItems,
+        WrappedTheme::PatchTalents,
+        WrappedTheme::PatchFixes,
+    ];
+    let all = [WrappedTheme::Patch].into_iter().chain(chapters);
+    let colors = all.map(theme_background).collect::<Vec<_>>();
+    for (index, first) in colors.iter().enumerate() {
+        for second in &colors[index + 1..] {
+            assert!(!backgrounds_alike(*first, *second), "{first:?} {second:?}");
+        }
+    }
+    // Hero updates follow the top heroes card.
+    assert!(!backgrounds_alike(
+        theme_background(WrappedTheme::PatchHeroes),
+        theme_background(WrappedTheme::Heroes)
+    ));
+    for theme in chapters {
+        let fixed = [theme_background(theme)];
+        // The chapters sit among two-beat cards. A meme punchline cannot
+        // change color, so no chapter may look like one.
+        for treatment in WrappedPunch::ALL {
+            if treatment != WrappedPunch::Plain {
+                let punch = rgb(beats::look(WrappedTheme::BeatRoast, treatment).bg);
+                assert!(
+                    !backgrounds_alike(fixed[0], punch),
+                    "{theme:?} beside {treatment:?}"
+                );
+            }
+        }
+        // A plain two-beat neighbor still has palettes of its kind to pick.
+        let free = |family: &[WrappedTheme]| {
+            family
+                .iter()
+                .filter(|palette| {
+                    let colors = beat_backgrounds(**palette, WrappedPunch::Plain);
+                    !any_backgrounds_alike(&colors, &fixed)
+                })
+                .count()
+        };
+        assert!(free(&ROAST_PALETTES) >= 2, "{theme:?} roasts");
+        assert!(free(&POPOFF_PALETTES) >= 2, "{theme:?} popoffs");
+        // A chapter's card is a fixed card: nothing recolors it.
+        let mut slide = WrappedSlideData::new("custom", "");
+        slide.theme = theme;
+        slide.layout = WrappedLayout::HeroPatch;
+        assert_eq!(fixed_backgrounds(&slide), fixed);
+        assert_eq!(slide_backgrounds(&slide), fixed);
+    }
+}
+
+#[test]
+fn patch_award_medal_wears_its_item_icon() {
+    let green = [0, 200, 0];
+    for kind in ["story_patch_award", "more_story_patch_award"] {
+        for theme in [WrappedTheme::Patch, WrappedTheme::Awards] {
+            let mut slide = WrappedSlideData::new(kind, "Fully committed");
+            slide.layout = WrappedLayout::Award;
+            slide.theme = theme;
+            slide.stat_value = "3 Rapiers".to_owned();
+            slide.stat_label = "Bought in 3 of 48 games. Lost all three.".to_owned();
+            let crest = stage::render_still(&slide);
+            assert_eq!(count_of(&crest, green), 0);
+            slide.art_png = Some(flat(88, 64, green));
+            let medal = stage::render_still(&slide);
+            // The whole icon, enlarged, less its rounded corners.
+            let (width, height) = patches::MEDAL_ICON;
+            let shown = count_of(&medal, green);
+            assert!(
+                shown > width * height * 9 / 10 && shown <= width * height,
+                "{shown}"
+            );
+            // Only the medal changes; the award's copy stays where it was.
+            let copy = 350 * WRAPPED_SLIDE_WIDTH * 4;
+            assert!(crest.pixels[copy..] == medal.pixels[copy..]);
+            // The glint has crossed and gone by the end of the reveal.
+            let mut stage = stage::Stage::new(&slide);
+            assert!(count_of(stage.paint(0.67), green) < shown);
+            assert_eq!(count_of(stage.paint(0.9), green), shown);
+            // Art that does not decode leaves the crest.
+            slide.art_png = Some(b"not png".to_vec());
+            assert!(stage::render_still(&slide).pixels == crest.pixels);
+        }
+    }
+    // Other awards keep their trophy and never read item art.
+    let mut other = busy("story_superlative");
+    let plain = stage::render_still(&other);
+    other.art_png = Some(flat(88, 64, green));
+    assert!(plain.pixels == stage::render_still(&other).pixels);
+}
+
+#[test]
+fn patch_cover_downloads_the_update_then_resolves_into_its_title() {
+    let mut slide = WrappedSlideData::new("story_intro", "Your gameplay update");
+    slide.theme = WrappedTheme::Patch;
+    slide.stat_value = "20.26".to_owned();
+    slide.headline = "The Bloodbath\nUpdate".to_owned();
+    slide.stat_label = "Alexandria".to_owned();
+    let p = stage::palette(slide.theme);
+    let at = |canvas: &Canvas, x: usize, y: usize| {
+        canvas.pixels[(y * WRAPPED_SLIDE_WIDTH + x) * 4..][..4].to_vec()
+    };
+    let rows = |canvas: &Canvas, top: usize, bottom: usize| {
+        canvas.pixels[top * WRAPPED_SLIDE_WIDTH * 4..bottom * WRAPPED_SLIDE_WIDTH * 4].to_vec()
+    };
+    let mut stage = stage::Stage::new(&slide);
+    // Mid-download the bar is part full and the title has not arrived.
+    let downloading = stage.paint(0.2).clone();
+    assert_eq!(at(&downloading, 80, 610), p.accent.0, "the filled end");
+    assert_eq!(at(&downloading, 640, 610), p.soft.0, "the empty end");
+    assert!(
+        rows(&downloading, 90, 300)
+            .chunks_exact(4)
+            .all(|pixel| pixel == p.bg.0),
+        "the title waits for the download"
+    );
+    // The percentage keeps counting while it downloads.
+    assert!(rows(&downloading, 340, 580) != rows(stage.paint(0.3), 340, 580));
+    // The finished cover has no bar, and names the version, patch and player.
+    let done = stage.paint(1.0).clone();
+    assert!(done.pixels == stage::render_still(&slide).pixels);
+    assert!(
+        rows(&done, 340, 420)
+            .chunks_exact(4)
+            .all(|pixel| pixel != p.soft.0)
+    );
+    let changes: [fn(&mut WrappedSlideData); 3] = [
+        |slide| slide.stat_value = "20.27".to_owned(),
+        |slide| slide.headline = "The Quiet\nUpdate".to_owned(),
+        |slide| slide.stat_label = "Someone else".to_owned(),
+    ];
+    for change in changes {
+        let mut changed = slide.clone();
+        change(&mut changed);
+        let other = stage::render_still(&changed);
+        assert!(rows(&done, 90, 540) != rows(&other, 90, 540));
+        assert!(rows(&done, 560, 900) == rows(&other, 560, 900));
+    }
 }

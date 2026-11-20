@@ -81,26 +81,70 @@ pub(super) fn prepare(slide: &WrappedSlideData) -> Option<PreparedArt> {
             let kind = character(slide.artwork)?;
             Some(resample(kind, CHARACTER_FRAME.0, CHARACTER_FRAME.1))
         }
+        // A patch superlative's medal shows the item it is named for.
+        WrappedLayout::Award if super::patches::is_patch_award(slide) => slide
+            .art_png
+            .as_deref()
+            .and_then(decode_png)
+            .map(|image| fitted(&image, super::patches::MEDAL_ICON)),
         _ => None,
     }
 }
 
-/// Resample each ranked row's picture once. Rows without one stay `None`.
+/// Resample each row's picture once. Rows without one stay `None`.
 pub(super) fn prepare_rows(slide: &WrappedSlideData) -> Vec<Option<PreparedArt>> {
     let frame = match slide.layout {
         WrappedLayout::TopList => ROW_FRAME,
         WrappedLayout::Recap => RECAP_ROW_FRAME,
+        WrappedLayout::HeroPatch => super::updates::hero_portrait(slide),
+        WrappedLayout::ItemPatch => super::updates::item_icon(slide),
+        WrappedLayout::BugFixes => super::updates::FIX_PORTRAIT,
         _ => return Vec::new(),
     };
+    let ranked = matches!(slide.layout, WrappedLayout::TopList | WrappedLayout::Recap);
     slide
         .rows
         .iter()
         .map(|row| {
             let image = decode_png(row.image_png.as_deref()?)?;
+            if !ranked {
+                return Some(fitted(&image, frame));
+            }
             let (width, height) = fit_within(&image, frame);
             Some(resample(&image, width, height))
         })
         .collect()
+}
+
+/// The most ability icons a hero block shows.
+const MOST_ROW_ICONS: usize = 4;
+
+/// Resample each hero block's ability icons once. Icons that do not decode
+/// are skipped, so the rest close up.
+pub(super) fn prepare_row_icons(slide: &WrappedSlideData) -> Vec<Vec<PreparedArt>> {
+    if slide.layout != WrappedLayout::HeroPatch {
+        return Vec::new();
+    }
+    let side = super::updates::hero_icon(slide);
+    slide
+        .rows
+        .iter()
+        .map(|row| {
+            row.icons
+                .iter()
+                .filter_map(|bytes| decode_png(bytes))
+                .take(MOST_ROW_ICONS)
+                .map(|image| fitted(&image, (side, side)))
+                .collect()
+        })
+        .collect()
+}
+
+/// The whole of `image`, as large as fits `frame`. Small game icons are
+/// enlarged; portraits shrink without shimmering.
+fn fitted(image: &DecodedPng, frame: (usize, usize)) -> PreparedArt {
+    let region = (0.0, 0.0, image.width as f32, image.height as f32);
+    resample_region(image, region, fit_within(image, frame))
 }
 
 /// A two-beat card's hero: framed beside the setup, letterboxed full width on

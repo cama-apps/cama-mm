@@ -111,6 +111,13 @@ pub(super) fn text_width(value: &str, size: f32, face: Face) -> f32 {
         .sum()
 }
 
+/// The width of `value` with `tracking` extra pixels between its glyphs, as
+/// small uppercase labels are set.
+pub(super) fn tracked_width(value: &str, size: f32, face: Face, tracking: f32) -> f32 {
+    let gaps = value.chars().count().saturating_sub(1);
+    text_width(value, size, face) + tracking * gaps as f32
+}
+
 pub(super) const FIRST_BASELINE: f32 = 0.9;
 pub(super) const DESCENT: f32 = 0.27;
 
@@ -267,6 +274,35 @@ pub(super) fn palette(theme: WrappedTheme) -> Palette {
             Rgba::rgb(217, 182, 114),
             Rgba::rgb(34, 55, 67),
             Rgba::rgb(24, 42, 54),
+        ),
+        // Bluer than the talent tree's emerald, so the two never read alike.
+        WrappedTheme::PatchHeroes => (
+            Rgba::rgb(0, 116, 142),
+            CREAM,
+            LIME,
+            Rgba::rgb(12, 132, 158),
+            INK,
+        ),
+        WrappedTheme::PatchItems => (
+            Rgba::rgb(206, 44, 30),
+            CREAM,
+            Rgba::rgb(255, 214, 70),
+            Rgba::rgb(184, 34, 24),
+            INK,
+        ),
+        WrappedTheme::PatchTalents => (
+            Rgba::rgb(4, 116, 82),
+            CREAM,
+            Rgba::rgb(255, 214, 80),
+            Rgba::rgb(18, 134, 98),
+            INK,
+        ),
+        WrappedTheme::PatchFixes => (
+            Rgba::rgb(16, 104, 214),
+            CREAM,
+            YELLOW,
+            Rgba::rgb(36, 122, 228),
+            INK,
         ),
         WrappedTheme::Queue => (COBALT, CREAM, LIME, Rgba::rgb(60, 70, 240), INK),
         WrappedTheme::QueueAlt => (LIME, INK, COBALT, Rgba::rgb(174, 224, 34), CREAM),
@@ -458,7 +494,7 @@ pub(super) struct PlacedArt {
 /// A rasterized glyph, shared between frames.
 type Glyph = Rc<(Metrics, Vec<u8>)>;
 /// Text wrapped to a box: the size it fit at and its lines.
-type Fit = (f32, Rc<Vec<String>>);
+pub(super) type Fit = (f32, Rc<Vec<String>>);
 
 pub(super) struct Stage<'a> {
     pub(super) canvas: Canvas,
@@ -472,6 +508,8 @@ pub(super) struct Stage<'a> {
     pub(super) punch_art: Option<PlacedArt>,
     /// Pictures for ranked rows, by row index.
     pub(super) row_art: Vec<Option<PreparedArt>>,
+    /// Each row's small decorative icons, by row index.
+    pub(super) row_icons: Vec<Vec<PreparedArt>>,
     glyphs: HashMap<(Face, char, u32), Glyph>,
     fits: HashMap<(String, Face, u32, i32, i32), Fit>,
 }
@@ -493,6 +531,7 @@ impl<'a> Stage<'a> {
             still_art,
             punch_art,
             row_art: artwork::prepare_rows(slide),
+            row_icons: artwork::prepare_row_icons(slide),
             glyphs: HashMap::new(),
             fits: HashMap::new(),
         }
@@ -531,7 +570,15 @@ impl<'a> Stage<'a> {
             .clone()
     }
 
-    fn fit(&mut self, value: &str, face: Face, size: f32, width: i32, height: i32) -> Fit {
+    /// The size `value` is set at inside a box and the lines it wraps to.
+    pub(super) fn fit(
+        &mut self,
+        value: &str,
+        face: Face,
+        size: f32,
+        width: i32,
+        height: i32,
+    ) -> Fit {
         let key = (value.to_owned(), face, (size * 4.0) as u32, width, height);
         self.fits
             .entry(key)
@@ -578,6 +625,54 @@ impl<'a> Stage<'a> {
             }
             pen += metrics.advance_width + tracking;
         }
+    }
+
+    /// One line with `tracking` extra pixels between its glyphs, its baseline
+    /// at `y`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn tracked(
+        &mut self,
+        value: &str,
+        x: f32,
+        y: f32,
+        size: f32,
+        face: Face,
+        color: Rgba,
+        tracking: f32,
+    ) {
+        let mut pen = x;
+        let mut buffer = [0_u8; 4];
+        for character in value.chars() {
+            let glyph = character.encode_utf8(&mut buffer);
+            self.line(glyph, pen, y, size, face, color, (0, HEIGHT));
+            pen += text_width(glyph, size, face) + tracking;
+        }
+    }
+
+    /// Wrapped text fitted to `rect`, centered in it top to bottom.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn centered_block(
+        &mut self,
+        value: &str,
+        rect: (i32, i32, i32, i32),
+        size: f32,
+        face: Face,
+        color: Rgba,
+        align: Align,
+        rise: (f32, f32),
+    ) {
+        let (fitted, rows) = self.fit(value, face, size, rect.2, rect.3);
+        let height = block_height(rows.len(), fitted, face).ceil() as i32;
+        let top = rect.1 + (rect.3 - height).max(0) / 2;
+        self.block(
+            value,
+            (rect.0, top, rect.2, height.min(rect.3)),
+            size,
+            face,
+            color,
+            align,
+            rise,
+        );
     }
 
     /// Wrapped text fitted to `rect` that rises line by line from behind a mask
@@ -882,6 +977,10 @@ mod tests {
             WrappedTheme::Plain,
             WrappedTheme::Cover,
             WrappedTheme::Patch,
+            WrappedTheme::PatchHeroes,
+            WrappedTheme::PatchItems,
+            WrappedTheme::PatchTalents,
+            WrappedTheme::PatchFixes,
             WrappedTheme::Queue,
             WrappedTheme::QueueAlt,
             WrappedTheme::Heroes,

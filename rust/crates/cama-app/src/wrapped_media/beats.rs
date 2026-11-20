@@ -391,11 +391,18 @@ pub(super) fn chrome_ink(stage: &Stage<'_>, y: i32) -> Rgba {
 /// The setup's one large soft shape: its center, radius, and color. It sits in
 /// a corner clear of the type.
 fn setup_shape(stage: &Stage<'_>) -> ((f32, f32), f32, Rgba) {
-    match stage.slide.theme {
+    let (center, radius, color) = match stage.slide.theme {
         WrappedTheme::BeatPopoff => ((700.0, 10.0), 250.0, PINK),
         theme if theme.is_roast_beat() => ((640.0, 800.0), 260.0, stage.palette.soft),
         _ => ((700.0, 10.0), 250.0, stage.palette.soft),
-    }
+    };
+    // A player's shape sits a little differently in its corner.
+    let [across, along, size] = super::motifs::nudges(stage.slide, 61);
+    (
+        (center.0 + across * 60.0, center.1 + along * 60.0),
+        radius * (1.0 + size * 0.15),
+        color,
+    )
 }
 
 /// Beat one: hero art, the setup line, the big number, and its label.
