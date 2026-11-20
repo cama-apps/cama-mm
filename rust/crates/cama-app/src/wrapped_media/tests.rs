@@ -40,6 +40,154 @@ fn gamba_slide() -> WrappedSlideData {
     slide
 }
 
+fn patch_slide() -> WrappedSlideData {
+    let mut slide = WrappedSlideData::new("story_patch", "Balance changes");
+    slide.headline = "You got\npatched.".to_owned();
+    slide.username = "The Last Support".to_owned();
+    slide.rows = vec![
+        WrappedRow::new("Buff: Wards placed", "12.4 to 18.7 wards/game"),
+        WrappedRow::new("Nerf: Deaths", "7.1 to 9.2 deaths/game"),
+        WrappedRow::new("Rework: Hero pool", "24 heroes tested. Balance pending."),
+    ];
+    slide.rows[0].value = 1.0;
+    slide.rows[1].value = -1.0;
+    slide.lines = vec!["Early vs. late: 24 tracked matches each.".to_owned()];
+    slide
+}
+
+#[test]
+fn patch_notes_show_each_fact_and_distinguish_buff_nerf_and_rework() {
+    let slide = patch_slide();
+    let full = stage::render_still(&slide).pixels;
+    for index in 0..3 {
+        let mut changed = slide.clone();
+        changed.rows[index].secondary = "A different measured result".to_owned();
+        assert!(
+            full != stage::render_still(&changed).pixels,
+            "fact {index} is visible"
+        );
+        changed = slide.clone();
+        changed.rows[index].value = if index == 0 { -1.0 } else { 1.0 };
+        assert!(
+            full != stage::render_still(&changed).pixels,
+            "sign {index} changes its glyph"
+        );
+    }
+    let mut overflow = slide.clone();
+    overflow
+        .rows
+        .push(WrappedRow::new("Off-card", "Must not overlap the footer"));
+    assert!(full == stage::render_still(&overflow).pixels);
+}
+
+#[test]
+fn patch_notes_reveal_rows_in_order_before_the_final_hold() {
+    let slide = patch_slide();
+    let mut stage = stage::Stage::new(&slide);
+    let early = stage.paint(0.35).pixels.clone();
+    let late = stage.paint(0.9).pixels.clone();
+    let row_band = |pixels: &[u8], top: usize, bottom: usize| {
+        pixels[top * WRAPPED_SLIDE_WIDTH * 4..bottom * WRAPPED_SLIDE_WIDTH * 4].to_vec()
+    };
+    let mut changed = slide.clone();
+    changed.rows[2].primary = "Rework: Third note".to_owned();
+    let mut other = stage::Stage::new(&changed);
+    assert!(row_band(&early, 600, 740) == row_band(&other.paint(0.35).pixels, 600, 740));
+    assert!(row_band(&late, 600, 740) != row_band(&other.paint(0.9).pixels, 600, 740));
+    assert!(
+        row_band(&late, 80, 840) == row_band(&stage.paint(1.0).pixels, 80, 840),
+        "the complete card holds still"
+    );
+}
+
+#[test]
+fn patch_cover_keeps_the_courier_colors_and_player_identity() {
+    let mut slide = WrappedSlideData::new("story_intro", "Your gameplay update");
+    slide.theme = WrappedTheme::Patch;
+    slide.username = "Alexandria".to_owned();
+    let courier = decode_png(include_bytes!(
+        "../../../../../assets/wrapped/patch-courier.png"
+    ))
+    .unwrap();
+    let art = artwork::prepare(&slide).expect("bundled patch courier");
+    assert_eq!((art.width, art.height), (720, 480));
+    assert!(
+        art.pixels == courier.pixels,
+        "the art retains its ink and flat colors"
+    );
+    let before = stage::render_still(&slide).pixels;
+    slide.username = "A different player".to_owned();
+    assert!(before != stage::render_still(&slide).pixels);
+}
+
+#[test]
+fn patch_notes_and_medal_evidence_fit_at_readable_sizes() {
+    for (text, width, height) in [
+        ("400 to 650 GPM\nFirst 6 vs last 6 dated games.", 554, 92),
+        (
+            "Ranked #1 of 24 players in tracked matches.\n712 gold per minute across 48 games.",
+            600,
+            108,
+        ),
+    ] {
+        let (size, lines) = stage::fit_text(text, stage::Face::Medium, 27.0, width, height);
+        assert!(size >= 25.0, "evidence must be legible on a phone: {size}");
+        assert!(lines.iter().all(|line| !line.ends_with('…')));
+        assert!(stage::block_height(lines.len(), size, stage::Face::Medium) <= height as f32);
+    }
+}
+
+#[test]
+fn patch_cover_and_awards_finish_on_the_same_still_and_fit_discord() {
+    let mut cover = WrappedSlideData::new("story_intro", "Your gameplay update");
+    cover.theme = WrappedTheme::Patch;
+    cover.headline = "Your\n2026\npatch notes".to_owned();
+    cover.stat_value = "Alexandria".to_owned();
+    let mut award = WrappedSlideData::new("story_patch_award", "The Last Building Standing");
+    award.layout = WrappedLayout::Award;
+    award.theme = WrappedTheme::Awards;
+    award.stat_value = "12,480".to_owned();
+    award.stat_label =
+        "Building damage per game\n#1 of 24 eligible players\nAcross 48 tracked games".to_owned();
+    for slide in [cover, award] {
+        let media = render_wrapped_media(&slide, true).unwrap();
+        assert_eq!(media.filename, "wrapped_slide.gif");
+        assert!(media.bytes.len() < MAX_ANIMATION_BYTES);
+        let (frames, delays) = play(&media.bytes);
+        assert!(frames.len() > 10 && frames.len() <= motion::FRAMES);
+        assert!(*frames.last().unwrap() == still_through_palette(&media.bytes, &slide));
+        assert_eq!(*delays.last().unwrap(), 600);
+        assert_eq!(
+            render_wrapped_media(&slide, false).unwrap().filename,
+            "wrapped_slide.png"
+        );
+    }
+}
+
+#[test]
+fn measured_patch_with_partial_coverage_fits_without_losing_the_denominator() {
+    let games = (1..=12)
+        .map(|id| cama_domain::wrapped_distinct::DistinctMatch {
+            match_id: id,
+            discord_id: 7,
+            finished_at: Some(id * 86_400),
+            gpm: (!matches!(id, 1 | 12)).then_some(if id <= 6 { 400 } else { 650 }),
+            deaths: Some(if id <= 6 { 8 } else { 4 }),
+            wards: Some(if id <= 6 { 3 } else { 8 }),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    let report = crate::wrapped_story::personal_patch::personal_patch(&games, 7);
+    assert_eq!(report.changes.len(), 3);
+    for change in report.changes {
+        let copy = format!("{}\n{}", change.value, change.evidence);
+        let (size, lines) = stage::fit_text(&copy, stage::Face::Medium, 27.0, 554, 92);
+        assert!(size >= 25.0, "{} at {size}px: {copy}", change.key);
+        assert!(!lines.iter().any(|line| line.contains('…')));
+        assert_eq!(lines.join(" "), copy.replace('\n', " "));
+    }
+}
+
 const ALL_KINDS: [&str; 13] = [
     "story_intro",
     "story_superlative",
@@ -56,7 +204,7 @@ const ALL_KINDS: [&str; 13] = [
     "chart_gamba",
 ];
 
-const ALL_LAYOUTS: [WrappedLayout; 12] = [
+const ALL_LAYOUTS: [WrappedLayout; 13] = [
     WrappedLayout::Cover,
     WrappedLayout::BigNumber,
     WrappedLayout::TopList,
@@ -69,6 +217,7 @@ const ALL_LAYOUTS: [WrappedLayout; 12] = [
     WrappedLayout::Recap,
     WrappedLayout::Details,
     WrappedLayout::TwoBeat,
+    WrappedLayout::PatchNotes,
 ];
 
 fn busy(kind: &str) -> WrappedSlideData {
@@ -184,6 +333,7 @@ fn reveal_is_bounded_moves_and_ends_on_exactly_the_still_card() {
         WrappedLayout::Tiles,
         WrappedLayout::Curve,
         WrappedLayout::Award,
+        WrappedLayout::PatchNotes,
     ] {
         let mut slide = busy("custom");
         slide.layout = layout;

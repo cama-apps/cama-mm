@@ -13,7 +13,7 @@ const H: f32 = HEIGHT as f32;
 
 pub(super) fn paint(stage: &mut Stage<'_>) {
     match stage.slide.theme {
-        WrappedTheme::Plain => {}
+        WrappedTheme::Plain | WrappedTheme::Patch => {}
         WrappedTheme::Cover => record_sleeve(stage),
         WrappedTheme::Months => waves(stage),
         WrappedTheme::Queue | WrappedTheme::QueueAlt => rings(stage),

@@ -105,6 +105,11 @@ fn interchangeable(slide: &WrappedSlideData) -> &'static [WrappedTheme] {
         }
         ("story_moment", _) => &super::MOMENT_THEMES,
         ("story_superlative", _) => &[WrappedTheme::Awards, WrappedTheme::Rating],
+        ("story_patch_award", _) => &[
+            WrappedTheme::Patch,
+            WrappedTheme::Awards,
+            WrappedTheme::Rating,
+        ],
         _ => &[],
     }
 }

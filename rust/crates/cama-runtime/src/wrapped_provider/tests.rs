@@ -2125,6 +2125,86 @@ fn league_deck(
     build_slides(raw, profiles, OWNER as i64, "Guild Owner", 2026, 3, 3)
 }
 
+#[test]
+fn personal_patch_cards_use_recorded_changes_and_fit_the_story() {
+    let fixture = Fixture::league(12);
+    seed_all_activity(&fixture);
+    let mut raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    for row in &mut raw.year_rows {
+        if row.discord_id == OWNER as i64 {
+            row.gpm = Some(if row.match_id <= 6 { 400 } else { 650 });
+            if matches!(row.match_id, 1 | 12) {
+                row.gpm = None;
+            }
+            row.wards = Some(12);
+            row.camps_stacked = Some(4);
+            row.roshans = Some(1);
+            row.first_blood = Some(true);
+            row.buybacks = Some(1);
+        }
+    }
+    let slides = build_slides(
+        raw,
+        &league_names(),
+        OWNER as i64,
+        "Guild Owner",
+        2026,
+        3,
+        3,
+    );
+    let story = story_of(&slides);
+    let cover = story.first().unwrap();
+    assert!(cover.headline.contains("patch notes"));
+    let patch = story
+        .iter()
+        .find(|slide| slide.kind == "story_patch")
+        .unwrap();
+    assert!(
+        patch
+            .rows
+            .iter()
+            .any(|row| row.secondary.contains("400") && row.secondary.contains("650"))
+    );
+    assert!(patch.rows.iter().any(|row| row.secondary.contains("5/6")));
+    assert!(patch.rows.len() <= 3);
+    let awards = story
+        .iter()
+        .filter(|slide| slide.kind == "story_patch_award")
+        .collect::<Vec<_>>();
+    assert_eq!(awards.len(), 2);
+    assert_ne!(awards[0].title, awards[1].title);
+    assert!(
+        awards
+            .iter()
+            .all(|slide| !slide.stat_value.is_empty() && !slide.stat_label.is_empty())
+    );
+    assert!(
+        slides
+            .iter()
+            .any(|slide| slide.kind == "more_story_patch_award")
+    );
+    assert_eq!(story.last().unwrap().badge, awards[0].title);
+    assert!(story.len() <= 21);
+    for slide in std::iter::once(*patch).chain(awards.into_iter().copied()) {
+        render_wrapped_slide(slide).expect("actual partial-coverage notes and award copy render");
+    }
+}
+
+#[test]
+fn personal_patch_omits_unknown_changes_and_unearned_awards() {
+    let fixture = Fixture::league(2);
+    let slides = league_deck(&fixture, &league_names());
+    assert!(
+        slides
+            .iter()
+            .all(|slide| !matches!(slide.kind.as_str(), "story_patch" | "story_patch_award"))
+    );
+    assert_eq!(story_of(&slides).last().unwrap().kind, "story_finale");
+}
+
 /// Every piece of copy a card can show.
 fn slide_texts(slide: &WrappedSlideData) -> Vec<String> {
     let mut texts = vec![

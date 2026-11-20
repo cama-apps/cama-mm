@@ -17,6 +17,7 @@ mod beats;
 mod cards;
 mod motifs;
 mod motion;
+mod patches;
 mod placement;
 mod shapes;
 mod stage;
@@ -89,6 +90,8 @@ pub enum WrappedLayout {
     Details,
     /// A setup beat with the number, then a full-card flip to a punchline.
     TwoBeat,
+    /// Up to three personal changes; row values select buff, nerf or rework marks.
+    PatchNotes,
 }
 
 /// The color story and animated background of a card.
@@ -97,6 +100,8 @@ pub enum WrappedTheme {
     #[default]
     Plain,
     Cover,
+    /// Slate and brass, like a carved gameplay update.
+    Patch,
     Queue,
     QueueAlt,
     Heroes,
@@ -293,6 +298,7 @@ impl WrappedSlideData {
 fn default_style(kind: &str) -> (WrappedLayout, WrappedTheme) {
     match kind {
         "story_intro" => (WrappedLayout::Cover, WrappedTheme::Cover),
+        "story_patch" => (WrappedLayout::PatchNotes, WrappedTheme::Patch),
         "story_finale" => (WrappedLayout::Recap, WrappedTheme::Recap),
         "story_games" | "story_playtime" => (WrappedLayout::BigNumber, WrappedTheme::Queue),
         "story_moment" => (WrappedLayout::BigNumber, WrappedTheme::QueueAlt),

@@ -13,6 +13,9 @@ const COVER_FOOTER_HEIGHT: i32 = 64;
 
 pub(super) fn paint(stage: &mut Stage<'_>) {
     match stage.slide.layout {
+        WrappedLayout::Cover if stage.slide.theme == WrappedTheme::Patch => {
+            super::patches::cover(stage)
+        }
         WrappedLayout::Cover => cover(stage),
         WrappedLayout::BigNumber => big_number(stage),
         WrappedLayout::TopList => top_list(stage),
@@ -21,10 +24,20 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         WrappedLayout::Tiles => tiles(stage),
         WrappedLayout::Spotlight => spotlight(stage),
         WrappedLayout::Persona => persona(stage),
+        WrappedLayout::Award
+            if stage.slide.theme == WrappedTheme::Patch
+                || matches!(
+                    stage.slide.kind.as_str(),
+                    "story_patch_award" | "more_story_patch_award"
+                ) =>
+        {
+            super::patches::award(stage)
+        }
         WrappedLayout::Award => super::awards::paint(stage),
         WrappedLayout::Recap => recap(stage),
         WrappedLayout::Details => details(stage),
         WrappedLayout::TwoBeat => super::beats::paint(stage),
+        WrappedLayout::PatchNotes => super::patches::notes(stage),
     }
     chrome(stage);
 }

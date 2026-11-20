@@ -59,7 +59,10 @@ pub(super) fn frame_time(layout: WrappedLayout, index: usize, frames: usize) -> 
 pub(super) fn animate(slide: &WrappedSlideData) -> Result<Vec<u8>, gif::EncodingError> {
     // Award setups need a beat before the prize is named. Keep the same
     // timeline and final frame, but give that reveal twice the reading time.
-    let frame_delay = if slide.layout == WrappedLayout::Award {
+    let frame_delay = if matches!(
+        slide.layout,
+        WrappedLayout::Award | WrappedLayout::PatchNotes
+    ) {
         FRAME_DELAY * 2
     } else {
         FRAME_DELAY

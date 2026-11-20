@@ -17,6 +17,7 @@ use cama_app::wrapped_media::{
     WrappedTheme, render_wrapped_media, render_wrapped_slide, vary_beat_palettes,
 };
 use cama_app::wrapped_story::chapters::{cave_in_line, months_card, story_seed};
+use cama_app::wrapped_story::personal_patch::personal_patch;
 use cama_app::wrapped_story::{
     HeroRow, MatchDetails, MatchStatsRow, PersonalMoment, PersonalMomentMatch,
     PersonalSummaryInput, PersonalSummaryWrapped, YearMatchRow, flavor_pool, get_flavor,
@@ -57,6 +58,7 @@ use crate::registration::{
 mod activity;
 mod deck;
 mod distinct;
+mod patch;
 mod personal;
 
 use activity::{
@@ -1065,12 +1067,14 @@ const MOMENT_THEMES: [WrappedTheme; 4] = [
     WrappedTheme::Months,
 ];
 /// The story's running order. The recap always closes it.
-const STORY_ORDER: [&str; 19] = [
+const STORY_ORDER: [&str; 21] = [
     "story_intro",
     "story_games",
     "story_playtime",
     "story_hero",
+    "story_patch",
     "story_distinct",
+    "story_patch_award",
     "story_record",
     "story_hero_year",
     "story_people",
@@ -1144,10 +1148,16 @@ fn build_slides(
             .map(str::to_owned)
     };
 
-    let mut intro = base_slide("story_intro", "Your year", target_display_name, &year_label);
-    intro.headline = format!("Your\n{year}\nWrapped");
+    let mut intro = base_slide(
+        "story_intro",
+        "Your gameplay update",
+        target_display_name,
+        &year_label,
+    );
+    intro.theme = WrappedTheme::Patch;
+    intro.headline = format!("Your\n{year}\npatch notes");
     intro.stat_value = target_display_name.to_owned();
-    intro.stat_label = "Your Cama Wrapped".to_owned();
+    intro.stat_label = "Cama Wrapped".to_owned();
     if raw.matches.is_empty() {
         intro
             .lines
@@ -1357,6 +1367,13 @@ fn build_slides(
     let stories = personal_moments(&moment_rows);
     let superlatives = personal_superlatives(&moment_rows);
     let seed = story_seed(target_id, year);
+    let patch = personal_patch(&raw.year_rows, target_id);
+    let patch_cards = patch::patch_slides(&patch, target_display_name, &year_label);
+    let patch_slots = patch_cards
+        .iter()
+        .filter(|slide| !is_detail_page(&slide.kind))
+        .count();
+    slides.extend(patch_cards);
     if let Some(time) = &stories.playtime {
         slides.push(moment_slide(
             time,
@@ -1584,7 +1601,13 @@ fn build_slides(
     let mut heroes_held = fresh_hero_stories(&hero_candidates, &[]).len();
     let (slots, selected, fresh, fresh_heroes) = loop {
         let slots = deck::distinct_slots(
-            fixed + held + heroes_held + people.len() + side_cards + deck::PERSONA_SLOTS,
+            fixed
+                + patch_slots
+                + held
+                + heroes_held
+                + people.len()
+                + side_cards
+                + deck::PERSONA_SLOTS,
         );
         let selected = select_stories(&candidates, slots);
         let fresh = fresh_records(&record_candidates, &selected);
@@ -1690,9 +1713,11 @@ fn build_slides(
                 .map(|identity| identity.value.clone())
         })
         .unwrap_or_else(|| "Your year in Cama".to_owned());
-    // The badge names something the deck showed: a thin deck's first award,
+    // The badge names a featured personal award, a thin deck's first award,
     // or the best popoff's fact line.
-    finale.badge = if thin {
+    finale.badge = if let Some(award) = patch.awards.first() {
+        award.title.clone()
+    } else if thin {
         superlatives
             .first()
             .map_or_else(String::new, |award| award.title.to_owned())
