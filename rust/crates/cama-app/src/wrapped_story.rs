@@ -7,14 +7,24 @@ use std::collections::BTreeMap;
 
 include!("wrapped_story/flavor_catalog.rs");
 
+#[path = "wrapped_story/bug_fixes.rs"]
+pub mod bug_fixes;
 #[path = "wrapped_story/chapters.rs"]
 pub mod chapters;
+#[path = "wrapped_story/hero_patch.rs"]
+pub mod hero_patch;
+#[path = "wrapped_story/item_patch.rs"]
+pub mod item_patch;
+#[path = "wrapped_story/patch_support.rs"]
+mod patch_support;
 #[path = "wrapped_story/personal_moments.rs"]
 mod personal_moments;
 #[path = "wrapped_story/personal_patch.rs"]
 pub mod personal_patch;
 #[path = "wrapped_story/roast_pools.rs"]
 pub mod roast_pools;
+#[path = "wrapped_story/talents.rs"]
+pub mod talents;
 pub use personal_moments::{
     PersonalMoment, PersonalMomentMatch, PersonalStory, personal_moments, personal_superlatives,
 };

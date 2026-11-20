@@ -622,7 +622,7 @@ fn patch_gallery() -> Vec<WrappedSlideData> {
             ..Default::default()
         })
         .collect::<Vec<_>>();
-    long.rows = personal_patch(&matches, 7)
+    long.rows = personal_patch(&matches, 7, None, 0)
         .changes
         .into_iter()
         .map(|change| {

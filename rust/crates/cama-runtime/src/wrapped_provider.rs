@@ -1367,7 +1367,12 @@ fn build_slides(
     let stories = personal_moments(&moment_rows);
     let superlatives = personal_superlatives(&moment_rows);
     let seed = story_seed(target_id, year);
-    let patch = personal_patch(&raw.year_rows, target_id);
+    let timezone = raw
+        .year_players
+        .iter()
+        .find(|player| player.discord_id == target_id)
+        .and_then(|player| player.timezone.as_deref());
+    let patch = personal_patch(&raw.year_rows, target_id, timezone, seed);
     let patch_cards = patch::patch_slides(&patch, target_display_name, &year_label);
     let patch_slots = patch_cards
         .iter()

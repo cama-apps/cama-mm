@@ -23,8 +23,8 @@ use Theme::{Chaos, Clutch, Combat, Farm, Heroes, Items, Map, Time};
 mod records;
 
 pub use records::{
-    COUNT_RECORDS, HeroLine, HeroYear, PersonalRecord, RECORD_KEYS, hero_year, month_day,
-    personal_records, record_twin, select_records,
+    COUNT_RECORDS, HeroLine, HeroYear, PersonalRecord, RECORD_KEYS, hero_year, local_time,
+    month_day, personal_records, record_twin, select_records,
 };
 
 /// Below this many eligible players a metric is too thin to rank.

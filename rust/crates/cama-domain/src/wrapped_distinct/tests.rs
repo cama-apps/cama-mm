@@ -779,6 +779,11 @@ fn records_pick_personal_extremes_with_hero_and_date() {
         month_day(late, Some("Europe/Berlin")).as_deref(),
         Some("Mar 4")
     );
+    // So is the clock: Tuesday night at home, Wednesday morning in Berlin.
+    let clock = |zone| local_time(late, zone).map(|time| time.format("%a %H:%M").to_string());
+    assert_eq!(clock(None).as_deref(), Some("Tue 22:30"));
+    assert_eq!(clock(Some("Europe/Berlin")).as_deref(), Some("Wed 04:30"));
+    assert_eq!(clock(Some("Not/AZone")), clock(None));
 
     // The two strongest, one roast and one popoff.
     let keys = |picked: Vec<PersonalRecord>| picked.iter().map(|r| r.key).collect::<Vec<_>>();

@@ -177,7 +177,7 @@ fn measured_patch_with_partial_coverage_fits_without_losing_the_denominator() {
             ..Default::default()
         })
         .collect::<Vec<_>>();
-    let report = crate::wrapped_story::personal_patch::personal_patch(&games, 7);
+    let report = crate::wrapped_story::personal_patch::personal_patch(&games, 7, None, 0);
     assert_eq!(report.changes.len(), 3);
     for change in report.changes {
         let copy = format!("{}\n{}", change.value, change.evidence);
