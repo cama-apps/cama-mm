@@ -830,6 +830,153 @@ async fn terminal_battle_timeout_uses_retained_interaction_followup_receipt() {
     }));
 }
 
+/// Start a battle between the fixture pets and return its id and the first
+/// round's first move button.
+async fn start_fixture_battle(provider: &PetRegistrationProvider) -> (i64, String) {
+    let initial = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(brawl_command(RECIPIENT, 0), initial.clone())
+        .await
+        .expect("challenge delivery");
+    let accept = initial.first_button_id();
+    provider
+        .handler
+        .handle(
+            component_as(accept.clone(), RECIPIENT),
+            Arc::new(TestResponder::new(false)),
+        )
+        .await
+        .expect("battle start");
+    let battle_id = brawl_id_from_button(&accept);
+    let move_id = provider
+        .handler
+        .state
+        .battle_views
+        .lock()
+        .expect("battle views")
+        .get(&battle_id)
+        .expect("battle state")
+        .view_model()
+        .buttons[0]
+        .custom_id
+        .clone()
+        .expect("move id");
+    (battle_id, move_id)
+}
+
+fn assert_private_inactive_notice(click: &TestResponder) {
+    assert_eq!(click.call_log(), vec!["respond"]);
+    let responses = click.responses.lock().expect("click responses");
+    assert_eq!(responses[0].content, BATTLE_INACTIVE_MESSAGE);
+    assert!(responses[0].ephemeral);
+}
+
+#[tokio::test]
+async fn move_click_after_battle_ends_is_a_private_notice_not_a_failure() {
+    let (_database, provider, _challenger_pet, _recipient_pet) = brawl_fixture();
+    let (battle_id, move_id) = start_fixture_battle(&provider).await;
+    assert!(
+        provider
+            .handler
+            .state
+            .battle_lock(battle_id)
+            .expect("battle lock map")
+            .is_some(),
+        "accepting a challenge arms the battle's lock"
+    );
+    // Two full timeouts call the brawl off.
+    assert!(
+        !PetInteractionHandler::advance_battle_timeout_once(
+            Arc::clone(&provider.handler.state),
+            battle_id,
+        )
+        .await
+        .expect("first battle timeout")
+    );
+    assert!(
+        PetInteractionHandler::advance_battle_timeout_once(
+            Arc::clone(&provider.handler.state),
+            battle_id,
+        )
+        .await
+        .expect("terminal battle timeout")
+    );
+    assert!(
+        provider
+            .handler
+            .state
+            .battle_lock(battle_id)
+            .expect("battle lock map")
+            .is_none(),
+        "a finished battle retires its lock"
+    );
+
+    // A button left on the board must not surface "Something went wrong."
+    let stale_click = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(component_as(move_id, OWNER), stale_click.clone())
+        .await
+        .expect("a click on a finished battle is not a handler failure");
+    assert_private_inactive_notice(&stale_click);
+
+    // Neither is one whose process-local view a restart dropped.
+    let restarted_click = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(
+            component_as(
+                format!(
+                    "pet_brawl:{}:0:{}",
+                    battle_id + 1_000,
+                    PetBrawlMove::ALL[0].as_str()
+                ),
+                OWNER,
+            ),
+            restarted_click.clone(),
+        )
+        .await
+        .expect("a click on an unknown battle is not a handler failure");
+    assert_private_inactive_notice(&restarted_click);
+}
+
+#[tokio::test]
+async fn move_click_waits_for_the_in_flight_board_edit_before_picking() {
+    let (_database, provider, _challenger_pet, _recipient_pet) = brawl_fixture();
+    let (battle_id, move_id) = start_fixture_battle(&provider).await;
+    // Stand in for the other duelist's click mid-edit: it holds the lock from
+    // reading the round handle until its board edit lands.
+    let battle_lock = provider
+        .handler
+        .state
+        .battle_lock(battle_id)
+        .expect("battle lock map")
+        .expect("live battle lock");
+    let in_flight = Arc::clone(&battle_lock).lock_owned().await;
+
+    let handler = Arc::clone(&provider.handler);
+    let click = Arc::new(TestResponder::new(false));
+    let pending = tokio::spawn({
+        let click = Arc::clone(&click);
+        async move { handler.handle(component_as(move_id, OWNER), click).await }
+    });
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !pending.is_finished() && click.call_log().is_empty(),
+        "a pick must not edit the board while another battle edit is in flight"
+    );
+
+    drop(in_flight);
+    pending
+        .await
+        .expect("click task")
+        .expect("pick once the in-flight edit lands");
+    assert_eq!(click.call_log(), vec!["update", "followup"]);
+}
+
 fn fixture(adult: bool) -> (NamedTempFile, PetRegistrationProvider, i64) {
     let database = NamedTempFile::new().expect("temporary database");
     initialize_or_migrate(database.path()).expect("canonical schema");
