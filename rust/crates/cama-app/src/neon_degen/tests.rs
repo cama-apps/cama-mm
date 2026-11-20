@@ -500,7 +500,7 @@ fn test_post_match_debrief_keeps_ansi_text_when_gif_roll_misses() {
     assert!(result.gif_file.is_none());
     assert!(text(&result).starts_with("```ansi\n"));
     assert!(text(&result).contains("JOPA-T"));
-    assert_eq!(service.rolls.observed_chances(), &[0.75, 0.20]);
+    assert_eq!(service.rolls.observed_chances(), &[0.75, 0.50]);
 }
 
 #[test]
@@ -522,7 +522,7 @@ fn test_post_match_debrief_composes_authored_gif_after_text_gate() {
     assert_eq!(gif.kind, "buyback_denied");
     assert!(gif.frame_durations_ms.len() >= 2);
     assert!(gif.bytes.len() > 1_000);
-    assert_eq!(service.rolls.observed_chances(), &[0.75, 0.20]);
+    assert_eq!(service.rolls.observed_chances(), &[0.75, 0.50]);
 }
 
 #[test]

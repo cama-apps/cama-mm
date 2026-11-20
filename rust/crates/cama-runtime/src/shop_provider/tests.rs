@@ -2008,3 +2008,82 @@ async fn insight_on_a_player_without_a_tunnel_names_and_pings_the_target() {
         InteractionAllowedMentions::Users(vec![TARGET])
     );
 }
+
+fn neon_context() -> CommandContext {
+    CommandContext {
+        interaction_id: 31_000,
+        user_id: i64::try_from(BUYER).unwrap(),
+        user_display_name: "Global Buyer".to_owned(),
+        guild_id: i64::try_from(GUILD).unwrap(),
+        channel_id: Some(9),
+        member_permissions: None,
+        subcommand: "buy".to_owned(),
+        options: Vec::new(),
+        rendered_user_names: BTreeMap::new(),
+    }
+}
+
+fn shop_neon_template() -> NeonResult {
+    NeonResult::text(
+        1,
+        cama_app::neon_degen::ansi_block("[COIN] Client: Buyer Display\nAt risk: 500 JC"),
+    )
+}
+
+#[tokio::test]
+async fn shop_neon_text_is_model_written_and_falls_back_to_the_template() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 100_000);
+    let port: Arc<dyn ShopDiscordPort> = fixture.discord.clone();
+    let ai = crate::test_support::ScriptedAi::replying("[10:00:00.001] STATUS: DOUBLED");
+    let provider =
+        ShopRegistrationProvider::new(&fixture.path, &config(), port, Some(ai.service()))
+            .expect("construct Shop provider")
+            .with_player_names(Arc::new(StaticPlayerNames));
+    provider
+        .handler
+        .send_neon(&neon_context(), 9, shop_neon_template())
+        .await;
+
+    let port: Arc<dyn ShopDiscordPort> = fixture.discord.clone();
+    let failing = crate::test_support::ScriptedAi::failing();
+    let provider =
+        ShopRegistrationProvider::new(&fixture.path, &config(), port, Some(failing.service()))
+            .expect("construct Shop provider");
+    provider
+        .handler
+        .send_neon(&neon_context(), 9, shop_neon_template())
+        .await;
+
+    let port: Arc<dyn ShopDiscordPort> = fixture.discord.clone();
+    let provider = ShopRegistrationProvider::new(&fixture.path, &config(), port, None)
+        .expect("construct Shop provider");
+    provider
+        .handler
+        .send_neon(&neon_context(), 9, shop_neon_template())
+        .await;
+
+    let sent = fixture
+        .discord
+        .temporary
+        .lock()
+        .expect("temporary messages");
+    let contents = sent
+        .iter()
+        .map(|(_, response, _)| response.content.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        contents,
+        [
+            cama_app::neon_degen::ansi_block("[10:00:00.001] STATUS: DOUBLED"),
+            shop_neon_template().text_block.unwrap(),
+            shop_neon_template().text_block.unwrap(),
+        ]
+    );
+    let requests = ai.requests();
+    let prompt = &requests[0].messages[1].content;
+    assert!(
+        prompt.contains("At risk: 500 JC") && prompt.contains("username: Buyer Display"),
+        "{prompt}"
+    );
+}

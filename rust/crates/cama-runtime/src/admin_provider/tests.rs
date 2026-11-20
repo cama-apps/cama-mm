@@ -1066,6 +1066,7 @@ impl ProviderFixture {
                 match_corrections: corrections.clone(),
             },
             UsageMonitor::default(),
+            false,
         );
         Self {
             database,
@@ -1537,6 +1538,7 @@ fn test_monitoring_snapshot_reports_ok_db_and_runtime_fields() {
         usage,
         started_at: Utc::now() - chrono::Duration::seconds(3_661),
         git_sha: "abc123".to_owned(),
+        ai_configured: false,
     };
     let snapshot = monitoring.snapshot(AdminDiscordHealth {
         guild_count: 2,
@@ -1560,6 +1562,7 @@ fn test_monitoring_snapshot_degrades_on_db_failure() {
         usage: UsageMonitor::default(),
         started_at: Utc::now(),
         git_sha: "abc123".to_owned(),
+        ai_configured: false,
     };
     let snapshot = monitoring.snapshot(AdminDiscordHealth {
         guild_count: 0,
@@ -1578,6 +1581,7 @@ fn test_monitoring_snapshot_rejects_empty_sqlite_file() {
         usage: UsageMonitor::default(),
         started_at: Utc::now(),
         git_sha: "abc123".to_owned(),
+        ai_configured: false,
     };
     let snapshot = monitoring.snapshot(AdminDiscordHealth {
         guild_count: 0,
@@ -1605,6 +1609,7 @@ fn test_format_health_snapshot_includes_requested_fields() {
         usage,
         started_at: Utc::now(),
         git_sha: "abc123".to_owned(),
+        ai_configured: false,
     }
     .snapshot(AdminDiscordHealth {
         guild_count: 0,
@@ -1643,6 +1648,7 @@ fn test_opendota_quota_boundary_degrades_health() {
         usage: UsageMonitor::default(),
         started_at: Utc::now(),
         git_sha: "abc123".to_owned(),
+        ai_configured: false,
     }
     .snapshot(AdminDiscordHealth {
         guild_count: 0,
@@ -3046,4 +3052,70 @@ async fn transferaccount_lookup_caps_results_and_suggests_refining_without_guess
     }
     assert!(content.contains("narrow your search"));
     assert!(!content.contains("<@"));
+}
+
+#[test]
+fn health_reports_whether_model_text_is_available_and_working() {
+    let database = NamedTempFile::new().expect("temporary monitoring database");
+    initialize_or_migrate(database.path()).expect("migrate monitoring database");
+    let monitoring = |ai_configured| AdminMonitoring {
+        database_path: database.path().to_path_buf(),
+        usage: UsageMonitor::default(),
+        started_at: Utc::now(),
+        git_sha: "abc123".to_owned(),
+        ai_configured,
+    };
+    let ai_line = |ai_configured| {
+        let snapshot = monitoring(ai_configured).snapshot(AdminDiscordHealth {
+            guild_count: 0,
+            latency_ms: None,
+        });
+        format_health_snapshot(&snapshot)
+            .lines()
+            .find(|line| line.starts_with("**AI text:**"))
+            .expect("AI text line")
+            .to_owned()
+    };
+
+    assert_eq!(
+        ai_line(false),
+        "**AI text:** no provider key configured (prewritten text only)"
+    );
+    assert_eq!(
+        ai_line(true),
+        "**AI text:** key configured; no requests in the last 24h"
+    );
+
+    let requests = LlmRequestRepository::new(database.path());
+    let attempt = |success: bool, error: Option<&str>| cama_db::llm_request::LlmAttemptRecord {
+        feature: "queue_hype.plea".to_owned(),
+        operation: "complete".to_owned(),
+        provider: "groq".to_owned(),
+        model: "test-model".to_owned(),
+        success,
+        latency_ms: 10,
+        prompt_tokens: None,
+        completion_tokens: None,
+        total_tokens: None,
+        error_type: error.map(str::to_owned),
+    };
+    let now = Utc::now().timestamp();
+    requests
+        .record_attempt_at(&attempt(false, Some("Timeout")), Some(now - 2 * 86_400))
+        .expect("attempt outside the window");
+    requests
+        .record_attempt_at(&attempt(true, None), Some(now - 60))
+        .expect("recent success");
+    requests
+        .record_attempt_at(&attempt(false, Some("RateLimit")), Some(now - 30))
+        .expect("recent failure");
+
+    assert_eq!(
+        ai_line(true),
+        "**AI text:** key configured; last 24h: 1 ok, 1 failed (last error: RateLimit)"
+    );
+    assert_eq!(
+        ai_line(false),
+        "**AI text:** no provider key configured (prewritten text only)"
+    );
 }

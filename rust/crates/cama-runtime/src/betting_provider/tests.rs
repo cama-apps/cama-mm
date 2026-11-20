@@ -4354,6 +4354,9 @@ struct PartialMemberCacheDiscord {
     fetchable: BTreeMap<u64, String>,
     last_seen: BTreeMap<u64, String>,
     member_lookups: Mutex<Vec<u64>>,
+    /// When set, channel sends are recorded in `sent` instead of refused.
+    accept_sends: bool,
+    sent: Mutex<Vec<(u64, DiscordMessage)>>,
 }
 
 #[async_trait]
@@ -4368,10 +4371,19 @@ impl DiscordTransport for PartialMemberCacheDiscord {
 
     async fn send_message(
         &self,
-        _channel_id: u64,
-        _message: DiscordMessage,
+        channel_id: u64,
+        message: DiscordMessage,
     ) -> Result<crate::discord_transport::DiscordMessageReceipt, String> {
-        Err("unused transport".to_owned())
+        if !self.accept_sends {
+            return Err("unused transport".to_owned());
+        }
+        let mut sent = self.sent.lock().unwrap();
+        sent.push((channel_id, message));
+        Ok(crate::discord_transport::DiscordMessageReceipt {
+            channel_id,
+            message_id: sent.len() as u64,
+            jump_url: String::new(),
+        })
     }
 
     async fn edit_message(
@@ -4741,4 +4753,408 @@ fn disbursement_result_names_recipients_without_mentions() {
     assert!(description.contains("Generous Payer: +20"), "{description}");
     assert!(description.contains("Unknown player: +10"), "{description}");
     assert_names_players_without_ids(description);
+}
+
+/// Responder whose follow-ups return receipts, so replies can be edited.
+#[derive(Clone, Default)]
+struct ReceiptResponder {
+    events: Arc<Mutex<Vec<(&'static str, InteractionResponse)>>>,
+}
+
+impl ReceiptResponder {
+    fn events(&self) -> Vec<(&'static str, InteractionResponse)> {
+        self.events.lock().unwrap().clone()
+    }
+
+    async fn wait_for_events(&self, expected: usize) -> Vec<(&'static str, InteractionResponse)> {
+        for _ in 0..1_000 {
+            let events = self.events();
+            if events.len() >= expected {
+                return events;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the reply was never edited");
+    }
+}
+
+#[async_trait]
+impl InteractionResponder for ReceiptResponder {
+    async fn respond(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<(), crate::registration::InteractionResponseError> {
+        self.events.lock().unwrap().push(("respond", response));
+        Ok(())
+    }
+
+    async fn defer(
+        &self,
+        _ephemeral: bool,
+    ) -> Result<(), crate::registration::InteractionResponseError> {
+        Ok(())
+    }
+
+    async fn followup(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<(), crate::registration::InteractionResponseError> {
+        self.events.lock().unwrap().push(("followup", response));
+        Ok(())
+    }
+
+    async fn followup_with_receipt(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<
+        Option<crate::registration::InteractionMessageReceipt>,
+        crate::registration::InteractionResponseError,
+    > {
+        self.followup(response).await?;
+        Ok(Some(crate::registration::InteractionMessageReceipt {
+            message_id: 900,
+            channel_id: 9,
+            delivery: crate::registration::InteractionMessageDelivery::InteractionFollowup,
+        }))
+    }
+
+    async fn edit_message(
+        &self,
+        receipt: crate::registration::InteractionMessageReceipt,
+        response: InteractionResponse,
+    ) -> Result<(), crate::registration::InteractionResponseError> {
+        assert_eq!(receipt.message_id, 900);
+        self.events.lock().unwrap().push(("edit", response));
+        Ok(())
+    }
+}
+
+const ROAST_PLAYER: i64 = 7;
+
+fn roast_database(balance: i64) -> NamedTempFile {
+    let database = NamedTempFile::new().expect("roast database");
+    initialize_or_migrate(database.path()).expect("roast schema");
+    let players = PlayerRepository::new(database.path());
+    players
+        .add(&NewPlayer::new(
+            ROAST_PLAYER,
+            "roast-registration",
+            Some(42),
+        ))
+        .expect("roast player");
+    players
+        .update_balance(ROAST_PLAYER, Some(42), balance)
+        .expect("roast balance");
+    database
+}
+
+fn roast_provider(
+    database: &NamedTempFile,
+    ai: Option<&Arc<crate::test_support::ScriptedAi>>,
+) -> (BettingRegistrationProvider, Arc<PartialMemberCacheDiscord>) {
+    let discord = Arc::new(PartialMemberCacheDiscord {
+        cached: BTreeMap::from([(ROAST_PLAYER as u64, "Broke Bob".to_owned())]),
+        accept_sends: true,
+        ..PartialMemberCacheDiscord::default()
+    });
+    let provider = partial_member_cache_provider(database, discord.clone());
+    if let Some(ai) = ai {
+        let names = Arc::new(
+            crate::discord_transport::DiscordGuildPlayerNameResolver::new(discord.clone()),
+        );
+        provider
+            .attach_neon_llm(NeonLlm::new(
+                ai.service(),
+                Arc::new(crate::match_provider::ProductionBettingPlayerContext::new(
+                    database.path(),
+                    names,
+                )),
+            ))
+            .expect("attach Neon model");
+    }
+    (provider, discord)
+}
+
+fn roast_of(text: &str) -> &str {
+    text.rsplit_once("\n\n*")
+        .and_then(|(_, roast)| roast.strip_suffix('*'))
+        .expect("the reply ends with an italic roast line")
+}
+
+fn loan_options(amount: i64) -> Vec<InteractionOption> {
+    vec![InteractionOption {
+        name: "amount".to_owned(),
+        value: InteractionValue::Integer(amount),
+    }]
+}
+
+#[tokio::test]
+async fn bankruptcy_reply_carries_a_prewritten_roast_without_a_model() {
+    let database = roast_database(-100);
+    let (provider, _) = roast_provider(&database, None);
+    let recording = ReceiptResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+
+    provider
+        .handler
+        .bankruptcy(ROAST_PLAYER, Some(42), None, &responder)
+        .await
+        .expect("bankruptcy filing");
+
+    let events = recording.events();
+    assert_eq!(events.len(), 1, "one reply, no edit");
+    let content = &events[0].1.content;
+    assert!(content.starts_with("**Broke Bob HAS DECLARED BANKRUPTCY**"));
+    let roast = roast_of(content);
+    assert!(!roast.is_empty() && !roast.contains('{'), "{roast}");
+    let expected = roast_line(
+        FlavorEvent::BankruptcyDeclared,
+        Some("Broke Bob"),
+        1,
+        0,
+        roast_seed(ROAST_PLAYER, 1),
+    );
+    assert_eq!(Some(roast), expected.as_deref());
+}
+
+#[tokio::test]
+async fn a_prewritten_roast_never_names_an_unknown_player() {
+    let database = roast_database(-100);
+    let provider =
+        partial_member_cache_provider(&database, Arc::new(PartialMemberCacheDiscord::default()));
+    let recording = ReceiptResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+
+    provider
+        .handler
+        .bankruptcy(ROAST_PLAYER, Some(42), None, &responder)
+        .await
+        .expect("bankruptcy filing");
+
+    let events = recording.events();
+    assert!(!roast_of(&events[0].1.content).contains(UNKNOWN_PLAYER));
+}
+
+#[tokio::test]
+async fn bankruptcy_reply_goes_out_before_the_roast_and_is_then_edited() {
+    let database = roast_database(-100);
+    let ai = crate::test_support::ScriptedAi::held("First filing. Bold of you.");
+    let (provider, _) = roast_provider(&database, Some(&ai));
+    let recording = ReceiptResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+
+    provider
+        .handler
+        .bankruptcy(ROAST_PLAYER, Some(42), None, &responder)
+        .await
+        .expect("bankruptcy filing");
+
+    let events = recording.events();
+    assert_eq!(events.len(), 1, "the reply does not wait for the model");
+    assert_eq!(events[0].0, "followup");
+    let reply = events[0].1.content.clone();
+    assert!(reply.ends_with(JOPACOIN_EMOTE), "no roast yet: {reply}");
+
+    ai.release();
+    let events = recording.wait_for_events(2).await;
+    assert_eq!(events[1].0, "edit");
+    assert_eq!(
+        events[1].1.content,
+        format!("{reply}\n\n*First filing. Bold of you.*")
+    );
+    let requests = ai.requests();
+    let prompt = &requests[0].messages[1].content;
+    assert!(
+        prompt.starts_with(
+            "Event: bankruptcy_declared\nEvent details: bankruptcy_count=1, debt_cleared=100,"
+        ),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Player: Broke Bob\n"), "{prompt}");
+}
+
+#[tokio::test]
+async fn bankruptcy_roast_falls_back_to_a_prewritten_line_when_the_model_fails() {
+    let database = roast_database(-100);
+    let ai = crate::test_support::ScriptedAi::failing();
+    let (provider, _) = roast_provider(&database, Some(&ai));
+    let recording = ReceiptResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+
+    provider
+        .handler
+        .bankruptcy(ROAST_PLAYER, Some(42), None, &responder)
+        .await
+        .expect("bankruptcy filing");
+
+    let events = recording.wait_for_events(2).await;
+    let expected = roast_line(
+        FlavorEvent::BankruptcyDeclared,
+        Some("Broke Bob"),
+        1,
+        0,
+        roast_seed(ROAST_PLAYER, 1),
+    );
+    assert_eq!(Some(roast_of(&events[1].1.content)), expected.as_deref());
+}
+
+#[tokio::test]
+async fn loan_roast_is_appended_to_the_embed_description() {
+    let database = roast_database(100);
+    let (provider, _) = roast_provider(&database, None);
+    let recording = ReceiptResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+    provider
+        .handler
+        .loan(ROAST_PLAYER, Some(42), None, &loan_options(50), &responder)
+        .await
+        .expect("loan");
+    let events = recording.events();
+    let description = events[0].1.embeds[0].description.clone().unwrap();
+    assert!(description.starts_with("The bank approves your request."));
+    let roast = roast_of(&description);
+    assert!(!roast.is_empty() && !roast.contains('{'), "{roast}");
+
+    let database = roast_database(100);
+    let ai = crate::test_support::ScriptedAi::replying("Fifty on credit. Inspiring.");
+    let (provider, _) = roast_provider(&database, Some(&ai));
+    let recording = ReceiptResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+    provider
+        .handler
+        .loan(ROAST_PLAYER, Some(42), None, &loan_options(50), &responder)
+        .await
+        .expect("loan");
+    let events = recording.wait_for_events(2).await;
+    assert!(
+        events[0].1.embeds[0]
+            .description
+            .as_deref()
+            .is_some_and(|description| description.ends_with("Good luck."))
+    );
+    assert_eq!(
+        roast_of(events[1].1.embeds[0].description.as_deref().unwrap()),
+        "Fifty on credit. Inspiring."
+    );
+    assert_eq!(events[1].1.embeds[0].fields, events[0].1.embeds[0].fields);
+    assert!(
+        ai.requests()[0].messages[1]
+            .content
+            .starts_with("Event: loan_taken\nEvent details: amount=50,")
+    );
+}
+
+async fn wait_for_neon(discord: &PartialMemberCacheDiscord) -> Vec<(u64, DiscordMessage)> {
+    for _ in 0..1_000 {
+        let sent = discord.sent.lock().unwrap().clone();
+        if !sent.is_empty() {
+            return sent;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the Neon message was never sent");
+}
+
+fn neon_template() -> NeonResult {
+    NeonResult::text(
+        1,
+        cama_app::neon_degen::ansi_block("[LEDGER] Client: Broke Bob\nBalance: -100 JC"),
+    )
+}
+
+#[tokio::test]
+async fn neon_text_is_model_written_off_the_callers_path() {
+    let database = roast_database(-100);
+    let ai = crate::test_support::ScriptedAi::held("[09:00:00.001] STATUS: INSOLVENT");
+    let (provider, discord) = roast_provider(&database, Some(&ai));
+
+    provider
+        .handler
+        .emit_neon_result(9, neon_template(), 42, Some(ROAST_PLAYER))
+        .await;
+    assert!(
+        discord.sent.lock().unwrap().is_empty(),
+        "the caller returned while the model was still held"
+    );
+
+    ai.release();
+    let sent = wait_for_neon(&discord).await;
+    assert_eq!(sent[0].0, 9);
+    assert_eq!(
+        sent[0].1.response.content,
+        cama_app::neon_degen::ansi_block("[09:00:00.001] STATUS: INSOLVENT")
+    );
+    assert_eq!(
+        sent[0].1.allowed_mentions,
+        crate::discord_transport::DiscordAllowedMentions::None
+    );
+    let requests = ai.requests();
+    let prompt = &requests[0].messages[1].content;
+    assert!(prompt.contains("Balance: -100 JC") && prompt.contains("username: Broke Bob"));
+}
+
+#[tokio::test]
+async fn neon_keeps_its_template_when_the_model_fails_or_is_absent() {
+    let database = roast_database(-100);
+    let ai = crate::test_support::ScriptedAi::failing();
+    let (provider, discord) = roast_provider(&database, Some(&ai));
+    provider
+        .handler
+        .emit_neon_result(9, neon_template(), 42, Some(ROAST_PLAYER))
+        .await;
+    let sent = wait_for_neon(&discord).await;
+    assert_eq!(
+        sent[0].1.response.content,
+        neon_template().text_block.unwrap()
+    );
+
+    let (provider, discord) = roast_provider(&database, None);
+    provider
+        .handler
+        .emit_neon_result(9, neon_template(), 42, Some(ROAST_PLAYER))
+        .await;
+    let sent = discord.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "without a model the send is inline");
+    assert_eq!(
+        sent[0].1.response.content,
+        neon_template().text_block.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn post_match_neon_without_a_subject_is_sent_as_rendered() {
+    let database = roast_database(-100);
+    let ai = crate::test_support::ScriptedAi::replying("[09:00:00.001] STATUS: REWRITTEN");
+    let (provider, discord) = roast_provider(&database, Some(&ai));
+
+    assert!(
+        provider
+            .handler
+            .emit_match_neon(9, neon_template(), 42, None)
+            .await
+    );
+    let sent = discord.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].1.response.content,
+        neon_template().text_block.unwrap()
+    );
+    assert!(ai.requests().is_empty());
+
+    assert!(
+        provider
+            .handler
+            .emit_match_neon(9, neon_template(), 42, Some(ROAST_PLAYER))
+            .await
+    );
+    for _ in 0..1_000 {
+        if discord.sent.lock().unwrap().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        discord.sent.lock().unwrap()[1].1.response.content,
+        cama_app::neon_degen::ansi_block("[09:00:00.001] STATUS: REWRITTEN")
+    );
 }

@@ -1993,3 +1993,37 @@ fn test_join_chains_without_a_comma_join_still_allowed() {
         "SELECT p.wins FROM players p JOIN matches m ON m.match_id = p.wins LEFT JOIN players q ON q.wins = p.wins WHERE p.wins > 1 GROUP BY p.wins ORDER BY p.wins LIMIT 5",
     );
 }
+
+#[test]
+fn default_roast_prompt_carries_player_history_and_event_details() {
+    let (system, prompt, temperature) = build_flavor_prompt(&FlavorPromptInput {
+        event_type: "bankruptcy_declared".to_owned(),
+        player_context: BTreeMap::from([
+            ("username".to_owned(), Value::Text("Alice".to_owned())),
+            ("balance".to_owned(), Value::Integer(0)),
+            ("bankruptcy_count".to_owned(), Value::Integer(4)),
+            ("degen_score".to_owned(), Value::Null),
+        ]),
+        event_details: BTreeMap::from([("debt_cleared".to_owned(), Value::Integer(350))]),
+        examples: vec!["Clean slate, dirty history.".to_owned()],
+        persona: None,
+    });
+
+    assert!(system.contains("never invent numbers"));
+    assert!(system.ends_with("Examples:\n- Clean slate, dirty history."));
+    assert_eq!(
+        prompt,
+        "Event: bankruptcy_declared\nEvent details: debt_cleared=350\nPlayer: Alice\n\
+         Player history: balance=0, bankruptcy_count=4\nGenerate a PERSONALIZED roast."
+    );
+    assert_eq!(temperature, None);
+
+    let (_, bare, _) = build_flavor_prompt(&FlavorPromptInput {
+        event_type: "loan_taken".to_owned(),
+        ..FlavorPromptInput::default()
+    });
+    assert_eq!(
+        bare,
+        "Event: loan_taken\nPlayer: Unknown\nGenerate a PERSONALIZED roast."
+    );
+}

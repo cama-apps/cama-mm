@@ -769,6 +769,35 @@ async fn run_serve() -> ExitCode {
         error!(%error, "match/betting flavor composition refused startup");
         return ExitCode::from(1);
     }
+    // Flavor text is model-written when a provider key is configured;
+    // otherwise prewritten text is posted instead.
+    info!(
+        model_written = production_ai_service.is_some(),
+        "flavor text source selected"
+    );
+    let queue_hype = Arc::new(cama_app::queue_hype::QueueHype::new(
+        production_ai_service.clone(),
+    ));
+    if let Err(error) = match_provider
+        .attach_queue_hype(Arc::clone(&queue_hype))
+        .and_then(|()| registration_provider.attach_queue_hype(queue_hype))
+    {
+        error!(%error, "queue hype composition refused startup");
+        return ExitCode::from(1);
+    }
+    if let Some(neon_llm) = cama_runtime::neon_llm::NeonLlm::production(
+        &config.db_path,
+        production_ai_service.clone(),
+        Arc::new(DiscordGuildPlayerNameResolver::new(
+            discord_transport.clone(),
+        )),
+    ) && let Err(error) = betting_provider
+        .attach_neon_llm(neon_llm.clone())
+        .and_then(|()| registration_provider.attach_neon_llm(neon_llm))
+    {
+        error!(%error, "Neon model composition refused startup");
+        return ExitCode::from(1);
+    }
     let draft_provider = match DraftRegistrationProvider::new_with_reminder_scheduler_and_neon(
         &config.db_path,
         &application_config,
@@ -901,6 +930,7 @@ async fn run_serve() -> ExitCode {
             match_corrections: admin_match_correction.control(),
         },
         usage_monitor.clone(),
+        production_ai_service.is_some(),
     );
     let dig_bonus_runtime = DigBonusRuntime::from_application_config(
         &config.db_path,

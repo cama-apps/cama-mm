@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -77,6 +77,41 @@ impl LlmRequestRepository {
         )?;
         Ok(connection.last_insert_rowid())
     }
+
+    /// Count the attempts recorded at or after `since` (Unix seconds).
+    pub fn summary_since(&self, since: i64) -> Result<LlmAttemptSummary, LlmRequestError> {
+        let connection = open_runtime_connection(&self.path)?;
+        let (succeeded, failed) = connection.query_row(
+            "SELECT COALESCE(SUM(success), 0), COALESCE(SUM(1 - success), 0)
+               FROM llm_request_attempts WHERE created_at >= ?1",
+            [since],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let last_error = connection
+            .query_row(
+                "SELECT error_type FROM llm_request_attempts
+                  WHERE created_at >= ?1 AND success = 0
+                  ORDER BY attempt_id DESC LIMIT 1",
+                [since],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(LlmAttemptSummary {
+            succeeded,
+            failed,
+            last_error,
+        })
+    }
+}
+
+/// Outcome counts for the attempts in a time window.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LlmAttemptSummary {
+    pub succeeded: i64,
+    pub failed: i64,
+    /// Error kind of the most recent failed attempt, when it recorded one.
+    pub last_error: Option<String>,
 }
 
 fn validate_attempt(attempt: &LlmAttemptRecord) -> Result<(), LlmRequestError> {
@@ -297,6 +332,46 @@ mod tests {
             )
             .expect("failure row");
         assert_eq!(failure_row, (0, Some("RateLimitError".to_owned()), None));
+    }
+
+    #[test]
+    fn summary_counts_only_attempts_inside_the_window() {
+        let (_file, repository) = fixture();
+        assert_eq!(
+            repository.summary_since(0).expect("empty summary"),
+            LlmAttemptSummary::default()
+        );
+
+        let failure = |error: &str| LlmAttemptRecord {
+            success: false,
+            error_type: Some(error.to_owned()),
+            ..record()
+        };
+        repository
+            .record_attempt_at(&failure("Timeout"), Some(999))
+            .expect("attempt before the window");
+        repository
+            .record_attempt_at(&record(), Some(1_000))
+            .expect("successful attempt");
+        repository
+            .record_attempt_at(&failure("Authentication"), Some(1_001))
+            .expect("first failure");
+        repository
+            .record_attempt_at(&failure("RateLimit"), Some(1_002))
+            .expect("latest failure");
+
+        assert_eq!(
+            repository.summary_since(1_000).expect("window summary"),
+            LlmAttemptSummary {
+                succeeded: 1,
+                failed: 2,
+                last_error: Some("RateLimit".to_owned()),
+            }
+        );
+        assert_eq!(
+            repository.summary_since(2_000).expect("later window"),
+            LlmAttemptSummary::default()
+        );
     }
 
     #[test]

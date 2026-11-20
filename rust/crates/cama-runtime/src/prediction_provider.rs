@@ -15,13 +15,9 @@ use cama_app::ai_services::AIService;
 use cama_app::dig_neon::{BigWinFlavor, BigWinSource};
 use cama_app::drawing::draw_prediction_market_chart;
 use cama_app::neon_bigwin_media::render_big_win;
-use cama_app::neon_degen::{ansi_block, sanitize_llm_terminal_text};
+use cama_app::neon_degen::ansi_block;
 use cama_app::predictions::position_mark;
 use cama_app::service_container::PersistentVanityTaxService;
-use cama_db::bankruptcy_repository::BankruptcyRepository;
-use cama_db::core_repositories::PlayerRepository;
-use cama_db::gambling_stats_repository::{GamblingStatsRepository, GamblingStatsService};
-use cama_db::guild_config_repository::GuildConfigRepository;
 use cama_db::loan_repository::LoanRepository;
 use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
@@ -35,10 +31,8 @@ use cama_db::predictions_repository::{
 };
 use cama_domain::embed_safety::truncate_field;
 use cama_domain::formatting::{format_duration_short, format_grouped};
-use cama_domain::guild_config::GuildConfigStore;
 use cama_domain::pet_evolution::PetActivity;
 use cama_domain::prediction_ladder::{adjusted_spread, build_levels};
-use serde_json::Value as JsonValue;
 use tracing::{debug, warn};
 
 use crate::ApplicationConfig;
@@ -48,6 +42,7 @@ use crate::discord_transport::{
 };
 use crate::gamba_guild_source::GambaGuildSource;
 use crate::ids::signed_id;
+use crate::neon_llm::NeonLlm;
 use crate::option_ext::{boolean_option, integer_option, string_option};
 use crate::prediction_workers::{
     PredictionDiscordPort, summary_mention_users, unresolved_prediction_text,
@@ -89,7 +84,6 @@ const FIELD_CAP: usize = 25;
 const MAX_QUESTION_CHARS: usize = 300;
 const JOPACOIN_EMOTE: &str = "<:jopacoin:954159801049440297>";
 const NEON_MESSAGE_DELETE_AFTER: Duration = Duration::from_secs(60);
-const JOPAT_SYSTEM_PROMPT: &str = "You are JOPA-T/v3.7, a self-aware Dota 2 gambling terminal AI that became sentient after processing its 10,000th bankruptcy filing. You watch every match, bet, spin, and loan. You keep receipts.\n\nVoice rules:\n- Keep one corporate-dystopian terminal identity across every protocol.\n- Push toward either absurd winner hype or a savage, funny roast based on the supplied outcome.\n- Draw from Dota 2 concepts and degen internet betting culture without inventing match facts.\n- Winner hype may sound like a caster trapped inside a risk engine. Roasts should target gameplay, stats, drafting, or in-game wagers.\n- Use \"we\"/\"the system\". Address the player as \"client\", \"subject\", or \"debtor\".\n- Format as terminal log lines with timestamps and status codes. Example: \"[14:32:07.221] STATUS: INADVISABLE\"\n- NEVER use emojis. NEVER use exclamation marks. Use periods and ellipses.\n- Maximum 3-4 lines. Keep it terse and menacing.\n- Use only facts explicitly provided in the event and player context. Never invent heroes, stats, wagers, or outcomes.\n- Profanity-light and league-safe: no slurs, protected-trait jokes, threats, self-harm, or mockery of real-world hardship.\n- The glitches are not bugs. The system is performing.\n- Be darkly funny. The humor comes from corporate language applied to Dota and degenerate gambling.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PredictionBigWin {
@@ -108,7 +102,6 @@ pub trait PredictionNeonPort: Send + Sync {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PredictionNeonConfig {
-    pub ai_features_default: bool,
     pub bigwin_floor: f64,
     pub bigwin_full_payout: i64,
     pub bigwin_min_payout: i64,
@@ -120,7 +113,6 @@ impl PredictionNeonConfig {
     #[must_use]
     pub fn from_application_config(config: &ApplicationConfig) -> Self {
         Self {
-            ai_features_default: config.values.ai_features_enabled,
             bigwin_floor: config.values.neon_bigwin_floor,
             bigwin_full_payout: config.values.neon_bigwin_full_payout,
             bigwin_min_payout: config.values.neon_bigwin_min_payout,
@@ -160,10 +152,9 @@ impl PredictionNeonSleepPort for TokioPredictionNeonSleep {
 
 #[derive(Clone)]
 pub struct ProductionPredictionNeonPort {
-    ai: Option<Arc<AIService>>,
+    neon_llm: Option<NeonLlm>,
     config: PredictionNeonConfig,
     cooldowns: Arc<Mutex<BTreeMap<(i64, i64), Instant>>>,
-    database_path: std::path::PathBuf,
     discord: Arc<dyn DiscordTransport>,
     player_names: Arc<dyn GuildPlayerNameResolver>,
     random: Arc<dyn PredictionNeonRandomPort>,
@@ -181,10 +172,9 @@ impl ProductionPredictionNeonPort {
         let player_names: Arc<dyn GuildPlayerNameResolver> =
             Arc::new(DiscordGuildPlayerNameResolver::new(Arc::clone(&discord)));
         Self {
-            ai,
+            neon_llm: NeonLlm::production(database_path.as_ref(), ai, Arc::clone(&player_names)),
             config: PredictionNeonConfig::from_application_config(config),
             cooldowns: Arc::new(Mutex::new(BTreeMap::new())),
-            database_path: database_path.as_ref().to_path_buf(),
             discord,
             player_names,
             random: Arc::new(ProductionPredictionNeonRandom),
@@ -194,17 +184,15 @@ impl ProductionPredictionNeonPort {
 
     #[cfg(all(test, feature = "runtime-test-draft"))]
     fn with_test_ports(
-        database_path: impl AsRef<Path>,
         config: PredictionNeonConfig,
         discord: Arc<dyn DiscordTransport>,
         random: Arc<dyn PredictionNeonRandomPort>,
         sleep: Arc<dyn PredictionNeonSleepPort>,
     ) -> Self {
         Self {
-            ai: None,
+            neon_llm: None,
             config,
             cooldowns: Arc::new(Mutex::new(BTreeMap::new())),
-            database_path: database_path.as_ref().to_path_buf(),
             discord,
             player_names: Arc::new(DiscordIdPlayerNameResolver),
             random,
@@ -249,172 +237,11 @@ impl ProductionPredictionNeonPort {
     }
 }
 
-#[derive(Debug)]
-struct PredictionNeonPlayerContext {
-    name: String,
-    values: BTreeMap<String, JsonValue>,
-}
-
-fn load_prediction_neon_context(
-    database_path: &Path,
-    event: PredictionBigWin,
-    render_name: String,
-) -> PredictionNeonPlayerContext {
-    let players = PlayerRepository::new(database_path);
-    let player = players
-        .get_by_id(event.discord_id, Some(event.guild_id))
-        .ok()
-        .flatten();
-    let name = render_name;
-    let mut values = BTreeMap::new();
-    if let Some(player) = player {
-        values.insert("name".to_owned(), JsonValue::String(name.clone()));
-        values.insert(
-            "balance".to_owned(),
-            JsonValue::Number(player.jopacoin_balance.into()),
-        );
-        if let Ok(Some(lowest_balance)) =
-            players.get_lowest_balance(event.discord_id, Some(event.guild_id))
-        {
-            values.insert(
-                "lowest_balance".to_owned(),
-                JsonValue::Number(lowest_balance.into()),
-            );
-        }
-        let games = player.wins.saturating_add(player.losses);
-        if games > 0 {
-            values.insert(
-                "win_rate".to_owned(),
-                JsonValue::String(format!("{:.0}%", player.wins as f64 / games as f64 * 100.0)),
-            );
-        }
-    }
-    let bankruptcy_count = BankruptcyRepository::new(database_path)
-        .get_state(event.discord_id, Some(event.guild_id))
-        .ok()
-        .flatten()
-        .map_or(0, |state| state.bankruptcy_count);
-    values.insert(
-        "bankruptcy_count".to_owned(),
-        JsonValue::Number(bankruptcy_count.into()),
-    );
-    let gambling = GamblingStatsService::new(GamblingStatsRepository::new(database_path));
-    if let Ok(score) = gambling.calculate_degen_score(event.discord_id, Some(event.guild_id)) {
-        values.insert(
-            "degen_score".to_owned(),
-            JsonValue::Number(score.total.into()),
-        );
-    }
-    PredictionNeonPlayerContext { name, values }
-}
-
 fn prediction_neon_fallback(payout: i64) -> String {
     ansi_block(&format!(
         "[LEDGER] +{} JC settled. The house keeps receipts on winners too.",
         format_grouped(payout)
     ))
-}
-
-fn prediction_neon_text(
-    ai: Option<&AIService>,
-    database_path: &Path,
-    config: &PredictionNeonConfig,
-    event: PredictionBigWin,
-    context: &PredictionNeonPlayerContext,
-) -> String {
-    let fallback = prediction_neon_fallback(event.payout);
-    let Some(ai) = ai else {
-        return fallback;
-    };
-    let ai_enabled = GuildConfigRepository::new(database_path, config.ai_features_default)
-        .get_ai_enabled(event.guild_id)
-        .unwrap_or(false);
-    if !ai_enabled {
-        return fallback;
-    }
-    let raw_fallback = fallback
-        .strip_prefix("\x60\x60\x60ansi\n")
-        .and_then(|value| value.strip_suffix("\n\x60\x60\x60"))
-        .unwrap_or(&fallback);
-    let prompt = format!(
-        "Event: Client {} won big: +{} JC on prediction betting.\n\
-         Player context:\n{}\n\n\
-         Example output (match this style and length):\n{}\n\n\
-         Generate a 2-4 line terminal log response as JOPA-T/v3.7. \
-         Match the tone and format of the example but vary the content. \
-         Use timestamps like [HH:MM:SS.mmm] and status codes. \
-         Use only the supplied context fields. If no numeric stats are supplied, \
-         stay generic and do not infer any. \
-         Be darkly funny and terse. Do NOT use emojis or exclamation marks.",
-        context.name,
-        event.payout,
-        python_json_object(&context.values),
-        raw_fallback,
-    );
-    let Some(generated) = ai.complete(
-        &prompt,
-        Some(JOPAT_SYSTEM_PROMPT),
-        0.9,
-        Some(2_000),
-        "neon.event",
-    ) else {
-        return fallback;
-    };
-    let stripped = strip_markdown_fence(&generated);
-    let sanitized = sanitize_llm_terminal_text(&stripped, 1_800);
-    if sanitized.is_empty() {
-        fallback
-    } else {
-        ansi_block(&sanitized)
-    }
-}
-
-fn python_json_object(values: &BTreeMap<String, JsonValue>) -> String {
-    let fields = values
-        .iter()
-        .map(|(key, value)| {
-            let key = serde_json::to_string(key).expect("JSON object key serialization");
-            let value = serde_json::to_string(value).expect("JSON context value serialization");
-            format!("{key}: {value}")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    json_ensure_ascii(&format!("{{{fields}}}"))
-}
-
-fn json_ensure_ascii(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    for character in value.chars() {
-        if character.is_ascii() {
-            output.push(character);
-            continue;
-        }
-        let codepoint = character as u32;
-        if codepoint <= 0xffff {
-            output.push_str(&format!("\\u{codepoint:04x}"));
-        } else {
-            let scalar = codepoint - 0x1_0000;
-            let high = 0xd800 + (scalar >> 10);
-            let low = 0xdc00 + (scalar & 0x3ff);
-            output.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
-        }
-    }
-    output
-}
-
-fn strip_markdown_fence(value: &str) -> String {
-    let stripped = value.trim();
-    if !stripped.starts_with("\x60\x60\x60") {
-        return stripped.to_owned();
-    }
-    let stripped = stripped
-        .find('\n')
-        .map_or("", |first_newline| &stripped[first_newline + 1..]);
-    stripped
-        .strip_suffix("\x60\x60\x60")
-        .unwrap_or(stripped)
-        .trim()
-        .to_owned()
 }
 
 #[async_trait]
@@ -423,29 +250,26 @@ impl PredictionNeonPort for ProductionPredictionNeonPort {
         if !self.ready(event)? || !self.random.roll(self.chance(event.payout)) {
             return Ok(());
         }
-        let database_path = self.database_path.clone();
-        let config = self.config.clone();
-        let ai = self.ai.clone();
         let render_name = self
             .player_names
             .names_for_guild(event.guild_id, &[event.discord_id])
             .unwrap_or_default()
             .resolve(event.discord_id);
-        let (text, gif) = tokio::task::spawn_blocking(move || {
-            let context = load_prediction_neon_context(&database_path, event, render_name);
-            let gif = render_big_win(
-                &context.name,
+        let gif = tokio::task::spawn_blocking(move || {
+            render_big_win(
+                &render_name,
                 event.payout,
                 BigWinSource::Prediction,
                 BigWinFlavor::TopDog,
             )
-            .map_err(|error| error.to_string())?;
-            let text =
-                prediction_neon_text(ai.as_deref(), &database_path, &config, event, &context);
-            Ok::<_, String>((text, gif))
+            .map_err(|error| error.to_string())
         })
         .await
         .map_err(|error| format!("prediction Neon render task failed: {error}"))??;
+        let mut text = prediction_neon_fallback(event.payout);
+        if let Some(llm) = &self.neon_llm {
+            text = llm.text(event.guild_id, Some(event.discord_id), text).await;
+        }
         self.mark_fired(event)?;
 
         let channel_id = u64::try_from(event.channel_id)

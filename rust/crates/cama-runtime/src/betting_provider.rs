@@ -10,10 +10,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use cama_app::ai_services::{FlavorEvent, Value as FlavorValue};
 use cama_app::dig_neon::{BigWinFlavor, BigWinSource};
 use cama_app::dota_bet_seed::{BetTotals, bets_overview, betting_seed_without_lobby_bonus};
 use cama_app::economy_event_service::EconomyEventConfig;
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
+use cama_app::flavor_lines::roast_line;
 use cama_app::jopat_post_match::{JopatPostMatchContext, NumericFact};
 use cama_app::loan::{LoanPolicy, LoanService};
 use cama_app::neon_degen::{EventKey, NeonDegenService, NeonEventPort, NeonResult, StoreError};
@@ -54,7 +56,7 @@ use cama_domain::pet_evolution::PetActivity;
 use cama_domain::tip_service::tip_fee_and_tithe;
 use chrono::Utc;
 use serde_json::json;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
@@ -64,6 +66,7 @@ use crate::discord_transport::{
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
 use crate::ids::{blocking as sqlite, signed_id};
 use crate::match_provider::MatchRegistrationProvider;
+use crate::neon_llm::NeonLlm;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionAttachment, InteractionButton, InteractionButtonStyle,
@@ -268,6 +271,7 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
             .handler
             .run_neon(move |neon| {
                 let mut selected = None;
+                let mut subject = None;
                 if let Some(winner) = select_match_big_win(&participants) {
                     selected = neon.on_big_win(
                         u64::try_from(winner.discord_id).unwrap_or_default(),
@@ -276,6 +280,7 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
                         winner.payout,
                         winner.flavor,
                     );
+                    subject = Some(winner.discord_id);
                 }
                 if selected.is_none() {
                     for loser in participants
@@ -305,11 +310,12 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
                             );
                         }
                         if selected.is_some() {
+                            subject = Some(loser.discord_id);
                             break;
                         }
                     }
                 }
-                selected
+                selected.map(|result| (result, subject))
             })
             .await?;
         if selected.is_none() {
@@ -339,14 +345,15 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
                             score,
                         );
                         if selected.is_some() {
-                            return selected;
+                            // A degen milestone keeps its rendered text.
+                            return selected.map(|result| (result, None));
                         }
                     }
                     None
                 })
                 .await?;
         }
-        let Some(result) = selected else {
+        let Some((result, subject)) = selected else {
             warn!(
                 match_id = request.match_id,
                 guild_id, "match settlement Neon claim declined; terminal marker retained"
@@ -369,7 +376,7 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
         .await?;
         if !self
             .handler
-            .emit_neon_result_checked(channel_id, result)
+            .emit_match_neon(channel_id, result, guild_id, subject)
             .await
         {
             warn!(
@@ -435,11 +442,13 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
                     let Ok(discord_id) = u64::try_from(milestone.discord_id) else {
                         continue;
                     };
-                    selected = neon.on_games_milestone(
-                        discord_id,
-                        u64::try_from(guild_id).ok(),
-                        milestone.games_played,
-                    );
+                    selected = neon
+                        .on_games_milestone(
+                            discord_id,
+                            u64::try_from(guild_id).ok(),
+                            milestone.games_played,
+                        )
+                        .map(|result| (result, Some(milestone.discord_id)));
                     if selected.is_some() {
                         break;
                     }
@@ -449,12 +458,14 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
                         let Ok(discord_id) = u64::try_from(streak.discord_id) else {
                             continue;
                         };
-                        selected = neon.on_win_streak_record(
-                            discord_id,
-                            u64::try_from(guild_id).ok(),
-                            streak.current_streak,
-                            streak.previous_best,
-                        );
+                        selected = neon
+                            .on_win_streak_record(
+                                discord_id,
+                                u64::try_from(guild_id).ok(),
+                                streak.current_streak,
+                                streak.previous_best,
+                            )
+                            .map(|result| (result, Some(streak.discord_id)));
                         if selected.is_some() {
                             break;
                         }
@@ -468,13 +479,15 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
                         let Ok(player2_id) = u64::try_from(rivalry.player2_id) else {
                             continue;
                         };
-                        selected = neon.on_rivalry_detected(
-                            u64::try_from(guild_id).ok(),
-                            player1_id,
-                            player2_id,
-                            rivalry.games_against,
-                            rivalry.winrate_vs,
-                        );
+                        selected = neon
+                            .on_rivalry_detected(
+                                u64::try_from(guild_id).ok(),
+                                player1_id,
+                                player2_id,
+                                rivalry.games_against,
+                                rivalry.winrate_vs,
+                            )
+                            .map(|result| (result, None));
                         if selected.is_some() {
                             break;
                         }
@@ -484,7 +497,7 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
             })
             .await?;
 
-        let Some(result) = selected else {
+        let Some((result, subject)) = selected else {
             warn!(
                 match_id = request.match_id,
                 guild_id, "match Easter-egg Neon claim declined; terminal marker retained"
@@ -507,7 +520,7 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
         .await?;
         if !self
             .handler
-            .emit_neon_result_checked(channel_id, result)
+            .emit_match_neon(channel_id, result, guild_id, subject)
             .await
         {
             warn!(
@@ -609,6 +622,67 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
         }
         Ok(())
     }
+}
+
+/// `text` followed by an italic roast line, when there is one.
+fn with_roast(text: &str, roast: Option<&str>) -> String {
+    roast.map_or_else(|| text.to_owned(), |roast| format!("{text}\n\n*{roast}*"))
+}
+
+/// A player's name for a prewritten roast, or `None` when no readable name
+/// is known, so the line picked never names a placeholder.
+fn roast_name(name: &str) -> Option<String> {
+    (name != UNKNOWN_PLAYER).then(|| cama_domain::formatting::escape_discord_text(name))
+}
+
+/// Seed for a player's prewritten roast, so each filing or loan rotates the line.
+fn roast_seed(user_id: i64, count: i64) -> u64 {
+    user_id.unsigned_abs().wrapping_add(count.unsigned_abs())
+}
+
+/// Send one Neon result and schedule its deletion. Returns whether it was
+/// delivered; a rejected attachment is retried as text only.
+async fn deliver_neon(
+    discord: &Arc<dyn DiscordTransport>,
+    channel_id: u64,
+    result: NeonResult,
+) -> bool {
+    let mut response =
+        InteractionResponse::message(result.text_block.or(result.footer_text).unwrap_or_default())
+            .without_mentions();
+    if let Some(gif) = result.gif_file {
+        response = response.attachment(InteractionAttachment::bytes(
+            "jopat_terminal.gif",
+            gif.bytes,
+        ));
+    }
+    let has_attachment = !response.attachments.is_empty();
+    let first = discord
+        .send_message(channel_id, DiscordMessage::silent(response.clone()))
+        .await;
+    let receipt = match first {
+        Ok(receipt) => Some(receipt),
+        Err(_) if has_attachment => {
+            let mut text_only = response;
+            text_only.attachments.clear();
+            discord
+                .send_message(channel_id, DiscordMessage::silent(text_only))
+                .await
+                .ok()
+        }
+        Err(_) => None,
+    };
+    let delivered = receipt.is_some();
+    if let Some(receipt) = receipt {
+        let discord = Arc::clone(discord);
+        tokio::spawn(async move {
+            tokio::time::sleep(BETTING_NEON_DELETE_DELAY).await;
+            let _ = discord
+                .delete_message(receipt.channel_id, receipt.message_id)
+                .await;
+        });
+    }
+    delivered
 }
 
 /// Existing-schema Neon event storage for the betting provider.  Cooldowns
@@ -885,6 +959,7 @@ impl BettingRegistrationProvider {
                 vanity_tax,
                 neon: Arc::new(Mutex::new(neon)),
                 wheel_reminders: OnceLock::new(),
+                neon_llm: OnceLock::new(),
                 wager_refresh: Mutex::new(None),
                 rates: Mutex::new(BTreeMap::new()),
                 wheel_interactions: Mutex::new(BTreeMap::new()),
@@ -911,6 +986,15 @@ impl BettingRegistrationProvider {
             .wheel_reminders
             .set(Arc::new(hooks))
             .map_err(|_| "betting reminder hooks were already attached".to_owned())
+    }
+
+    /// Let a model write Neon terminal text and bankruptcy/loan roasts.
+    /// Without this every message keeps its prewritten text.
+    pub fn attach_neon_llm(&self, llm: NeonLlm) -> Result<(), String> {
+        self.handler
+            .neon_llm
+            .set(llm)
+            .map_err(|_| "betting Neon model was already attached".to_owned())
     }
 
     /// Gateway observation hook for the process-local Discord views owned by
@@ -1657,6 +1741,7 @@ struct BettingInteractionHandler {
     neon: Arc<Mutex<NeonDegenService>>,
     /// Schedules the wheel-ready reminder after every settled spin.
     wheel_reminders: OnceLock<Arc<dyn WheelReminderPort>>,
+    neon_llm: OnceLock<NeonLlm>,
     wager_refresh: Mutex<Option<Arc<dyn BettingWagerRefreshPort>>>,
     rates: Mutex<BTreeMap<RateKey, Vec<Instant>>>,
     wheel_interactions: Mutex<BTreeMap<String, PendingWheelInteraction>>,
@@ -3335,49 +3420,93 @@ impl BettingInteractionHandler {
             .unwrap_or_else(|| Arc::new(NoWheelReminders))
     }
 
-    async fn emit_neon_result(&self, channel_id: u64, result: NeonResult) {
-        let _ = self.emit_neon_result_checked(channel_id, result).await;
+    /// Send a Neon result about `subject`. With a model attached its terminal
+    /// text is rewritten first, off the caller's path, so no interaction or
+    /// match recording ever waits on the model.
+    async fn emit_neon_result(
+        &self,
+        channel_id: u64,
+        mut result: NeonResult,
+        guild_id: i64,
+        subject: Option<i64>,
+    ) {
+        let Some(llm) = self.neon_llm.get().cloned() else {
+            let _ = self.emit_neon_result_checked(channel_id, result).await;
+            return;
+        };
+        let discord = Arc::clone(&self.discord);
+        tokio::spawn(async move {
+            if let Some(canned) = result.text_block.take() {
+                result.text_block = Some(llm.text(guild_id, subject, canned).await);
+            }
+            if !deliver_neon(&discord, channel_id, result).await {
+                warn!(channel_id, guild_id, "Neon delivery failed");
+            }
+        });
+    }
+
+    /// Send a reply that carries a roast line. Without a model the prewritten
+    /// `fallback` is part of the reply. With one, the reply goes out first and
+    /// is edited once the model answers (or fails over to `fallback`), so the
+    /// reply never waits on the model.
+    #[allow(clippy::too_many_arguments)]
+    async fn followup_with_roast(
+        &self,
+        responder: &Arc<dyn InteractionResponder>,
+        guild_id: Option<i64>,
+        user_id: i64,
+        event: FlavorEvent,
+        details: BTreeMap<String, FlavorValue>,
+        fallback: Option<String>,
+        render: impl Fn(Option<&str>) -> InteractionResponse + Send + 'static,
+    ) -> Result<(), String> {
+        let Some(llm) = self.neon_llm.get().cloned() else {
+            return responder
+                .followup(render(fallback.as_deref()))
+                .await
+                .map_err(|error| error.to_string());
+        };
+        let receipt = responder
+            .followup_with_receipt(render(None))
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(receipt) = receipt {
+            let responder = Arc::clone(responder);
+            tokio::spawn(async move {
+                let line = llm
+                    .roast(guild_id, user_id, event, details)
+                    .await
+                    .or(fallback);
+                if let Some(line) = line
+                    && let Err(error) = responder.edit_message(receipt, render(Some(&line))).await
+                {
+                    debug!(%error, "could not add the roast to the reply");
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// Deliver a post-match Neon result. Results about one player are
+    /// rewritten by the attached model; the rest are sent as rendered.
+    async fn emit_match_neon(
+        &self,
+        channel_id: u64,
+        result: NeonResult,
+        guild_id: i64,
+        subject: Option<i64>,
+    ) -> bool {
+        if subject.is_some() && self.neon_llm.get().is_some() {
+            self.emit_neon_result(channel_id, result, guild_id, subject)
+                .await;
+            true
+        } else {
+            self.emit_neon_result_checked(channel_id, result).await
+        }
     }
 
     async fn emit_neon_result_checked(&self, channel_id: u64, result: NeonResult) -> bool {
-        let mut response = InteractionResponse::message(
-            result.text_block.or(result.footer_text).unwrap_or_default(),
-        )
-        .without_mentions();
-        if let Some(gif) = result.gif_file {
-            response = response.attachment(InteractionAttachment::bytes(
-                "jopat_terminal.gif",
-                gif.bytes,
-            ));
-        }
-        let has_attachment = !response.attachments.is_empty();
-        let first = self
-            .discord
-            .send_message(channel_id, DiscordMessage::silent(response.clone()))
-            .await;
-        let receipt = match first {
-            Ok(receipt) => Some(receipt),
-            Err(_) if has_attachment => {
-                let mut text_only = response;
-                text_only.attachments.clear();
-                self.discord
-                    .send_message(channel_id, DiscordMessage::silent(text_only))
-                    .await
-                    .ok()
-            }
-            Err(_) => None,
-        };
-        let delivered = receipt.is_some();
-        if let Some(receipt) = receipt {
-            let discord = Arc::clone(&self.discord);
-            tokio::spawn(async move {
-                tokio::time::sleep(BETTING_NEON_DELETE_DELAY).await;
-                let _ = discord
-                    .delete_message(receipt.channel_id, receipt.message_id)
-                    .await;
-            });
-        }
-        delivered
+        deliver_neon(&self.discord, channel_id, result).await
     }
 
     async fn emit_gamba_neon(
@@ -3414,7 +3543,8 @@ impl BettingInteractionHandler {
             .flatten();
         let fired = result.is_some();
         if let Some(result) = result {
-            self.emit_neon_result(channel_id, result).await;
+            self.emit_neon_result(channel_id, result, guild_id as i64, Some(user_id))
+                .await;
         }
         fired
     }
@@ -3442,7 +3572,8 @@ impl BettingInteractionHandler {
             .flatten();
         let fired = result.is_some();
         if let Some(result) = result {
-            self.emit_neon_result(channel_id, result).await;
+            self.emit_neon_result(channel_id, result, guild_id as i64, None)
+                .await;
         }
         fired
     }
@@ -3519,7 +3650,7 @@ impl BettingInteractionHandler {
             .flatten();
         let fired = result.is_some();
         if let Some(result) = result {
-            self.emit_neon_result(channel_id, result).await;
+            let _ = self.emit_neon_result_checked(channel_id, result).await;
         }
         fired
     }
@@ -3609,7 +3740,8 @@ impl BettingInteractionHandler {
             .await;
         }
         if let Some(result) = result {
-            self.emit_neon_result(channel_id, result).await;
+            self.emit_neon_result(channel_id, result, guild_id as i64, Some(user_id))
+                .await;
         }
     }
 
@@ -3637,7 +3769,8 @@ impl BettingInteractionHandler {
             .ok()
             .flatten();
         if let Some(result) = result {
-            self.emit_neon_result(channel_id, result).await;
+            self.emit_neon_result(channel_id, result, guild_id as i64, Some(user_id))
+                .await;
         }
     }
 
@@ -3669,7 +3802,8 @@ impl BettingInteractionHandler {
             .flatten();
         let fired = result.is_some();
         if let Some(result) = result {
-            self.emit_neon_result(channel_id, result).await;
+            self.emit_neon_result(channel_id, result, guild_id as i64, Some(user_id))
+                .await;
         }
         fired
     }
@@ -3710,7 +3844,8 @@ impl BettingInteractionHandler {
             .ok()
             .flatten();
         if let Some(result) = result {
-            self.emit_neon_result(channel_id, result).await;
+            self.emit_neon_result(channel_id, result, guild_id as i64, Some(user_id))
+                .await;
         }
     }
 
@@ -3742,7 +3877,8 @@ impl BettingInteractionHandler {
             .ok()
             .flatten();
         if let Some(result) = result {
-            self.emit_neon_result(channel_id, result).await;
+            self.emit_neon_result(channel_id, result, guild_id as i64, Some(user_id))
+                .await;
         }
     }
 
@@ -3783,7 +3919,8 @@ impl BettingInteractionHandler {
             .flatten();
         let fired = result.is_some();
         if let Some(result) = result {
-            self.emit_neon_result(channel_id, result).await;
+            self.emit_neon_result(channel_id, result, guild_id as i64, Some(user_id))
+                .await;
         }
         fired
     }
@@ -3846,7 +3983,8 @@ impl BettingInteractionHandler {
                 if let Some(result) = result
                     && let Some(channel_id) = channel_id
                 {
-                    self.emit_neon_result(channel_id, result).await;
+                    self.emit_neon_result(channel_id, result, guild_id as i64, Some(user_id))
+                        .await;
                 }
             }
             return response;
@@ -4455,6 +4593,7 @@ impl BettingInteractionHandler {
         })
         .await?;
         let mut neon_data = None;
+        let mut roast_details = None;
         let bankruptcy_cooldown_hit = matches!(&result, DeclarationOutcome::Cooldown { .. });
         let content = match result {
             DeclarationOutcome::Applied {
@@ -4464,6 +4603,21 @@ impl BettingInteractionHandler {
                 bankruptcy_count,
             } => {
                 neon_data = Some((debt_cleared, bankruptcy_count));
+                roast_details = Some(BTreeMap::from([
+                    (
+                        "debt_cleared".to_owned(),
+                        FlavorValue::Integer(debt_cleared),
+                    ),
+                    (
+                        "penalty_games".to_owned(),
+                        FlavorValue::Integer(penalty_games),
+                    ),
+                    (
+                        "bankruptcy_count".to_owned(),
+                        FlavorValue::Integer(bankruptcy_count),
+                    ),
+                    ("new_balance".to_owned(), FlavorValue::Integer(new_balance)),
+                ]));
                 let per_game = self.config.bankruptcy_penalty_rate_per_game;
                 let withheld_now =
                     cama_domain::bankruptcy::withheld_rate(per_game, penalty_games) * 100.0;
@@ -4490,10 +4644,34 @@ impl BettingInteractionHandler {
                 unix_seconds()?.saturating_add(remaining_seconds)
             ),
         };
-        let response = responder
-            .followup(InteractionResponse::message(content).without_mentions())
-            .await
-            .map_err(|error| error.to_string());
+        let response = match roast_details {
+            Some(details) => {
+                let filing = neon_data.map_or(0, |(_, filing)| filing);
+                let fallback = roast_line(
+                    FlavorEvent::BankruptcyDeclared,
+                    roast_name(&user_display_name).as_deref(),
+                    filing,
+                    0,
+                    roast_seed(user_id, filing),
+                );
+                self.followup_with_roast(
+                    responder,
+                    guild_id,
+                    user_id,
+                    FlavorEvent::BankruptcyDeclared,
+                    details,
+                    fallback,
+                    move |roast| {
+                        InteractionResponse::message(with_roast(&content, roast)).without_mentions()
+                    },
+                )
+                .await
+            }
+            None => responder
+                .followup(InteractionResponse::message(content).without_mentions())
+                .await
+                .map_err(|error| error.to_string()),
+        };
         if response.is_ok()
             && let Some((debt_cleared, filing_number)) = neon_data
         {
@@ -4656,7 +4834,7 @@ impl BettingInteractionHandler {
                 };
                 let fee_pct = self.config.loan_fee_rate * 100.0;
                 let mut embed = InteractionEmbed::titled(title)
-                    .description(description)
+                    .description(description.clone())
                     .color(color)
                     .field(
                         "Details",
@@ -4683,10 +4861,50 @@ impl BettingInteractionHandler {
                 if !suffix.is_empty() {
                     embed = embed.field("Mana Effects", suffix.trim(), false);
                 }
-                let response = responder
-                    .followup(InteractionResponse::message("").embed(embed))
-                    .await
-                    .map_err(|error| error.to_string());
+                let event = if loan.was_negative_loan {
+                    FlavorEvent::NegativeLoan
+                } else {
+                    FlavorEvent::LoanTaken
+                };
+                let name = self.render_player_name(user_id, guild_id).await;
+                let fallback = roast_line(
+                    event,
+                    roast_name(&name).as_deref(),
+                    loan.total_loans_taken,
+                    loan.amount,
+                    roast_seed(user_id, loan.total_loans_taken),
+                );
+                let details = BTreeMap::from([
+                    ("amount".to_owned(), FlavorValue::Integer(loan.amount)),
+                    ("fee".to_owned(), FlavorValue::Integer(loan.fee)),
+                    (
+                        "total_owed".to_owned(),
+                        FlavorValue::Integer(loan.total_owed),
+                    ),
+                    (
+                        "new_balance".to_owned(),
+                        FlavorValue::Integer(loan.new_balance),
+                    ),
+                    (
+                        "total_loans_taken".to_owned(),
+                        FlavorValue::Integer(loan.total_loans_taken),
+                    ),
+                ]);
+                let response = self
+                    .followup_with_roast(
+                        responder,
+                        guild_id,
+                        user_id,
+                        event,
+                        details,
+                        fallback,
+                        move |roast| {
+                            let mut embed = embed.clone();
+                            embed.description = Some(with_roast(&description, roast));
+                            InteractionResponse::message("").embed(embed)
+                        },
+                    )
+                    .await;
                 if response.is_ok() {
                     self.emit_loan_neon(
                         channel_id,

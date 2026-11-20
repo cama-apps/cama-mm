@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -21,9 +21,10 @@ use cama_app::player_mmr_fallback::{
     RegisterPlayerError, RegisterPlayerInput, RegisterPlayerResult, register_player,
 };
 use cama_app::playtime_service::{PlaytimeService, PlaytimeServiceError};
+use cama_app::queue_hype::{PleaFacts, QueueHype};
 use cama_app::registration::{RoleInputError, parse_roles};
 use cama_app::timezone_service::{TimezoneService, TimezoneServiceError};
-use cama_db::core_repositories::PlayerRepository;
+use cama_db::core_repositories::{MatchRepository, PlayerRepository};
 use cama_db::curfew::CurfewRepository;
 use cama_db::low_priority_repository::{LowPriorityRepository, LowPriorityState};
 use cama_db::moderation::{
@@ -38,16 +39,18 @@ use cama_db::registration_repository::{
 };
 use cama_domain::curfew::CurfewMode;
 use cama_domain::formatting::{escape_discord_text, format_role_display};
+use cama_domain::game_date::game_date_for;
 use cama_domain::openskill::CamaOpenSkillSystem;
 use cama_domain::rating::CamaRatingSystem;
 use tracing::{debug, error, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordDirectMessageErrorKind, DiscordMessage, DiscordTransport, cached_guild_player_names,
-    resolve_guild_player_names,
+    DiscordDirectMessageErrorKind, DiscordMessage, DiscordMessageReceipt, DiscordTransport,
+    cached_guild_player_names, resolve_guild_player_names,
 };
 use crate::ids::signed_id;
+use crate::neon_llm::NeonLlm;
 use crate::option_ext::{boolean_option, integer_option, string_option, user_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -162,6 +165,7 @@ impl PlayerRegistrationProvider {
                 moderation: ModerationRepository::new(path),
                 low_priority: LowPriorityRepository::new(path),
                 players: PlayerRepository::new(path),
+                matches: MatchRepository::new(path),
                 curfew: CurfewService::new(CurfewRepository::new(path)),
                 opendota,
                 discord,
@@ -170,8 +174,28 @@ impl PlayerRegistrationProvider {
                 neon: Mutex::new(neon),
                 rally_cooldowns: Mutex::new(BTreeMap::new()),
                 ready_cooldowns: Mutex::new(BTreeMap::new()),
+                queue_hype: OnceLock::new(),
+                neon_llm: OnceLock::new(),
             }),
         }
+    }
+
+    /// Add a plea to the lobby rally before the day's first game. Without
+    /// this the rally posts unchanged.
+    pub fn attach_queue_hype(&self, hype: Arc<QueueHype>) -> Result<(), String> {
+        self.handler
+            .queue_hype
+            .set(hype)
+            .map_err(|_| "registration queue hype was already attached".to_owned())
+    }
+
+    /// Let a model write this provider's Neon terminal text. Without this
+    /// every message keeps its prewritten text.
+    pub fn attach_neon_llm(&self, llm: NeonLlm) -> Result<(), String> {
+        self.handler
+            .neon_llm
+            .set(llm)
+            .map_err(|_| "registration Neon model was already attached".to_owned())
     }
 
     /// Side-effect hook that must be attached to `LobbyRegistrationProvider`
@@ -440,6 +464,7 @@ struct PlayerRegistrationHandler {
     moderation: ModerationRepository,
     low_priority: LowPriorityRepository,
     players: PlayerRepository,
+    matches: MatchRepository,
     curfew: CurfewService,
     opendota: Arc<OpenDotaRuntimeServices>,
     discord: Arc<dyn DiscordTransport>,
@@ -448,6 +473,8 @@ struct PlayerRegistrationHandler {
     neon: Mutex<NeonDegenService>,
     rally_cooldowns: Mutex<BTreeMap<(u64, LobbyKindKey, usize, u64), Instant>>,
     ready_cooldowns: Mutex<BTreeMap<(u64, LobbyKindKey), Instant>>,
+    queue_hype: OnceLock<Arc<QueueHype>>,
+    neon_llm: OnceLock<NeonLlm>,
 }
 
 struct RegistrationDraftNeonObserver {
@@ -603,13 +630,8 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
         ) else {
             return Ok(());
         };
-        self.discord
-            .send_message(
-                channel_id,
-                DiscordMessage::silent(InteractionResponse::message(text).without_mentions()),
-            )
+        self.deliver_neon_text(channel_id, event.guild_id, event.player_id, text, false)
             .await
-            .map(|_| ())
     }
 
     async fn gamba_spectator(&self, event: LobbyGambaSpectator) -> Result<(), String> {
@@ -625,24 +647,14 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
         let Some(text) = result.and_then(|result| result.text_block) else {
             return Ok(());
         };
-        let receipt = self
-            .discord
-            .send_message(
-                event.channel_id,
-                DiscordMessage::silent(InteractionResponse::message(text).without_mentions()),
-            )
-            .await?;
-        let discord = self.discord.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(NEON_DELETE_DELAY).await;
-            if let Err(error) = discord
-                .delete_message(receipt.channel_id, receipt.message_id)
-                .await
-            {
-                debug!(%error, "failed to delete gamba spectator Neon message");
-            }
-        });
-        Ok(())
+        self.deliver_neon_text(
+            event.channel_id,
+            event.guild_id,
+            event.player_id,
+            text,
+            true,
+        )
+        .await
     }
 
     async fn lobby_reset(
@@ -941,17 +953,29 @@ impl PlayerRegistrationHandler {
                 false,
             );
         }
-        self.discord
+        let rally = self
+            .discord
             .send_message(
                 target_channel,
                 DiscordMessage::mentioning(
                     InteractionResponse::message(content)
-                        .embed(embed)
+                        .embed(embed.clone())
                         .with_user_mentions(selected.clone()),
                     selected.iter().copied().collect(),
                 ),
             )
             .await?;
+        if let Some(hype) = self.queue_hype.get() {
+            tokio::spawn(add_first_game_plea(
+                Arc::clone(hype),
+                self.matches.clone(),
+                Arc::clone(&self.discord),
+                event.clone(),
+                needed,
+                rally,
+                embed,
+            ));
+        }
         if let Some(thread_id) = event.thread_id
             && let Err(error) = self
                 .discord
@@ -971,6 +995,115 @@ impl PlayerRegistrationHandler {
             warn!(%error, "could not send lobby rally to thread");
         }
         Ok(())
+    }
+}
+
+/// Send one Neon terminal block, deleting it after the usual delay when asked.
+async fn send_neon_text(
+    discord: Arc<dyn DiscordTransport>,
+    channel_id: u64,
+    text: String,
+    delete: bool,
+) -> Result<(), String> {
+    let receipt = discord
+        .send_message(
+            channel_id,
+            DiscordMessage::silent(InteractionResponse::message(text).without_mentions()),
+        )
+        .await?;
+    if delete {
+        tokio::spawn(async move {
+            tokio::time::sleep(NEON_DELETE_DELAY).await;
+            if let Err(error) = discord
+                .delete_message(receipt.channel_id, receipt.message_id)
+                .await
+            {
+                debug!(%error, "failed to delete Neon message");
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Whether a lobby joined at `joined_at_ns` would be the game day's first
+/// match, given when the guild's latest match was recorded.
+fn is_first_game_of_day(
+    last_match: Option<chrono::DateTime<chrono::Utc>>,
+    joined_at_ns: i64,
+) -> bool {
+    let joined_at = chrono::DateTime::<chrono::Utc>::from_timestamp_nanos(joined_at_ns);
+    last_match.is_none_or(|last_match| game_date_for(last_match) != game_date_for(joined_at))
+}
+
+/// Before the day's first game, edit a plea into the rally that was just
+/// posted. The rally and its pings never wait on this.
+async fn add_first_game_plea(
+    hype: Arc<QueueHype>,
+    matches: MatchRepository,
+    discord: Arc<dyn DiscordTransport>,
+    event: ConfirmedLobbyJoin,
+    needed: usize,
+    rally: DiscordMessageReceipt,
+    mut embed: crate::registration::InteractionEmbed,
+) {
+    let Ok(guild_id) = i64::try_from(event.guild_id) else {
+        return;
+    };
+    let last_match =
+        match tokio::task::spawn_blocking(move || matches.get_most_recent_match(Some(guild_id)))
+            .await
+        {
+            Ok(Ok(last_match)) => last_match.and_then(|last_match| last_match.recorded_at()),
+            Ok(Err(error)) => {
+                warn!(%error, "could not load the latest match for the lobby plea");
+                return;
+            }
+            Err(error) => {
+                warn!(%error, "latest match task for the lobby plea failed");
+                return;
+            }
+        };
+    if !is_first_game_of_day(last_match, event.joined_at_ns) {
+        return;
+    }
+    let player_ids = event
+        .player_ids
+        .iter()
+        .filter_map(|id| i64::try_from(*id).ok())
+        .collect::<Vec<_>>();
+    let names =
+        resolve_guild_player_names(discord.as_ref(), Some(event.guild_id), &player_ids).await;
+    let facts = PleaFacts {
+        lobby: event.lobby_kind.display_name().to_owned(),
+        players_in: event.player_ids.len(),
+        players_needed: needed,
+        names: player_ids
+            .iter()
+            .filter_map(|id| names.cached_name(*id))
+            .take(5)
+            .collect(),
+    };
+    let seed = event
+        .lobby_message_id
+        .unwrap_or_default()
+        .wrapping_add(needed as u64);
+    let Ok(line) = tokio::task::spawn_blocking(move || hype.plea(&facts, seed)).await else {
+        return;
+    };
+    embed.description = Some(format!(
+        "{}\n\n> {line}",
+        embed.description.unwrap_or_default()
+    ));
+    if let Err(error) = discord
+        .edit_message(
+            rally.channel_id,
+            rally.message_id,
+            DiscordMessage::silent(InteractionResponse::message("").embed(embed))
+                .preserving_content(),
+        )
+        .await
+    {
+        warn!(%error, "could not add the plea to the lobby rally");
     }
 }
 
@@ -1333,28 +1466,38 @@ impl PlayerRegistrationHandler {
         ) else {
             return;
         };
-        match self
-            .discord
-            .send_message(
-                channel_id,
-                DiscordMessage::silent(InteractionResponse::message(text).without_mentions()),
-            )
+        if let Err(error) = self
+            .deliver_neon_text(channel_id, guild_id, context.user_id, text, true)
             .await
         {
-            Ok(receipt) => {
-                let discord = self.discord.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(NEON_DELETE_DELAY).await;
-                    if let Err(error) = discord
-                        .delete_message(receipt.channel_id, receipt.message_id)
-                        .await
-                    {
-                        debug!(%error, "failed to delete registration Neon message");
-                    }
-                });
-            }
-            Err(error) => debug!(%error, "failed to send registration Neon message"),
+            debug!(%error, "failed to send registration Neon message");
         }
+    }
+
+    /// Send a Neon terminal block about `subject`. With a model attached the
+    /// text is rewritten and sent off the caller's path, so no interaction or
+    /// gateway event waits on the model.
+    async fn deliver_neon_text(
+        &self,
+        channel_id: u64,
+        guild_id: u64,
+        subject: u64,
+        text: String,
+        delete: bool,
+    ) -> Result<(), String> {
+        let discord = Arc::clone(&self.discord);
+        let Some(llm) = self.neon_llm.get().cloned() else {
+            return send_neon_text(discord, channel_id, text, delete).await;
+        };
+        tokio::spawn(async move {
+            let text = llm
+                .text(guild_id as i64, i64::try_from(subject).ok(), text)
+                .await;
+            if let Err(error) = send_neon_text(discord, channel_id, text, delete).await {
+                debug!(%error, "failed to send Neon message");
+            }
+        });
+        Ok(())
     }
 
     async fn handle_mmr_button(

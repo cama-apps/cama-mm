@@ -25,6 +25,7 @@ use cama_app::player_mmr_fallback::{RegisterPlayerError, RegisterPlayerInput, re
 use cama_db::admin::{AdminRepository, SetBothDisplayRatingsRequest, recovery_discord_id};
 use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::core_repositories::PlayerRepository;
+use cama_db::llm_request::{LlmAttemptSummary, LlmRequestRepository};
 use cama_db::loan_repository::{LoanRepository, LoanRepositoryError};
 use cama_db::low_priority_repository::{
     LOW_PRIORITY_REQUIRED_WINS, LowPriorityRepository, PythonIntegerInput, SetLowPriorityInput,
@@ -190,6 +191,7 @@ struct AdminMonitoring {
     usage: UsageMonitor,
     started_at: DateTime<Utc>,
     git_sha: String,
+    ai_configured: bool,
 }
 
 struct AdminHealthSnapshot {
@@ -208,6 +210,7 @@ struct AdminHealthSnapshot {
     discord_latency_ms: Option<u64>,
     guild_count: usize,
     usage: UsageSnapshot,
+    ai_text: String,
     opendota_quota: Option<OpenDotaQuotaSnapshot>,
 }
 
@@ -257,9 +260,41 @@ impl AdminMonitoring {
             discord_latency_ms: discord.latency_ms,
             guild_count: discord.guild_count,
             usage: self.usage.snapshot(),
+            ai_text: self.ai_text_status(),
             opendota_quota: None,
         }
     }
+
+    /// Whether model-written text is available, with the recent request
+    /// outcomes that show whether the configured key actually works.
+    fn ai_text_status(&self) -> String {
+        if !self.ai_configured {
+            return "no provider key configured (prewritten text only)".to_owned();
+        }
+        let since = Utc::now().timestamp() - AI_USAGE_WINDOW_SECONDS;
+        LlmRequestRepository::new(&self.database_path)
+            .summary_since(since)
+            .map_or_else(
+                |_| "key configured; request history unavailable".to_owned(),
+                |summary| format_ai_usage(&summary),
+            )
+    }
+}
+
+const AI_USAGE_WINDOW_SECONDS: i64 = 24 * 60 * 60;
+
+fn format_ai_usage(summary: &LlmAttemptSummary) -> String {
+    if summary.succeeded == 0 && summary.failed == 0 {
+        return "key configured; no requests in the last 24h".to_owned();
+    }
+    let last_error = summary
+        .last_error
+        .as_ref()
+        .map_or_else(String::new, |error| format!(" (last error: {error})"));
+    format!(
+        "key configured; last 24h: {} ok, {} failed{last_error}",
+        summary.succeeded, summary.failed
+    )
 }
 
 #[derive(Clone, Copy, Default)]
@@ -313,6 +348,7 @@ impl AdminRegistrationProvider {
         opendota: Arc<OpenDotaRuntimeServices>,
         ports: AdminRuntimePorts,
         usage: UsageMonitor,
+        ai_configured: bool,
     ) -> Self {
         let path = database_path.as_ref();
         let command_config = AdminCommandConfig::from_application(config);
@@ -338,6 +374,7 @@ impl AdminRegistrationProvider {
                     usage,
                     started_at: Utc::now(),
                     git_sha: short_git_sha(),
+                    ai_configured,
                 },
                 rate_limits: Mutex::new(BTreeMap::new()),
                 processed_addfake: Mutex::new(BTreeMap::new()),
@@ -3073,6 +3110,7 @@ fn format_health_snapshot(snapshot: &AdminHealthSnapshot) -> String {
          **Commands:** {} total, {} failed\n\
          **Top commands:** {}\n\
          **API requests:** {}\n\
+         **AI text:** {}\n\
          **OpenDota quota:** {}\n\
          **Degraded reasons:**\n{}",
         if snapshot.status == "ok" {
@@ -3096,6 +3134,7 @@ fn format_health_snapshot(snapshot: &AdminHealthSnapshot) -> String {
         snapshot.usage.command_failures,
         top_commands,
         api_requests,
+        snapshot.ai_text,
         opendota_quota,
         reasons
     )

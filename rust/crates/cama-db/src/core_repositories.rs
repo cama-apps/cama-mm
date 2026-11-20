@@ -2105,6 +2105,17 @@ pub struct MostRecentMatch {
     pub notes: Option<String>,
 }
 
+impl MostRecentMatch {
+    /// When the match was recorded, if the stored date is readable.
+    #[must_use]
+    pub fn recorded_at(&self) -> Option<DateTime<Utc>> {
+        match &self.match_date {
+            Value::Text(text) => parse_sql_datetime(text),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnenrichedMatch {
     pub match_id: i64,
