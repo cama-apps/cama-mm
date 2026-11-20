@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use cama_app::dota_icon_lookup::{DotaIconLookup, DotaItem};
 use cama_app::hero_lookup::{HeroImageSize, HeroLookup};
 use cama_app::pet_assets::{
     FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
@@ -26,6 +27,8 @@ use cama_domain::wrapped_activity::{
 use super::distinct::Persona;
 use super::*;
 
+/// Item and ability icons are a few kilobytes; anything larger is not one.
+const MAX_ICON_BYTES: usize = 256 * 1024;
 /// The deepest layers of the mine get the darker palette.
 const DEEP_LAYER_DEPTH: i64 = 76;
 #[cfg(all(test, feature = "runtime-test-core"))]
@@ -40,6 +43,8 @@ pub(super) struct ArtSources {
     pets: Arc<Mutex<PetArtLoader>>,
     pet_decay_per_day: i64,
     heroes: Arc<HeroLookup>,
+    /// Item and ability icons by game key.
+    icons: Arc<DotaIconLookup>,
     /// The Steam image cache the trivia warm fills at startup.
     hero_cache: PathBuf,
 }
@@ -54,6 +59,7 @@ impl ArtSources {
             ))),
             pet_decay_per_day,
             heroes: Arc::new(HeroLookup::production()),
+            icons: Arc::new(DotaIconLookup::production()),
             hero_cache: production_trivia_cache_path(),
         }
     }
@@ -74,6 +80,7 @@ impl ArtSources {
             ))),
             pet_decay_per_day: DEFAULT_PET_DECAY_PER_DAY,
             heroes: Arc::new(HeroLookup::production()),
+            icons: Arc::new(DotaIconLookup::production()),
             hero_cache: root.join("no-hero-cache"),
         }
     }
@@ -83,6 +90,13 @@ impl ArtSources {
     pub(super) fn with_hero_portraits(mut self, heroes: HeroLookup, cache: PathBuf) -> Self {
         self.heroes = Arc::new(heroes);
         self.hero_cache = cache;
+        self
+    }
+
+    /// Item and ability metadata from a test fixture.
+    #[cfg(all(test, feature = "runtime-test-core"))]
+    pub(super) fn with_icons(mut self, icons: DotaIconLookup) -> Self {
+        self.icons = Arc::new(icons);
         self
     }
 
@@ -107,6 +121,34 @@ impl ArtSources {
             .path_for_url(&url);
         let bytes = std::fs::read(path).ok()?;
         (bytes.len() <= MAX_CACHED_IMAGE_BYTES).then_some(bytes)
+    }
+
+    /// A small Steam icon when startup has already cached it; never downloads.
+    fn cached_icon(&self, url: &str) -> Option<Vec<u8>> {
+        let path = TriviaImageCache::new(&self.hero_cache)
+            .ok()?
+            .path_for_url(url);
+        let bytes = std::fs::read(path).ok()?;
+        (bytes.len() <= MAX_ICON_BYTES).then_some(bytes)
+    }
+
+    /// Every item the game database names, for item stories.
+    pub(super) fn items(&self) -> &[DotaItem] {
+        self.icons.items()
+    }
+
+    /// The icon for an OpenDota purchase-log key such as `blink`.
+    pub(super) fn item_icon(&self, key: &str) -> Option<Vec<u8>> {
+        self.cached_icon(&self.icons.item(key)?.icon_url)
+    }
+
+    /// The hero's cached ability icons in cast order; uncached ones are skipped.
+    pub(super) fn ability_icons(&self, hero_id: i64) -> Vec<Vec<u8>> {
+        self.icons
+            .ability_icon_urls(hero_id)
+            .iter()
+            .filter_map(|url| self.cached_icon(url))
+            .collect()
     }
 
     fn boss_scene(&self, boss_id: &str, scene: &str) -> Option<Vec<u8>> {
