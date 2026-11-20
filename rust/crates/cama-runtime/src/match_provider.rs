@@ -32,6 +32,7 @@ use cama_app::manashop_rework::BuffService;
 use cama_app::match_recording::{GamesMilestone, RivalryRecord, WinStreakRecord};
 use cama_app::match_voting_service::{MatchVotingService, MatchVotingServiceError};
 use cama_app::neon_degen::{RatingHistorySnapshot, choose_notable_winner};
+use cama_app::queue_hype::{HypeFacts, QueueHype, should_post_hype};
 use cama_app::reminders::LobbyKind as ReminderLobbyKind;
 use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::autobet_investments::AutobetInvestmentRepository;
@@ -145,6 +146,8 @@ const SHUFFLE_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const PENDING_MATCH_EASTER_STREAKS_KEY: &str = "_rust_match_easter_streaks";
 /// Durable marker that a hosted result must also be summarized in the lobby channel.
 const HOSTED_CHANNEL_RESULT_KEY: &str = "record_channel_result_required";
+/// Durable marker that the post-game message for this match was claimed.
+const QUEUE_HYPE_CLAIM_KEY: &str = "record_queue_hype_claimed";
 
 #[derive(Debug, Error)]
 pub enum MatchProviderBuildError {
@@ -400,6 +403,7 @@ impl MatchRegistrationProvider {
             betting_reminders: Arc::new(OnceLock::new()),
             betting_flavor: Arc::new(RwLock::new(Arc::new(StaticBettingFlavor))),
             post_match_debrief: Arc::new(OnceLock::new()),
+            queue_hype: Arc::new(OnceLock::new()),
             push_notifications: Arc::new(OnceLock::new()),
             finalizing_matches: Arc::new(Mutex::new(BTreeSet::new())),
             voting: MatchVotingService::new(MatchVotingRepository::new(&path)),
@@ -443,6 +447,15 @@ impl MatchRegistrationProvider {
             .post_match_debrief
             .set(port)
             .map_err(|_| "match post-match debrief port was already attached".to_owned())
+    }
+
+    /// Post a pot-stirring message in the main channel after most recorded
+    /// matches. Without this no such message is sent.
+    pub fn attach_queue_hype(&self, hype: Arc<QueueHype>) -> Result<(), String> {
+        self.handler
+            .queue_hype
+            .set(hype)
+            .map_err(|_| "match queue hype was already attached".to_owned())
     }
 
     /// Refresh every persisted copy of a shuffle wager message. The embed and
@@ -1503,6 +1516,7 @@ struct MatchHandler {
     betting_reminders: Arc<OnceLock<Arc<dyn MatchReminderPort>>>,
     betting_flavor: Arc<RwLock<Arc<dyn BettingFlavorPort>>>,
     post_match_debrief: Arc<OnceLock<Arc<dyn MatchPostMatchDebriefPort>>>,
+    queue_hype: Arc<OnceLock<Arc<QueueHype>>>,
     push_notifications: Arc<OnceLock<PushNotificationHooks>>,
     finalizing_matches: Arc<Mutex<BTreeSet<(i64, i64)>>>,
     voting: MatchVotingService<MatchVotingRepository>,
@@ -3878,7 +3892,144 @@ impl MatchHandler {
         }
         self.spawn_moderation_completion_notifications(pending.guild_id, recorded.match_id);
         self.spawn_recorded_match_discovery(pending.guild_id, recorded.match_id, &pending);
+        self.spawn_queue_hype(&pending, winning_result, recorded)
+            .await;
         Ok(streaming)
+    }
+
+    /// Post one pot-stirring message about the match in the main channel.
+    /// The claim is persisted before the send, so a recovery re-run never
+    /// repeats it.
+    async fn spawn_queue_hype(
+        &self,
+        pending: &PendingMatchRecord,
+        winning_result: &str,
+        recorded: &RecordedMatch,
+    ) {
+        let Some(hype) = self.queue_hype.get().cloned() else {
+            return;
+        };
+        if !should_post_hype(recorded.match_id)
+            || pending.state.extra.contains_key(QUEUE_HYPE_CLAIM_KEY)
+        {
+            return;
+        }
+        let thread = pending
+            .state
+            .thread_shuffle_thread_id
+            .and_then(|id| u64::try_from(id).ok());
+        let Some(channel) = pending
+            .state
+            .origin_channel_id
+            .or(pending.state.cmd_shuffle_channel_id)
+            .or(pending.state.shuffle_channel_id)
+            .and_then(|id| u64::try_from(id).ok())
+            .filter(|channel| Some(*channel) != thread)
+        else {
+            return;
+        };
+        if let Err(error) = self
+            .persist_recording_effect(pending, QUEUE_HYPE_CLAIM_KEY, json!(true))
+            .await
+        {
+            warn!(%error, match_id = recorded.match_id, "post-game message claim failed");
+            return;
+        }
+        let radiant_won = winning_result == "radiant";
+        let (winner_ids, loser_ids) = if radiant_won {
+            (
+                pending.state.radiant_team_ids.clone(),
+                pending.state.dire_team_ids.clone(),
+            )
+        } else {
+            (
+                pending.state.dire_team_ids.clone(),
+                pending.state.radiant_team_ids.clone(),
+            )
+        };
+        let discord = Arc::clone(&self.discord);
+        let guild_id = u64::try_from(pending.guild_id).ok();
+        let recorded = recorded.clone();
+        tokio::spawn(async move {
+            let bets = recorded
+                .bet_settlement
+                .as_ref()
+                .map_or(&[][..], |settlement| settlement.participants.as_slice());
+            let top_bet_win = bets
+                .iter()
+                .filter(|bet| bet.won && bet.payout > 0)
+                .max_by_key(|bet| bet.payout)
+                .map(|bet| (bet.discord_id, bet.payout));
+            let top_bet_loss = bets
+                .iter()
+                .filter(|bet| !bet.won && !bet.refunded && bet.amount > 0)
+                .max_by_key(|bet| bet.amount)
+                .map(|bet| (bet.discord_id, bet.amount));
+            let streaks = recorded
+                .easter_eggs
+                .win_streak_records
+                .iter()
+                .map(|record| (record.discord_id, record.current_streak))
+                .collect::<Vec<_>>();
+            let standout = recorded
+                .debrief
+                .as_ref()
+                .and_then(|debrief| debrief.winner_id);
+            let ids = winner_ids
+                .iter()
+                .chain(&loser_ids)
+                .copied()
+                .chain(standout)
+                .chain(top_bet_win.map(|(id, _)| id))
+                .chain(top_bet_loss.map(|(id, _)| id))
+                .chain(streaks.iter().map(|(id, _)| *id))
+                .collect::<Vec<_>>();
+            // Players without a readable name are left out rather than shown
+            // as an ID or a placeholder.
+            let names = resolve_guild_player_names(discord.as_ref(), guild_id, &ids).await;
+            let named = |ids: &[i64]| {
+                ids.iter()
+                    .filter_map(|id| names.cached_name(*id))
+                    .collect::<Vec<_>>()
+            };
+            let standout = standout.and_then(|id| names.cached_name(id));
+            let facts = HypeFacts {
+                winning_side: if radiant_won { "Radiant" } else { "Dire" }.to_owned(),
+                winners: named(&winner_ids),
+                losers: named(&loser_ids),
+                winner_win_probability: recorded
+                    .debrief
+                    .as_ref()
+                    .and_then(|debrief| debrief.expected_win_prob),
+                standout_rating_gain: standout
+                    .as_ref()
+                    .and(recorded.debrief.as_ref())
+                    .and_then(|debrief| debrief.rating_change),
+                standout,
+                top_bet_win: top_bet_win
+                    .and_then(|(id, payout)| Some((names.cached_name(id)?, payout))),
+                top_bet_loss: top_bet_loss
+                    .and_then(|(id, amount)| Some((names.cached_name(id)?, amount))),
+                streaks: streaks
+                    .iter()
+                    .filter_map(|(id, streak)| Some((names.cached_name(*id)?, *streak)))
+                    .collect(),
+            };
+            let seed = recorded.match_id.unsigned_abs();
+            let Ok(line) = tokio::task::spawn_blocking(move || hype.hype(&facts, seed)).await
+            else {
+                return;
+            };
+            if let Err(error) = discord
+                .send_message(
+                    channel,
+                    DiscordMessage::silent(InteractionResponse::message(line).without_mentions()),
+                )
+                .await
+            {
+                warn!(%error, match_id = recorded.match_id, "post-game message delivery failed");
+            }
+        });
     }
 
     /// Send the persisted result chunks to one destination. Per-chunk markers

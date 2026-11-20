@@ -406,6 +406,7 @@ not read from the environment.
 - `AI_MODEL` - LiteLLM model identifier (`provider/model`)
 - `AI_FEATURES_ENABLED` - Default AI setting for guilds without an explicit override (default: False)
 - `DIG_LLM_ENABLED` - Process-wide hard kill switch for Dig LLM requests (default: True; restart required)
+- `FLAVOR_LLM_ENABLED` - Process-wide switch for model-written lobby pleas, post-game messages, Neon terminal text, and bankruptcy/loan roasts whenever an AI key is configured; prewritten text is used when off (default: True; restart required)
 
 Without an `AI_MODEL` override, startup selects `groq/qwen/qwen3.6-27b` when a Groq key is present; otherwise it selects the Cerebras fallback, `cerebras/gemma-4-31b`. This is startup selection, not runtime failover: failed Groq requests are not retried on Cerebras. Cerebras access is free-trial and quota-limited.
 

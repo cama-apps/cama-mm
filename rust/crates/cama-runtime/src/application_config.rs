@@ -99,6 +99,9 @@ pub struct Values {
     pub bomb_pot_participation_bonus: i64,
     pub calibration_rd_threshold: f64,
     pub dig_llm_enabled: bool,
+    /// Process-wide switch for model-written lobby pleas, post-game messages,
+    /// Neon terminal text and bankruptcy/loan roasts. Off means prewritten text.
+    pub flavor_llm_enabled: bool,
     pub disburse_min_fund: i64,
     pub dota_bet_seed_amount: i64,
     pub double_or_nothing_cooldown_seconds: i64,
@@ -441,6 +444,7 @@ impl ApplicationConfig {
                 bomb_pot_participation_bonus: p.i64("BOMB_POT_PARTICIPATION_BONUS", 5),
                 calibration_rd_threshold: p.f64("CALIBRATION_RD_THRESHOLD", 100.0),
                 dig_llm_enabled: p.bool("DIG_LLM_ENABLED", true),
+                flavor_llm_enabled: p.bool("FLAVOR_LLM_ENABLED", true),
                 disburse_min_fund: p.i64("DISBURSE_MIN_FUND", 250),
                 dota_bet_seed_amount: p.i64("DOTA_BET_SEED_AMOUNT", 50),
                 double_or_nothing_cooldown_seconds: p
@@ -771,6 +775,7 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
     keys.extend([
         "CAMA_GATEWAY_RECONNECT_INITIAL_SECONDS",
         "CAMA_GATEWAY_RECONNECT_MAX_SECONDS",
+        "FLAVOR_LLM_ENABLED",
         "GAMBA_SYNTHETIC_MEMBERS_ENABLED",
         "OPENDOTA_API_KEY",
     ]);
@@ -1085,6 +1090,21 @@ mod tests {
     fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
         assert_eq!(catalog.len(), 158, "catalog entries must remain unique");
+    }
+
+    #[test]
+    fn flavor_llm_switch_defaults_on_and_can_be_turned_off() {
+        assert!(
+            parse(&[("DISCORD_BOT_TOKEN", "token")])
+                .values
+                .flavor_llm_enabled
+        );
+        assert!(
+            !parse(&[("DISCORD_BOT_TOKEN", "token"), ("FLAVOR_LLM_ENABLED", "no")])
+                .values
+                .flavor_llm_enabled
+        );
+        assert!(all_runtime_env_keys().contains(&"FLAVOR_LLM_ENABLED"));
     }
 
     #[test]

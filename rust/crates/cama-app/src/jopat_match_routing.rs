@@ -4,7 +4,7 @@ use crate::jopat_post_match::{JopatPostMatchContext, NumericFact};
 use crate::neon_degen::GifAsset;
 use crate::post_match_gif_media::render_post_match_gif;
 
-pub const POST_MATCH_GIF_CHANCE: f64 = 0.20;
+pub const POST_MATCH_GIF_CHANCE: f64 = 0.50;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePortError(pub String);

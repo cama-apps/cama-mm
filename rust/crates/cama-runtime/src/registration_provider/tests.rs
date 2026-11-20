@@ -76,6 +76,7 @@ struct MockDiscordState {
     direct_messages: Vec<(u64, DiscordMessage)>,
     direct_edits: Vec<(DiscordMessageReceipt, DiscordMessage)>,
     channel_messages: Vec<(u64, DiscordMessage)>,
+    message_edits: Vec<(u64, u64, DiscordMessage)>,
     channels: BTreeSet<(u64, u64)>,
     members: BTreeMap<(u64, u64), DiscordGuildMemberSnapshot>,
     server_nicknames: BTreeMap<(u64, u64), Option<String>>,
@@ -184,10 +185,15 @@ impl DiscordTransport for MockDiscord {
 
     async fn edit_message(
         &self,
-        _channel_id: u64,
-        _message_id: u64,
-        _message: DiscordMessage,
+        channel_id: u64,
+        message_id: u64,
+        message: DiscordMessage,
     ) -> Result<(), String> {
+        self.state
+            .lock()
+            .expect("Discord state")
+            .message_edits
+            .push((channel_id, message_id, message));
         Ok(())
     }
 
@@ -2392,4 +2398,304 @@ async fn test_curfew_add_rejects_retired_modes() {
 
         assert!(content.contains("Unknown curfew mode"), "{mode}: {content}");
     }
+}
+
+const PLEA_JOIN_NS: i64 = 1_773_172_800_000_000_000; // 2026-03-10T20:00:00Z
+
+fn plea_join(player_count: usize) -> ConfirmedLobbyJoin {
+    ConfirmedLobbyJoin {
+        joined_at_ns: PLEA_JOIN_NS,
+        ..confirmed_join(1, player_count, 10)
+    }
+}
+
+fn record_match_at(database: &NamedTempFile, match_date: &str) {
+    Connection::open(database.path())
+        .expect("open registration database")
+        .execute(
+            "INSERT INTO matches (team1_players, team2_players, winning_team, match_date, guild_id)
+             VALUES ('[1]', '[2]', 1, ?1, 42)",
+            params![match_date],
+        )
+        .expect("seed recorded match");
+}
+
+fn rally_embed() -> crate::registration::InteractionEmbed {
+    crate::registration::InteractionEmbed::titled("Almost Ready!").description("8 players in")
+}
+
+fn rally_receipt() -> DiscordMessageReceipt {
+    DiscordMessageReceipt {
+        channel_id: 72,
+        message_id: 900,
+        jump_url: String::new(),
+    }
+}
+
+async fn plea_edits(discord: &MockDiscord, expected: usize) -> Vec<(u64, u64, DiscordMessage)> {
+    for _ in 0..1_000 {
+        let edits = discord
+            .state
+            .lock()
+            .expect("Discord state")
+            .message_edits
+            .clone();
+        if edits.len() >= expected {
+            return edits;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the lobby plea was never edited into the rally");
+}
+
+fn plea_line(edit: &DiscordMessage) -> String {
+    edit.response.embeds[0]
+        .description
+        .as_deref()
+        .and_then(|description| description.split_once("\n\n> "))
+        .map(|(_, line)| line.to_owned())
+        .expect("rally description carries a plea")
+}
+
+fn is_prewritten_plea(line: &str) -> bool {
+    (0..1_000).any(|seed| {
+        QueueHype::new(None).plea(
+            &PleaFacts {
+                lobby: "All You Can Feed".to_owned(),
+                players_in: 8,
+                players_needed: 2,
+                names: Vec::new(),
+            },
+            seed,
+        ) == line
+    })
+}
+
+#[test]
+fn first_game_of_day_changes_at_four_am_fixed_pst() {
+    let at = cama_db::core_repositories::parse_sql_datetime;
+    assert!(is_first_game_of_day(None, PLEA_JOIN_NS));
+    // 13:00Z is 05:00 fixed PST on the join's game day.
+    assert!(!is_first_game_of_day(
+        at("2026-03-10T13:00:00+00:00"),
+        PLEA_JOIN_NS
+    ));
+    // 11:00Z is 03:00 fixed PST, still the previous game day.
+    assert!(is_first_game_of_day(
+        at("2026-03-10T11:00:00+00:00"),
+        PLEA_JOIN_NS
+    ));
+    assert!(!is_first_game_of_day(
+        at("2026-03-10 13:00:00"),
+        PLEA_JOIN_NS
+    ));
+}
+
+#[tokio::test]
+async fn rally_gains_a_plea_before_the_first_game_of_the_day() {
+    let database = database();
+    record_match_at(&database, "2026-03-09T20:00:00+00:00");
+    let server = RouteServer::start(Vec::new());
+    let discord = Arc::new(MockDiscord::default());
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        discord.clone(),
+        config(),
+    );
+    provider
+        .attach_queue_hype(Arc::new(QueueHype::new(None)))
+        .expect("attach queue hype");
+
+    provider
+        .lobby_join_observer()
+        .confirmed_lobby_join(plea_join(8))
+        .await
+        .expect("deliver lobby rally");
+
+    let edits = plea_edits(&discord, 1).await;
+    let (channel, message, edit) = &edits[0];
+    assert_eq!((*channel, *message), (72, 1), "the rally itself is edited");
+    assert_eq!(
+        edit.content_mode,
+        crate::discord_transport::DiscordMessageContentMode::Preserve,
+        "the subscriber mentions stay as sent"
+    );
+    assert_eq!(
+        edit.allowed_mentions,
+        crate::discord_transport::DiscordAllowedMentions::None
+    );
+    assert!(
+        edit.response.embeds[0]
+            .description
+            .as_deref()
+            .is_some_and(|description| description
+                .starts_with("All You Can Feed has **8** players — just **+2** more needed!"))
+    );
+    assert!(is_prewritten_plea(&plea_line(edit)));
+    assert_eq!(
+        discord
+            .state
+            .lock()
+            .expect("Discord state")
+            .channel_messages
+            .len(),
+        2,
+        "the plea adds no message of its own"
+    );
+}
+
+#[tokio::test]
+async fn rally_has_no_plea_once_a_game_was_recorded_today() {
+    let database = database();
+    record_match_at(&database, "2026-03-10T13:00:00+00:00");
+    let discord = Arc::new(MockDiscord::default());
+    let ai = crate::test_support::ScriptedAi::replying("Join already.");
+
+    add_first_game_plea(
+        Arc::new(QueueHype::new(Some(ai.service()))),
+        MatchRepository::new(database.path()),
+        discord.clone(),
+        plea_join(8),
+        2,
+        rally_receipt(),
+        rally_embed(),
+    )
+    .await;
+
+    assert!(ai.requests().is_empty());
+    assert!(
+        discord
+            .state
+            .lock()
+            .expect("Discord state")
+            .message_edits
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn plea_is_model_written_from_readable_names() {
+    let database = database();
+    let discord = Arc::new(MockDiscord::default());
+    discord.set_member(42, 1, "Alpha");
+    discord.set_member(42, 2, "Bravo");
+    let ai = crate::test_support::ScriptedAi::replying("Alpha is begging. Join.");
+
+    add_first_game_plea(
+        Arc::new(QueueHype::new(Some(ai.service()))),
+        MatchRepository::new(database.path()),
+        discord.clone(),
+        plea_join(8),
+        2,
+        rally_receipt(),
+        rally_embed(),
+    )
+    .await;
+
+    let edits = discord
+        .state
+        .lock()
+        .expect("Discord state")
+        .message_edits
+        .clone();
+    assert_eq!(edits.len(), 1);
+    assert_eq!((edits[0].0, edits[0].1), (72, 900));
+    assert_eq!(
+        edits[0].2.response.embeds[0].description.as_deref(),
+        Some("8 players in\n\n> Alpha is begging. Join.")
+    );
+    let requests = ai.requests();
+    let prompt = &requests[0].messages[1].content;
+    assert!(
+        prompt.contains("Players in: 8 of 10\nStill needed: 2\nAlready in: Alpha, Bravo\n"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("<@") && !prompt.contains("Unknown player"));
+}
+
+#[tokio::test]
+async fn plea_falls_back_to_a_prewritten_line_when_the_model_fails() {
+    let database = database();
+    let discord = Arc::new(MockDiscord::default());
+    let ai = crate::test_support::ScriptedAi::failing();
+
+    add_first_game_plea(
+        Arc::new(QueueHype::new(Some(ai.service()))),
+        MatchRepository::new(database.path()),
+        discord.clone(),
+        plea_join(8),
+        2,
+        rally_receipt(),
+        rally_embed(),
+    )
+    .await;
+
+    assert_eq!(ai.requests().len(), 1);
+    let edits = discord
+        .state
+        .lock()
+        .expect("Discord state")
+        .message_edits
+        .clone();
+    assert!(is_prewritten_plea(&plea_line(&edits[0].2)));
+}
+
+#[tokio::test]
+async fn a_slow_model_does_not_delay_the_rally() {
+    let database = database();
+    let server = RouteServer::start(Vec::new());
+    let discord = Arc::new(MockDiscord::default());
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        discord.clone(),
+        config(),
+    );
+    let ai = crate::test_support::ScriptedAi::held("Get in here.");
+    provider
+        .attach_queue_hype(Arc::new(QueueHype::new(Some(ai.service()))))
+        .expect("attach queue hype");
+
+    provider
+        .lobby_join_observer()
+        .confirmed_lobby_join(plea_join(9))
+        .await
+        .expect("deliver lobby rally");
+
+    {
+        let state = discord.state.lock().expect("Discord state");
+        assert_eq!(
+            state.channel_messages.len(),
+            2,
+            "the rally and its thread line are already sent"
+        );
+        assert!(state.message_edits.is_empty(), "the model is still held");
+    }
+    ai.release();
+    let edits = plea_edits(&discord, 1).await;
+    assert_eq!(plea_line(&edits[0].2), "Get in here.");
+}
+
+#[tokio::test]
+async fn rally_is_unchanged_without_queue_hype() {
+    let database = database();
+    let server = RouteServer::start(Vec::new());
+    let discord = Arc::new(MockDiscord::default());
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        discord.clone(),
+        config(),
+    );
+
+    provider
+        .lobby_join_observer()
+        .confirmed_lobby_join(plea_join(8))
+        .await
+        .expect("deliver lobby rally");
+
+    let state = discord.state.lock().expect("Discord state");
+    assert_eq!(state.channel_messages.len(), 2);
+    assert!(state.message_edits.is_empty());
 }

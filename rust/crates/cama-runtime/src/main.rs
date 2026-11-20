@@ -769,6 +769,24 @@ async fn run_serve() -> ExitCode {
         error!(%error, "match/betting flavor composition refused startup");
         return ExitCode::from(1);
     }
+    // Model-written flavor needs both a configured provider key and the
+    // process switch; without either, prewritten text is posted instead.
+    let flavor_ai = production_ai_service
+        .clone()
+        .filter(|_| application_config.values.flavor_llm_enabled);
+    info!(
+        model_written = flavor_ai.is_some(),
+        provider_configured = production_ai_service.is_some(),
+        "flavor text source selected"
+    );
+    let queue_hype = Arc::new(cama_app::queue_hype::QueueHype::new(flavor_ai.clone()));
+    if let Err(error) = match_provider
+        .attach_queue_hype(Arc::clone(&queue_hype))
+        .and_then(|()| registration_provider.attach_queue_hype(queue_hype))
+    {
+        error!(%error, "queue hype composition refused startup");
+        return ExitCode::from(1);
+    }
     let draft_provider = match DraftRegistrationProvider::new_with_reminder_scheduler_and_neon(
         &config.db_path,
         &application_config,

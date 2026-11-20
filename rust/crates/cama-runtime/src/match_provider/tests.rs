@@ -9898,3 +9898,294 @@ async fn record_pending_selector_is_admin_only_and_scoped_to_the_current_guild()
     assert_eq!(selector.kind, CommandOptionKind::Integer);
     assert_eq!(selector.min_integer, Some(1));
 }
+
+fn hype_match_id(posts: bool) -> i64 {
+    (1..)
+        .find(|match_id| should_post_hype(*match_id) == posts)
+        .expect("a match id on each side of the post-game roll")
+}
+
+fn hype_pending(fixture: &MatchRuntimeFixture) -> PendingMatchRecord {
+    let pending = fixture.pending(unix_seconds() + 120);
+    PendingMatchRepository::new(fixture.database.path())
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            state.thread_shuffle_thread_id = Some(555)
+        })
+        .unwrap()
+        .unwrap()
+        .0
+}
+
+fn reload_pending(
+    fixture: &MatchRuntimeFixture,
+    pending: &PendingMatchRecord,
+) -> PendingMatchRecord {
+    PendingMatchRepository::new(fixture.database.path())
+        .pending_match(GUILD, pending.pending_match_id)
+        .unwrap()
+        .expect("pending match still exists")
+}
+
+fn hype_recorded(match_id: i64) -> RecordedMatch {
+    RecordedMatch {
+        match_id,
+        jc_lines: Vec::new(),
+        bet_settlement: Some(MatchBetSettlementRequest {
+            guild_id: GUILD,
+            match_id,
+            channel_id: None,
+            participants: vec![
+                MatchBetSettlementParticipant {
+                    discord_id: 81_101,
+                    amount: 100,
+                    leverage: 1,
+                    balance_after: 400,
+                    payout: 300,
+                    won: true,
+                    refunded: false,
+                },
+                MatchBetSettlementParticipant {
+                    discord_id: 81_106,
+                    amount: 250,
+                    leverage: 1,
+                    balance_after: 0,
+                    payout: 0,
+                    won: false,
+                    refunded: false,
+                },
+                MatchBetSettlementParticipant {
+                    discord_id: 81_107,
+                    amount: 900,
+                    leverage: 1,
+                    balance_after: 900,
+                    payout: 0,
+                    won: false,
+                    refunded: true,
+                },
+            ],
+        }),
+        easter_eggs: MatchEasterEggRequest {
+            guild_id: GUILD,
+            match_id,
+            win_streak_records: vec![WinStreakRecord {
+                discord_id: 81_102,
+                current_streak: 6,
+                previous_best: 5,
+            }],
+            ..MatchEasterEggRequest::default()
+        },
+        debrief: Some(MatchPostMatchDebriefRequest {
+            guild_id: GUILD,
+            match_id,
+            channel_id: None,
+            winner_id: Some(81_100),
+            loser_id: None,
+            payout: 0,
+            loss: 0,
+            leverage: 1,
+            rating_change: Some(18.4),
+            expected_win_prob: Some(0.38),
+        }),
+    }
+}
+
+fn name_hype_players(discord: &PublicationProbeDiscord) {
+    // 81_109 stays unnamed: a player without a readable name is left out.
+    for id in 81_100_u64..81_109 {
+        discord.set_member(GUILD as u64, id, &format!("Player{}", id - 81_100));
+    }
+}
+
+#[tokio::test]
+async fn post_game_message_is_posted_once_in_the_main_channel_without_pings() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    name_hype_players(&discord);
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let ai = crate::test_support::ScriptedAi::replying("Player5 threw. Rematch.");
+    fixture
+        .provider
+        .attach_queue_hype(Arc::new(QueueHype::new(Some(ai.service()))))
+        .unwrap();
+    let pending = hype_pending(&fixture);
+    let recorded = hype_recorded(hype_match_id(true));
+
+    fixture
+        .provider
+        .handler
+        .spawn_queue_hype(&pending, "radiant", &recorded)
+        .await;
+    wait_for_sent(&discord, 1).await;
+    // A recovery re-run reloads the pending match and finds the claim.
+    fixture
+        .provider
+        .handler
+        .spawn_queue_hype(&reload_pending(&fixture, &pending), "radiant", &recorded)
+        .await;
+
+    let sent = discord.sent_messages();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, 77_001, "main channel, not the match thread");
+    assert_eq!(sent[0].1.response.content, "Player5 threw. Rematch.");
+    assert_eq!(sent[0].1.allowed_mentions, DiscordAllowedMentions::None);
+    let requests = ai.requests();
+    assert_eq!(requests.len(), 1);
+    let prompt = &requests[0].messages[1].content;
+    for fact in [
+        "Result: Radiant won.",
+        "Winners: Player0, Player1, Player2, Player3, Player4\n",
+        "Losers: Player5, Player6, Player7, Player8\n",
+        "winning team: 38%",
+        "Standout winner: Player0 (+18 rating)",
+        "Biggest bet payout: Player1 (300 jopacoin)",
+        "Biggest bet lost: Player6 (250 jopacoin)",
+        "win streak: Player2 (6 in a row)",
+    ] {
+        assert!(prompt.contains(fact), "prompt is missing {fact}: {prompt}");
+    }
+    assert!(!prompt.contains("81_1") && !prompt.contains("811"));
+    assert!(!prompt.contains("Unknown player") && !prompt.contains("<@"));
+}
+
+#[tokio::test]
+async fn post_game_message_falls_back_to_a_prewritten_line() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    name_hype_players(&discord);
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let ai = crate::test_support::ScriptedAi::failing();
+    fixture
+        .provider
+        .attach_queue_hype(Arc::new(QueueHype::new(Some(ai.service()))))
+        .unwrap();
+    let pending = hype_pending(&fixture);
+
+    fixture
+        .provider
+        .handler
+        .spawn_queue_hype(&pending, "dire", &hype_recorded(hype_match_id(true)))
+        .await;
+    wait_for_sent(&discord, 1).await;
+
+    assert_eq!(ai.requests().len(), 1);
+    let sent = discord.sent_messages();
+    let line = &sent[0].1.response.content;
+    assert!(
+        !line.is_empty() && !line.contains('{') && !line.contains("<@"),
+        "{line}"
+    );
+    assert_eq!(sent[0].1.allowed_mentions, DiscordAllowedMentions::None);
+}
+
+#[tokio::test]
+async fn post_game_message_is_skipped_for_some_matches_and_never_sent_to_the_thread() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let pending = hype_pending(&fixture);
+    let handler = &fixture.provider.handler;
+
+    // Nothing attached: no message and no claim.
+    handler
+        .spawn_queue_hype(&pending, "radiant", &hype_recorded(hype_match_id(true)))
+        .await;
+    fixture
+        .provider
+        .attach_queue_hype(Arc::new(QueueHype::new(None)))
+        .unwrap();
+    // A match that fails the roll.
+    handler
+        .spawn_queue_hype(&pending, "radiant", &hype_recorded(hype_match_id(false)))
+        .await;
+    // Only the match thread is known.
+    let thread_only = PendingMatchRepository::new(fixture.database.path())
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            state.origin_channel_id = Some(555)
+        })
+        .unwrap()
+        .unwrap()
+        .0;
+    handler
+        .spawn_queue_hype(&thread_only, "radiant", &hype_recorded(hype_match_id(true)))
+        .await;
+
+    assert!(
+        !reload_pending(&fixture, &pending)
+            .state
+            .extra
+            .contains_key(QUEUE_HYPE_CLAIM_KEY)
+    );
+    assert!(discord.sent_messages().is_empty());
+}
+
+#[tokio::test]
+async fn recording_a_match_posts_the_post_game_message_once_across_recovery() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    discord.fail_sends_to([555]);
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let ai = crate::test_support::ScriptedAi::replying("Run it back.");
+    fixture
+        .provider
+        .attach_queue_hype(Arc::new(QueueHype::new(Some(ai.service()))))
+        .unwrap();
+    let connection = Connection::open(fixture.database.path()).unwrap();
+    let mut next_match_id = 1;
+    while !should_post_hype(next_match_id) {
+        connection
+            .execute(
+                "INSERT INTO matches (team1_players, team2_players, guild_id)
+                 VALUES ('[]', '[]', 999)",
+                [],
+            )
+            .unwrap();
+        next_match_id += 1;
+    }
+    let pending = hype_pending(&fixture);
+    fixture
+        .provider
+        .handler
+        .finalize_record(
+            pending.clone(),
+            record_context(1, GUILD, "radiant", true),
+            Arc::new(RecordingMatchResponder::default()),
+            "radiant",
+            0,
+            0,
+            0,
+            None,
+        )
+        .await
+        .expect_err("failed result delivery retains retry work");
+    assert!(
+        ai.requests().is_empty(),
+        "the message waits for the result to be delivered"
+    );
+    assert_eq!(
+        recorded_match_id_for_pending(&fixture, pending.pending_match_id),
+        next_match_id
+    );
+
+    discord.failed_send_channels.lock().unwrap().clear();
+    fixture
+        .provider
+        .handler
+        .recover_pending_match(reload_pending(&fixture, &pending))
+        .await
+        .unwrap();
+
+    let hype = || {
+        discord
+            .sent_messages()
+            .into_iter()
+            .filter(|(_, message)| message.response.content == "Run it back.")
+            .collect::<Vec<_>>()
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while hype().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("post-game message sent after recovery");
+    let hype = hype();
+    assert_eq!(hype.len(), 1);
+    assert_eq!(hype[0].0, 77_001);
+    assert_eq!(ai.requests().len(), 1);
+}
