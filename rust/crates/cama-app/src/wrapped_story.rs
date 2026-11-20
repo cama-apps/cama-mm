@@ -11,6 +11,8 @@ include!("wrapped_story/flavor_catalog.rs");
 pub mod chapters;
 #[path = "wrapped_story/personal_moments.rs"]
 mod personal_moments;
+#[path = "wrapped_story/personal_patch.rs"]
+pub mod personal_patch;
 #[path = "wrapped_story/roast_pools.rs"]
 pub mod roast_pools;
 pub use personal_moments::{

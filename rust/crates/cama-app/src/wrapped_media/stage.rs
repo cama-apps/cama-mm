@@ -261,6 +261,13 @@ pub(super) fn palette(theme: WrappedTheme) -> Palette {
     let (bg, fg, accent, soft, on_accent) = match theme {
         WrappedTheme::Plain => (CREAM, INK, VIOLET, CREAM, CREAM),
         WrappedTheme::Cover => (VIOLET, CREAM, LIME, Rgba::rgb(118, 66, 250), INK),
+        WrappedTheme::Patch => (
+            Rgba::rgb(24, 42, 54),
+            Rgba::rgb(238, 232, 216),
+            Rgba::rgb(217, 182, 114),
+            Rgba::rgb(34, 55, 67),
+            Rgba::rgb(24, 42, 54),
+        ),
         WrappedTheme::Queue => (COBALT, CREAM, LIME, Rgba::rgb(60, 70, 240), INK),
         WrappedTheme::QueueAlt => (LIME, INK, COBALT, Rgba::rgb(174, 224, 34), CREAM),
         WrappedTheme::Heroes => (
@@ -874,6 +881,7 @@ mod tests {
         for theme in [
             WrappedTheme::Plain,
             WrappedTheme::Cover,
+            WrappedTheme::Patch,
             WrappedTheme::Queue,
             WrappedTheme::QueueAlt,
             WrappedTheme::Heroes,

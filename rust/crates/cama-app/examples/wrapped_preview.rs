@@ -1,5 +1,5 @@
 //! Export deterministic Wrapped artwork for visual review.
-//! `cargo run -p cama-app --example wrapped_preview -- <output-directory> [--still]`
+//! `cargo run -p cama-app --example wrapped_preview -- <output-directory> [--still] [--patch-only]`
 //!
 //! Every name and number here is invented. The deck follows the order
 //! `/wrapped` sends it in and takes its jokes from the real copy pools, then
@@ -11,13 +11,15 @@ use cama_app::wrapped_media::{
     WrappedArtwork, WrappedBeat, WrappedLayout, WrappedPunch, WrappedRow, WrappedSlideData,
     WrappedTheme, render_wrapped_media, render_wrapped_slide,
 };
+use cama_app::wrapped_story::personal_patch::{BalanceDirection, personal_patch};
 use cama_app::wrapped_story::roast_pools::{
     CopyVars, Punch, StoryCopy, hero_copy, people_copy, persona_title, record_copy, side_game_copy,
     story_copy,
 };
 use cama_domain::wrapped_activity::ServerRank;
 use cama_domain::wrapped_distinct::{
-    Direction, DistinctStory, HeroLine, PairStory, PersonalRecord, TableEnd, Theme, Tier,
+    Direction, DistinctMatch, DistinctStory, HeroLine, PairStory, PersonalRecord, TableEnd, Theme,
+    Tier,
 };
 use std::path::PathBuf;
 use std::time::Instant;
@@ -483,9 +485,11 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     let mut deck = Vec::new();
 
     let mut intro = card("story_intro", "Your year");
-    intro.headline = "Your\n2026\nWrapped".to_owned();
+    intro.theme = WrappedTheme::Patch;
+    intro.headline = "Your\n2026\npatch notes".to_owned();
     intro.stat_value = PLAYER.to_owned();
     deck.push(intro);
+    deck.extend(patch_gallery());
 
     let mut games = styled(
         "story_games",
@@ -581,6 +585,91 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     deck
 }
 
+/// Signed changes, a long profile, a sparse history, and an earned superlative.
+fn patch_gallery() -> Vec<WrappedSlideData> {
+    let mut changes = card("story_patch", "Balance changes");
+    changes.headline = "You got\npatched.".to_owned();
+    changes.rows = rows(&[
+        (
+            "Buff: Gold income",
+            "400 to 650 GPM\nFirst 6 vs last 6 dated games.",
+        ),
+        (
+            "Nerf: Deaths",
+            "7.1 to 9.2 deaths/game\nFirst 6 vs last 6 dated games.",
+        ),
+        (
+            "Buff: Win rate",
+            "50% to 83%\nFirst 6 vs last 6 dated games.",
+        ),
+    ]);
+    changes.rows[0].value = 1.0;
+    changes.rows[1].value = -1.0;
+    changes.rows[2].value = 1.0;
+    changes.lines = lines(&["Perfectly balanced. Allegedly."]);
+
+    let mut long = changes.clone();
+    long.kind = "story_patch_long".to_owned();
+    long.username = "Alexandria the Unreasonably Determined".to_owned();
+    let matches = (1..=12)
+        .map(|id| DistinctMatch {
+            match_id: id,
+            discord_id: 7,
+            finished_at: Some(id * 86_400),
+            gpm: (!matches!(id, 1 | 12)).then_some(if id <= 6 { 400 } else { 650 }),
+            deaths: Some(if id <= 6 { 8 } else { 4 }),
+            wards: Some(if id <= 6 { 3 } else { 8 }),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    long.rows = personal_patch(&matches, 7)
+        .changes
+        .into_iter()
+        .map(|change| {
+            let (label, sign) = match change.direction {
+                BalanceDirection::Buff => ("Buff", 1.0),
+                BalanceDirection::Nerf => ("Nerf", -1.0),
+            };
+            let mut row = WrappedRow::new(
+                format!("{label}: {}", change.title),
+                format!("{}\n{}", change.value, change.evidence),
+            );
+            row.value = sign;
+            row
+        })
+        .collect();
+    long.lines = lines(&["Nerfs postponed. Enjoy responsibly."]);
+
+    let mut sparse = card("story_patch_sparse", "Balance changes");
+    sparse.layout = WrappedLayout::PatchNotes;
+    sparse.theme = WrappedTheme::Patch;
+    sparse.headline = "You got\npatched.".to_owned();
+    sparse.username = "New arrival".to_owned();
+    sparse.rows = rows(&[(
+        "Buff: Gold income",
+        "400 to 450 GPM\nFirst 5 vs last 5 dated games.",
+    )]);
+    sparse.rows[0].value = 1.0;
+    sparse.lines = lines(&["Nerfs postponed. Enjoy responsibly."]);
+
+    let mut medal = styled(
+        "story_patch_award",
+        "Please remain\nseated",
+        WrappedLayout::Award,
+        WrappedTheme::Patch,
+    );
+    medal.stat_value = "17 games".to_owned();
+    medal.stat_label =
+        "60+ stun seconds and 20+ assists in 17 of 48 games with the required data recorded."
+            .to_owned();
+    let mut alternate = medal.clone();
+    alternate.theme = WrappedTheme::Awards;
+    alternate.title = "Side selection\ndisabled".to_owned();
+    alternate.stat_value = "67% Radiant · 80% Dire".to_owned();
+    alternate.stat_label = "Won 4/6 on Radiant and 4/5 on Dire; known results only.".to_owned();
+    vec![changes, long, sparse, medal, alternate]
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = PathBuf::from(
         std::env::args_os()
@@ -588,9 +677,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("provide an output directory")?,
     );
     let still_only = std::env::args().any(|argument| argument == "--still");
+    let patch_only = std::env::args().any(|argument| argument == "--patch-only");
     std::fs::create_dir_all(&output)?;
     let assets = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets");
     for (index, slide) in deck(assets).iter().enumerate() {
+        if patch_only && slide.theme != WrappedTheme::Patch && slide.kind != "story_patch_award" {
+            continue;
+        }
         let stem = format!("{index:02}-{}", slide.kind);
         std::fs::write(
             output.join(format!("{stem}.png")),

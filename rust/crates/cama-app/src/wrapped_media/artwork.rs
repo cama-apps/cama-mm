@@ -28,6 +28,17 @@ fn battlefield() -> Option<&'static DecodedPng> {
         .as_ref()
 }
 
+fn patch_courier() -> Option<&'static DecodedPng> {
+    static IMAGE: OnceLock<Option<DecodedPng>> = OnceLock::new();
+    IMAGE
+        .get_or_init(|| {
+            decode_png(include_bytes!(
+                "../../../../../assets/wrapped/patch-courier.png"
+            ))
+        })
+        .as_ref()
+}
+
 fn character(kind: WrappedArtwork) -> Option<&'static DecodedPng> {
     static WARD: OnceLock<Option<DecodedPng>> = OnceLock::new();
     static COURIER: OnceLock<Option<DecodedPng>> = OnceLock::new();
@@ -45,6 +56,9 @@ fn character(kind: WrappedArtwork) -> Option<&'static DecodedPng> {
 /// Resample whichever art this card shows, once, before its frames are painted.
 pub(super) fn prepare(slide: &WrappedSlideData) -> Option<PreparedArt> {
     match slide.layout {
+        WrappedLayout::Cover if slide.theme == WrappedTheme::Patch => {
+            patch_courier().map(|image| resample(image, WIDTH as usize, COVER_ART_HEIGHT))
+        }
         WrappedLayout::Cover => battlefield().map(|image| {
             let scale = WIDTH as f32 / image.width as f32;
             let height = ((image.height as f32 * scale) as usize).max(COVER_ART_HEIGHT);
