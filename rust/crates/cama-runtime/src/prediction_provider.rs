@@ -172,12 +172,7 @@ impl ProductionPredictionNeonPort {
         let player_names: Arc<dyn GuildPlayerNameResolver> =
             Arc::new(DiscordGuildPlayerNameResolver::new(Arc::clone(&discord)));
         Self {
-            neon_llm: NeonLlm::production(
-                database_path.as_ref(),
-                config,
-                ai,
-                Arc::clone(&player_names),
-            ),
+            neon_llm: NeonLlm::production(database_path.as_ref(), ai, Arc::clone(&player_names)),
             config: PredictionNeonConfig::from_application_config(config),
             cooldowns: Arc::new(Mutex::new(BTreeMap::new())),
             discord,

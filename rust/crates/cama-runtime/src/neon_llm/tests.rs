@@ -43,31 +43,15 @@ fn canned() -> String {
     ansi_block("[LEDGER] Client: Alice\nBalance: -40 JC")
 }
 
-fn config(values: &[(&str, &str)]) -> ApplicationConfig {
-    let values = values
-        .iter()
-        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    ApplicationConfig::from_lookup(|key| values.get(key).cloned()).expect("valid config")
-}
-
 #[tokio::test]
-async fn neon_llm_needs_an_ai_service_and_the_switch() {
+async fn neon_llm_needs_an_ai_service() {
     let ai = ScriptedAi::replying("ok");
-    let on = config(&[("DISCORD_BOT_TOKEN", "token")]);
-    let off = config(&[("DISCORD_BOT_TOKEN", "token"), ("FLAVOR_LLM_ENABLED", "no")]);
-    let production = |config: &ApplicationConfig, ai: Option<Arc<AIService>>| {
-        NeonLlm::production(
-            "unused.db",
-            config,
-            ai,
-            Arc::new(DiscordIdPlayerNameResolver),
-        )
+    let production = |ai: Option<Arc<AIService>>| {
+        NeonLlm::production("unused.db", ai, Arc::new(DiscordIdPlayerNameResolver))
     };
 
-    assert!(production(&on, Some(ai.service())).is_some());
-    assert!(production(&on, None).is_none());
-    assert!(production(&off, Some(ai.service())).is_none());
+    assert!(production(Some(ai.service())).is_some());
+    assert!(production(None).is_none());
 }
 
 #[tokio::test]

@@ -14,7 +14,6 @@ use cama_app::ai_services::{
 };
 use cama_app::neon_degen::{ansi_block, sanitize_llm_terminal_text};
 
-use crate::ApplicationConfig;
 use crate::discord_transport::GuildPlayerNameResolver;
 use crate::match_provider::ProductionBettingPlayerContext;
 
@@ -35,17 +34,15 @@ pub struct NeonLlm {
 }
 
 impl NeonLlm {
-    /// `None` when no AI service is configured or `FLAVOR_LLM_ENABLED` is off.
+    /// `None` when no AI service is configured.
     #[must_use]
     pub fn production(
         database_path: impl AsRef<Path>,
-        config: &ApplicationConfig,
         ai: Option<Arc<AIService>>,
         player_names: Arc<dyn GuildPlayerNameResolver>,
     ) -> Option<Self> {
-        let ai = ai.filter(|_| config.values.flavor_llm_enabled)?;
         Some(Self::new(
-            ai,
+            ai?,
             Arc::new(ProductionBettingPlayerContext::new(
                 database_path,
                 player_names,

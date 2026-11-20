@@ -202,12 +202,8 @@ impl ShopRegistrationProvider {
                 openskill_algorithm_fingerprint: config.migration.openskill.algorithm_fingerprint(),
             },
         );
-        let neon_llm = NeonLlm::production(
-            &path,
-            config,
-            ai_service.clone(),
-            Arc::clone(&player_name_resolver),
-        );
+        let neon_llm =
+            NeonLlm::production(&path, ai_service.clone(), Arc::clone(&player_name_resolver));
         let flavor = ai_service.map(|ai| {
             Arc::new(
                 FlavorTextService::new(
