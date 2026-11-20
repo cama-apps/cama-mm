@@ -266,6 +266,8 @@ pub(super) fn bug_fix_slide(
     let mut slide = base_slide("story_bugfixes", "Bug fixes", username, year_label);
     slide.headline = format!("Resolved during the {year} season.");
     slide.rows = rows;
-    slide.lines.push("No further fixes are planned.".to_owned());
+    slide
+        .lines
+        .push("Thanks to the teammates who reported these.".to_owned());
     Some(slide)
 }

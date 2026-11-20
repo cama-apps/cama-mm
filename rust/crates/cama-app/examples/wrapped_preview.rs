@@ -600,6 +600,7 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     deck.push(finale);
 
     deck.extend(treatment_gallery());
+    deck.extend(measured_chapter_cards());
 
     let count = deck.len();
     for (index, slide) in deck.iter_mut().enumerate() {
@@ -625,6 +626,324 @@ fn section(kind: &str) -> &'static str {
         kind if kind.starts_with("story_bugfixes") => "Bug fixes",
         _ => "",
     }
+}
+
+/// An invented league year: forty-eight games for the player and nine
+/// other players in each, so the measured chapter has medians to stand on.
+fn invented_year() -> Vec<DistinctMatch> {
+    const QUEEN_OF_PAIN: i64 = 39;
+    const PUDGE: i64 = 14;
+    const KEEPER: i64 = 90;
+    let mut games = Vec::new();
+    for id in 1..=48_i64 {
+        let late = id > 24;
+        let hero = match (id % 2 == 0, late) {
+            (true, _) => QUEEN_OF_PAIN,
+            (false, false) => PUDGE,
+            (false, true) => KEEPER,
+        };
+        let won = match hero {
+            QUEEN_OF_PAIN if late => id % 8 != 2,
+            QUEEN_OF_PAIN => id % 8 == 0,
+            PUDGE => matches!(id, 1 | 13),
+            _ => id % 4 == 1,
+        };
+        let (kills, deaths, assists, position) = match hero {
+            QUEEN_OF_PAIN => (11, if late { 4 } else { 7 }, 8, 2),
+            PUDGE => (4, if id == 9 { 19 } else { 9 }, 12, 4),
+            _ => (2, 5, 18, 5),
+        };
+        let mut items = match hero {
+            QUEEN_OF_PAIN => vec![("blink", 1), ("tpscroll", 3), ("tango", 2), ("bottle", 1)],
+            PUDGE => vec![
+                ("blink", 1),
+                ("tango", 4),
+                ("ward_observer", 5),
+                ("smoke_of_deceit", 1),
+                ("tpscroll", 3),
+            ],
+            _ => vec![
+                ("ward_observer", 8),
+                ("ward_sentry", 6),
+                ("tango", 3),
+                ("clarity", 4),
+                ("tpscroll", 3),
+                ("dust", 2),
+            ],
+        };
+        if hero == QUEEN_OF_PAIN && id % 4 == 0 {
+            items.push(("black_king_bar", 1));
+        }
+        if matches!(id, 16 | 40) {
+            items.push(("rapier", 1));
+        }
+        games.push(DistinctMatch {
+            match_id: id,
+            discord_id: 7,
+            side: Some(if (id / 2) % 2 == 0 { "radiant" } else { "dire" }.to_owned()),
+            won: Some(won),
+            // Weekly from early January 2026, a little after one in the morning UTC.
+            finished_at: Some(1_767_661_200 + id * 7 * 86_400 + (id % 3) * 86_400),
+            duration_seconds: Some(if id == 30 {
+                4_260
+            } else {
+                1_500 + (id % 5) * 480
+            }),
+            hero_id: Some(hero),
+            kills: Some(kills),
+            deaths: Some(deaths),
+            assists: Some(assists),
+            last_hits: Some(if hero == QUEEN_OF_PAIN { 260 } else { 40 }),
+            gpm: Some(match hero {
+                QUEEN_OF_PAIN if late => 640,
+                QUEEN_OF_PAIN => 520,
+                _ => 300,
+            }),
+            hero_damage: Some(if hero == QUEEN_OF_PAIN { 28_000 } else { 9_000 }),
+            hero_healing: Some(if hero == KEEPER { 6_400 } else { 0 }),
+            wards: Some(if hero == QUEEN_OF_PAIN { 1 } else { 13 }),
+            camps_stacked: Some(if hero == QUEEN_OF_PAIN { 0 } else { 4 }),
+            rune_pickups: Some(7),
+            stuns: Some(if hero == PUDGE { 70.0 } else { 12.0 }),
+            enriched: true,
+            courier_kills: Some(0),
+            pings: Some(if hero == PUDGE { 61 } else { 24 }),
+            actions_per_min: Some(180.0),
+            rapiers: Some(i64::from(matches!(id, 16 | 40))),
+            buybacks: Some(i64::from(id % 6 == 0)),
+            items: Some(
+                items
+                    .into_iter()
+                    .map(|(key, count)| (key.to_owned(), count))
+                    .collect(),
+            ),
+            comeback: (won && id % 5 == 0).then_some(9_400.0),
+            throw: (!won && id == 22).then_some(14_300.0),
+            expected_win: Some(if id % 3 == 0 { 0.36 } else { 0.62 }),
+            rating_delta: Some(if won { 18.0 } else { -17.0 }),
+            first_blood: Some(hero == QUEEN_OF_PAIN && id % 4 == 0),
+            roshans: Some(i64::from(hero == QUEEN_OF_PAIN && won)),
+            position: Some(position),
+            last_hits_at_10: Some(if hero == QUEEN_OF_PAIN { 62 } else { 9 }),
+            teamfight_participation: Some(if hero == QUEEN_OF_PAIN { 0.84 } else { 0.58 }),
+            net_worth: Some(if hero == QUEEN_OF_PAIN { 24_000 } else { 9_000 }),
+            denies: Some(if hero == QUEEN_OF_PAIN { 13 } else { 2 }),
+            tower_damage: Some(if hero == QUEEN_OF_PAIN { 2_400 } else { 300 }),
+        });
+        for other in 1..=9_i64 {
+            games.push(DistinctMatch {
+                match_id: id,
+                discord_id: 100 + other,
+                side: Some(if other <= 4 { "radiant" } else { "dire" }.to_owned()),
+                won: Some((id + other) % 2 == 0),
+                finished_at: Some(1_767_661_200 + id * 7 * 86_400),
+                duration_seconds: Some(1_500 + (id % 5) * 480),
+                hero_id: Some(other),
+                kills: Some(6),
+                deaths: Some(6),
+                assists: Some(10),
+                gpm: Some(380 + other * 20),
+                teamfight_participation: Some(0.6),
+                net_worth: Some(11_000 + other * 900),
+                items: Some(vec![("tango".to_owned(), 1), ("tpscroll".to_owned(), 2)]),
+                position: Some((other - 1) % 5 + 1),
+                ..Default::default()
+            });
+        }
+    }
+    games
+}
+
+/// The patch chapter as `/wrapped` writes it: every number and line below
+/// comes from the story functions run over the invented year.
+fn measured_chapter_cards() -> Vec<WrappedSlideData> {
+    use cama_app::wrapped_story::bug_fixes::bug_fixes;
+    use cama_app::wrapped_story::hero_patch::{HeroChangeTag, hero_updates};
+    use cama_app::wrapped_story::item_patch::{ItemInfo, ItemNote, item_updates};
+    use cama_app::wrapped_story::talents::{TalentSide, talent_tree};
+    use cama_domain::hero_catalog::bundled_hero_name;
+
+    let year = invented_year();
+    let slug = |hero_id: i64| match hero_id {
+        39 => (
+            "queenofpain",
+            &["shadow_strike", "blink", "scream_of_pain", "sonic_wave"][..],
+        ),
+        14 => ("pudge", &["meat_hook", "rot", "dismember"][..]),
+        90 => ("keeper_of_the_light", &["illuminate"][..]),
+        _ => ("", &[][..]),
+    };
+    let catalog = [
+        ("blink", "Blink Dagger", 2_250),
+        ("black_king_bar", "Black King Bar", 4_050),
+        ("rapier", "Divine Rapier", 5_600),
+        ("tango", "Tango", 90),
+        ("tpscroll", "Town Portal Scroll", 100),
+        ("ward_observer", "Observer Ward", 0),
+        ("ward_sentry", "Sentry Ward", 50),
+        ("smoke_of_deceit", "Smoke of Deceit", 50),
+        ("clarity", "Clarity", 50),
+        ("dust", "Dust of Appearance", 80),
+        ("bottle", "Bottle", 675),
+    ]
+    .map(|(key, name, cost)| ItemInfo {
+        key: key.to_owned(),
+        name: name.to_owned(),
+        cost,
+    });
+    let mut cards = Vec::new();
+
+    let mut heroes = styled(
+        "story_hero_patch_measured",
+        "Hero updates",
+        WrappedLayout::HeroPatch,
+        WrappedTheme::PatchHeroes,
+    );
+    heroes.rows = hero_updates(&year, 7, &[(39, 9)], SEED)
+        .iter()
+        .map(|update| {
+            let (tag, value) = match update.tag {
+                HeroChangeTag::Buffed => ("Buffed", 1.0),
+                HeroChangeTag::Nerfed => ("Nerfed", -1.0),
+                HeroChangeTag::New => ("New", 0.0),
+                HeroChangeTag::Removed => ("Removed", -1.0),
+                HeroChangeTag::Banned => ("Banned", 0.0),
+            };
+            let mut row = tagged(
+                bundled_hero_name(update.hero_id).unwrap_or("Unknown hero"),
+                &update.lines.join("\n"),
+                tag,
+                value,
+            );
+            let (hero, abilities) = slug(update.hero_id);
+            row.image_png = hero_image(hero, false);
+            row.icons = abilities
+                .iter()
+                .filter_map(|ability| icon_image("abilities", &format!("{hero}_{ability}")))
+                .collect();
+            row
+        })
+        .collect();
+    heroes.headline = format!("{} heroes rebalanced this year.", heroes.rows.len());
+    cards.push(heroes);
+
+    let mut items = styled(
+        "story_items_measured",
+        "Item updates",
+        WrappedLayout::ItemPatch,
+        WrappedTheme::PatchItems,
+    );
+    items.rows = item_updates(&year, 7, &catalog, SEED)
+        .iter()
+        .map(|update| {
+            let (tag, value) = match (update.note, update.direction) {
+                (ItemNote::Signature, _) => ("Signature", 0.0),
+                (ItemNote::WinRate, Some(BalanceDirection::Nerf)) => ("Nerf", -1.0),
+                (ItemNote::WinRate, _) => ("Buff", 1.0),
+                (ItemNote::Consumable, _) => ("Stocked", 0.0),
+                (ItemNote::Oddity, _) => ("", 0.0),
+            };
+            let mut row = tagged(&update.name, &update.line, tag, value);
+            row.image_png = icon_image("items", &update.key);
+            row
+        })
+        .collect();
+    cards.push(items);
+
+    let mut talents = styled(
+        "story_talents_measured",
+        "Talents",
+        WrappedLayout::Talents,
+        WrappedTheme::PatchTalents,
+    );
+    talents.rows = talent_tree(&year, 7, None, SEED)
+        .iter()
+        .map(|tier| {
+            tagged(
+                &tier.left,
+                &tier.right,
+                &tier.level.to_string(),
+                match tier.picked {
+                    TalentSide::Left => -1.0,
+                    TalentSide::Right => 1.0,
+                },
+            )
+        })
+        .collect();
+    talents.lines = lines(&["Picked by your results this year."]);
+    cards.push(talents);
+
+    let mut fixes = styled(
+        "story_bugfixes_measured",
+        "Bug fixes",
+        WrappedLayout::BugFixes,
+        WrappedTheme::PatchFixes,
+    );
+    fixes.headline = "Resolved during the 2026 season.".to_owned();
+    fixes.rows = bug_fixes(&year, 7, None, SEED)
+        .iter()
+        .map(|fix| {
+            let hero = fix.hero_id.and_then(bundled_hero_name).unwrap_or_default();
+            let mut row = tagged(
+                &fix.line.replace("{hero}", hero),
+                "",
+                if fix.known_issue { "Known issue" } else { "" },
+                0.0,
+            );
+            row.image_png = fix
+                .hero_id
+                .and_then(|hero_id| hero_image(slug(hero_id).0, false));
+            row
+        })
+        .collect();
+    fixes.lines = lines(&["Thanks to the teammates who reported these."]);
+    cards.push(fixes);
+
+    for (index, award) in personal_patch(&year, 7, None, SEED)
+        .awards
+        .iter()
+        .enumerate()
+    {
+        let mut medal = styled(
+            "story_patch_award_measured",
+            &award.title,
+            WrappedLayout::Award,
+            if index == 1 {
+                WrappedTheme::Awards
+            } else {
+                WrappedTheme::Patch
+            },
+        );
+        medal.stat_value = award.value.clone();
+        medal.stat_label = award.evidence.clone();
+        medal.art_png = icon_image("items", award.icon);
+        cards.push(medal);
+    }
+    let mut changes = styled(
+        "story_patch_measured",
+        "Balance changes",
+        WrappedLayout::PatchNotes,
+        WrappedTheme::Patch,
+    );
+    changes.headline = "You got\npatched.".to_owned();
+    changes.rows = personal_patch(&year, 7, None, SEED)
+        .changes
+        .iter()
+        .map(|change| {
+            let (label, sign) = match change.direction {
+                BalanceDirection::Buff => ("Buff", 1.0),
+                BalanceDirection::Nerf => ("Nerf", -1.0),
+            };
+            tagged(
+                &format!("{label}: {}", change.title),
+                &format!("{}\n{}", change.value, change.evidence),
+                "",
+                sign,
+            )
+        })
+        .collect();
+    cards.push(changes);
+    cards
 }
 
 /// Hero updates: a full card with real art, the same card with nothing
@@ -843,7 +1162,7 @@ fn bug_fix_cards() -> Vec<WrappedSlideData> {
             "KNOWN ISSUE",
         ),
     ];
-    full.lines = lines(&["No further fixes are planned."]);
+    full.lines = lines(&["Thanks to the teammates who reported these."]);
 
     let mut sparse = styled(
         "story_bugfixes_sparse",
