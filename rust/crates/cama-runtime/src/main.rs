@@ -930,6 +930,7 @@ async fn run_serve() -> ExitCode {
             match_corrections: admin_match_correction.control(),
         },
         usage_monitor.clone(),
+        production_ai_service.is_some(),
     );
     let dig_bonus_runtime = DigBonusRuntime::from_application_config(
         &config.db_path,
