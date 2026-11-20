@@ -88,6 +88,8 @@ const READY_EMOJI: &str = "✅";
 const READYCHECK_EXPIRED_DESCRIPTION: &str =
     "⌛ This ready check has expired. Run `/readycheck` to start a new one.";
 const READYCHECK_EXPIRED_FOOTER: &str = "Expired — reactions no longer count";
+const READYCHECK_SHUFFLED_DESCRIPTION: &str = "🔀 This lobby has been shuffled.";
+const READYCHECK_SHUFFLED_FOOTER: &str = "Shuffled — reactions no longer count";
 const BELL_EMOJI: &str = "🔔";
 const CLIPBOARD_EMOJI: &str = "📋";
 const SPECTATOR_EMOJI: &str = "📻";
@@ -1087,10 +1089,12 @@ impl LobbyRuntimeState {
 
     /// Repaint a retired ready check so its message stops inviting reactions
     /// that no longer count. Only the players who confirmed are kept.
-    async fn publish_expired_readycheck(
+    async fn publish_retired_readycheck(
         &self,
         scope: LobbyScope,
         generation: &ReadycheckGeneration,
+        description: &str,
+        footer: &str,
     ) {
         let confirmed = generation
             .player_data
@@ -1104,9 +1108,9 @@ impl LobbyRuntimeState {
             &generation.reacted,
             self.config.ready_threshold,
         )
-        .description(READYCHECK_EXPIRED_DESCRIPTION)
+        .description(description)
         .color(0x95_a5_a6)
-        .footer(READYCHECK_EXPIRED_FOOTER);
+        .footer(footer);
         match (
             to_u64(generation.channel_id.0),
             to_u64(generation.message_id.0),
@@ -1122,10 +1126,10 @@ impl LobbyRuntimeState {
                     )
                     .await
                 {
-                    warn!(%error, ?scope, "expired readycheck repaint failed");
+                    warn!(%error, ?scope, "retired readycheck repaint failed");
                 }
             }
-            _ => warn!(?scope, "expired readycheck repaint has invalid Discord IDs"),
+            _ => warn!(?scope, "retired readycheck repaint has invalid Discord IDs"),
         }
     }
 
@@ -1172,9 +1176,9 @@ impl LobbyRuntimeState {
         let Some(generation) = self.readychecks.readycheck_generation(scope) else {
             return;
         };
-        let target_channel_id = self
-            .service
-            .get_lobby(scope)
+        let lobby = self.service.get_lobby(scope);
+        let target_channel_id = lobby
+            .as_ref()
             .and_then(|lobby| lobby.message_ids.origin_channel_id)
             .unwrap_or(generation.channel_id);
         let Ok(channel_id) = to_u64(target_channel_id.0) else {
@@ -1186,14 +1190,37 @@ impl LobbyRuntimeState {
                 .release_completion_notification(scope, message_id);
             return;
         };
+        // Ping the confirmed players still in the lobby: they are the roster
+        // `/shuffle` will use.
+        let confirmed = generation
+            .reacted
+            .iter()
+            .filter(|player_id| {
+                lobby
+                    .as_ref()
+                    .is_none_or(|lobby| lobby.players.contains(player_id))
+            })
+            .filter_map(|player_id| u64::try_from(player_id.0).ok())
+            .collect::<BTreeSet<_>>();
+        let mut content = ready_announcement(scope.kind, self.config.ready_threshold);
+        if !confirmed.is_empty() {
+            let tags = confirmed
+                .iter()
+                .map(|user_id| format!("<@{user_id}>"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            content.push('\n');
+            content.push_str(&tags);
+        }
         let result = self
             .transport
             .send_message(
                 channel_id,
-                DiscordMessage::silent(InteractionResponse::message(ready_announcement(
-                    scope.kind,
-                    self.config.ready_threshold,
-                ))),
+                DiscordMessage::mentioning(
+                    InteractionResponse::message(content)
+                        .with_user_mentions(confirmed.iter().copied().collect()),
+                    confirmed,
+                ),
             )
             .await;
         if let Err(error) = result {
@@ -1963,7 +1990,7 @@ impl MatchLobbyPort {
         if let Some(lobby) = self.state.service.get_lobby(scope)
             && let Err(error) = self
                 .state
-                .close_lobby_display(scope, &lobby.message_ids, "Match Created")
+                .close_lobby_display(scope, &lobby.message_ids, "Shuffled")
                 .await
         {
             warn!(%error, ?scope, "failed to retire shuffled lobby controls");
@@ -1976,7 +2003,18 @@ impl MatchLobbyPort {
         if !reset {
             return Ok(false);
         }
+        let shuffled_readycheck = self.state.readychecks.readycheck_generation(scope);
         self.state.readychecks.reset_lobby(scope);
+        if let Some(generation) = shuffled_readycheck {
+            self.state
+                .publish_retired_readycheck(
+                    scope,
+                    &generation,
+                    READYCHECK_SHUFFLED_DESCRIPTION,
+                    READYCHECK_SHUFFLED_FOOTER,
+                )
+                .await;
+        }
         let observer = self
             .state
             .join_observer
@@ -2668,7 +2706,12 @@ impl LobbyInteractionHandler {
             .complete_sweep(scope, sweep.message_id)
         {
             self.state
-                .publish_expired_readycheck(scope, &generation)
+                .publish_retired_readycheck(
+                    scope,
+                    &generation,
+                    READYCHECK_EXPIRED_DESCRIPTION,
+                    READYCHECK_EXPIRED_FOOTER,
+                )
                 .await;
         }
         if removed.is_empty() {

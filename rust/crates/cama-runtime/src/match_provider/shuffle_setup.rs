@@ -296,6 +296,9 @@ impl MatchHandler {
         state
             .extra
             .insert("goodness_score".to_owned(), json!(goodness_score));
+        state
+            .extra
+            .insert("shuffled_by_id".to_owned(), json!(request.shuffled_by_id));
         state.extra.insert(
             "glicko_radiant_win_prob".to_owned(),
             json!(glicko_radiant_win_prob),
@@ -775,6 +778,12 @@ impl MatchHandler {
 
         let embed = self.render_shuffle_embed(&prepared.pending).await?;
         let public_response = InteractionResponse::message("").embed(embed.clone());
+        let (match_player_ids, match_player_mentions) = match_player_mentions(&prepared.pending);
+        // The lobby-channel copy pings the match players beside the embed.
+        let lobby_message = DiscordMessage::mentioning(
+            InteractionResponse::message(match_player_mentions).embed(embed.clone()),
+            match_player_ids,
+        );
         let lobby_send = async {
             let channel_id = snapshot.lobby_channel_id?;
             if let Some(message_id) = prepared.pending.state.shuffle_message_id {
@@ -794,7 +803,7 @@ impl MatchHandler {
                 .send_message_with_delivery_key(
                     channel_id,
                     &shuffle_nonce(context.guild_id, prepared.pending.pending_match_id, "lobby"),
-                    DiscordMessage::silent(public_response.clone()),
+                    lobby_message,
                 )
                 .await
             {
@@ -968,21 +977,10 @@ impl MatchHandler {
                 .map_err(|e| e.to_string())?
                 .ok_or("pending match disappeared during thread publication")?;
             }
-            let real_player_ids = pending
-                .state
-                .participant_ids()
-                .into_iter()
-                .filter(|id| *id > 0)
-                .filter_map(|id| u64::try_from(id).ok())
-                .collect::<BTreeSet<_>>();
+            let (real_player_ids, mentions) = match_player_mentions(pending);
             if !real_player_ids.is_empty()
                 && pending.state.extra.get("shuffle_thread_players_published") != Some(&json!(true))
             {
-                let mentions = real_player_ids
-                    .iter()
-                    .map(|id| format!("<@{id}>"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
                 self.discord
                     .send_message_with_delivery_key(
                         thread_id,
@@ -1022,6 +1020,23 @@ impl MatchHandler {
             .await?;
         Ok(())
     }
+}
+
+/// The real match participants and the mention text that pings them.
+fn match_player_mentions(pending: &PendingMatchRecord) -> (BTreeSet<u64>, String) {
+    let player_ids = pending
+        .state
+        .participant_ids()
+        .into_iter()
+        .filter(|id| *id > 0)
+        .filter_map(|id| u64::try_from(id).ok())
+        .collect::<BTreeSet<_>>();
+    let mentions = player_ids
+        .iter()
+        .map(|id| format!("<@{id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    (player_ids, mentions)
 }
 
 fn shuffle_nonce(guild: i64, pending: i64, kind: &str) -> String {
