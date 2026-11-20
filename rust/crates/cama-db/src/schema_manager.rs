@@ -2159,7 +2159,7 @@ fn wrapped_payload_player<'a>(
         .find(|candidate| {
             candidate
                 .get("account_id")
-                .and_then(JsonValue::as_i64)
+                .and_then(coerce_integral_i64)
                 .is_some_and(|account_id| steam_ids.contains(&account_id))
         })
 }

@@ -1128,8 +1128,10 @@ fn is_detail_page(kind: &str) -> bool {
 fn story_position(kind: &str) -> usize {
     match kind {
         "story_mafia_accuser" => story_position("story_mafia_victim"),
-        // A thin deck's borrowed cards stand in for the distinct stories.
-        "story_moment" | "story_superlative" => story_position("story_distinct"),
+        // A thin deck's borrowed cards stand in for the distinct stories;
+        // its superlatives sit with the earned ones.
+        "story_moment" => story_position("story_distinct"),
+        "story_superlative" => story_position("story_patch_award"),
         _ => STORY_ORDER
             .iter()
             .position(|candidate| *candidate == kind)
@@ -1176,7 +1178,6 @@ fn build_slides(
     intro.theme = WrappedTheme::Patch;
     intro.stat_value = patch::patch_version(year);
     intro.headline = patch::default_patch_name(target_display_name);
-    intro.stat_label = target_display_name.to_owned();
     if raw.matches.is_empty() {
         intro
             .lines

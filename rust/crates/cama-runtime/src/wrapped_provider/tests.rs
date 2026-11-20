@@ -3134,26 +3134,19 @@ fn hero_stories_wear_the_hero_render() {
 /// Game metadata and a warm icon cache for two heroes, Blink Dagger, Tango
 /// and every award icon.
 fn patch_chapter_art() -> (TempDir, ArtSources) {
+    use cama_app::trivia_data::{RawAbility, RawItem};
+
     let directory = tempfile::tempdir().unwrap();
     let dotabase = directory.path().join("dotabase.db");
-    let connection = Connection::open(&dotabase).unwrap();
-    connection
+    Connection::open(&dotabase)
+        .unwrap()
         .execute_batch(
             "CREATE TABLE heroes (
                  id INTEGER PRIMARY KEY,name TEXT,color TEXT,localized_name TEXT,roles TEXT
              );
              INSERT INTO heroes VALUES
                  (1,'npc_dota_hero_antimage','#784094','Anti-Mage','Carry'),
-                 (2,'npc_dota_hero_axe','#b32b2b','Axe','Initiator');
-             CREATE TABLE items (id INTEGER PRIMARY KEY,localized_name TEXT,cost INTEGER,icon TEXT);
-             CREATE TABLE abilities (
-                 id INTEGER PRIMARY KEY,localized_name TEXT,hero_id INTEGER,icon TEXT,innate INTEGER
-             );
-             CREATE TABLE talents (ability_id INTEGER);
-             INSERT INTO abilities VALUES
-                 (10,'Mana Break',1,'/panorama/images/spellicons/antimage_mana_break_png.png',0),
-                 (11,'Blink',1,'/panorama/images/spellicons/antimage_blink_png.png',0),
-                 (20,'Battle Hunger',2,'/panorama/images/spellicons/axe_battle_hunger_png.png',0);",
+                 (2,'npc_dota_hero_axe','#b32b2b','Axe','Initiator');",
         )
         .unwrap();
     let cache = directory.path().join("trivia");
@@ -3168,22 +3161,41 @@ fn patch_chapter_art() -> (TempDir, ArtSources) {
             .map(|(_, icon, _)| (*icon, "Award Item", 3000))
             .filter(|(key, _, _)| !matches!(*key, "blink" | "tango")),
     );
-    for (key, name, cost) in items {
-        connection
-            .execute(
-                "INSERT INTO items(localized_name,cost,icon) VALUES (?1,?2,?3)",
-                params![name, cost, format!("/panorama/images/items/{key}_png.png")],
-            )
-            .unwrap();
-        std::fs::write(cache.join(format!("items/{key}.png")), &icon).unwrap();
-    }
-    for slug in ["antimage_mana_break", "antimage_blink", "axe_battle_hunger"] {
+    let items = items
+        .into_iter()
+        .map(|(key, name, cost)| {
+            std::fs::write(cache.join(format!("items/{key}.png")), &icon).unwrap();
+            RawItem {
+                localized_name: Some(name.to_owned()),
+                cost: Some(cost),
+                icon_path: Some(format!("/panorama/images/items/{key}_png.png")),
+                ..RawItem::default()
+            }
+        })
+        .collect();
+    let abilities = [
+        (10, "Mana Break", 1, "antimage_mana_break"),
+        (11, "Blink", 1, "antimage_blink"),
+        (20, "Battle Hunger", 2, "axe_battle_hunger"),
+    ]
+    .into_iter()
+    .map(|(id, name, hero_id, slug)| {
         std::fs::write(cache.join(format!("abilities/{slug}.png")), &icon).unwrap();
-    }
+        RawAbility {
+            id,
+            localized_name: Some(name.to_owned()),
+            hero_id: Some(hero_id),
+            icon_path: Some(format!("/panorama/images/spellicons/{slug}_png.png")),
+            ..RawAbility::default()
+        }
+    })
+    .collect();
     std::fs::write(cache.join("heroes/antimage.png"), &icon).unwrap();
     let art = ArtSources::for_assets(&repository_assets())
         .with_hero_portraits(cama_app::hero_lookup::HeroLookup::new(&dotabase), cache)
-        .with_icons(cama_app::dota_icon_lookup::DotaIconLookup::new(&dotabase));
+        .with_icons(cama_app::dota_icon_lookup::DotaIconLookup::from_rows(
+            items, abilities,
+        ));
     (directory, art)
 }
 
@@ -3370,4 +3382,12 @@ fn patch_chapter_is_absent_without_the_data_for_it() {
         .find(|slide| slide.kind == "story_intro")
         .unwrap();
     assert_eq!(cover.headline, "The Guild Owner Update");
+    assert_eq!(
+        patch::default_patch_name(UNKNOWN_PLAYER),
+        "The Annual Update"
+    );
+    assert_eq!(
+        patch::default_patch_name("A name far too long for a title"),
+        "The Annual Update"
+    );
 }

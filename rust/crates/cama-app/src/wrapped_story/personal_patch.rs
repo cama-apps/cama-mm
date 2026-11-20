@@ -454,7 +454,7 @@ fn awards(
         (
             "clean_hands",
             "3 or fewer deaths",
-            "recorded games",
+            "games with stats",
             AwardTheme::Survival,
             (1.0, 40),
             (|game: &DistinctMatch| Some(nonnegative(game.deaths)? <= 3)) as Condition,
@@ -462,7 +462,7 @@ fn awards(
         (
             "deathless_wins",
             "Won without dying",
-            "recorded games",
+            "games with stats",
             AwardTheme::Survival,
             (4.0, 0),
             (|game: &DistinctMatch| Some(nonnegative(game.deaths)? == 0 && game.won?)) as Condition,
@@ -1226,7 +1226,7 @@ mod tests {
             ),
             (
                 "clean_hands",
-                "3 or fewer deaths in 3 of 5 recorded games.",
+                "3 or fewer deaths in 3 of 5 games with stats.",
                 |row, hit| row.deaths = Some(if hit { 3 } else { 4 }),
             ),
         ];
@@ -1284,7 +1284,7 @@ mod tests {
         assert_eq!(report.awards.len(), 1);
         assert_eq!(
             report.awards[0].evidence,
-            "Won without dying in 3 of 8 recorded games."
+            "Won without dying in 3 of 8 games with stats."
         );
         assert_eq!(report.awards[0].icon, "aeon_disk");
         // A deathless loss is not a deathless win, and an unknown result is

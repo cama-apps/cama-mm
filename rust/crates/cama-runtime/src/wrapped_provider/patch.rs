@@ -7,6 +7,7 @@ use cama_app::wrapped_story::hero_patch::{HeroChangeTag, HeroUpdate};
 use cama_app::wrapped_story::item_patch::{ItemInfo, ItemNote, ItemUpdate};
 use cama_app::wrapped_story::personal_patch::{BalanceDirection, PersonalPatch};
 use cama_app::wrapped_story::talents::{TalentSide, TalentTier};
+use cama_domain::discord_content::UNKNOWN_PLAYER;
 use cama_domain::hero_catalog::bundled_hero_name;
 
 use super::activity::ArtSources;
@@ -21,9 +22,10 @@ pub(super) fn patch_version(year: i32) -> String {
     format!("{}.{:02}", year.div_euclid(100), year.rem_euclid(100))
 }
 
-/// The update's name when no story names it.
+/// The update's name when no story names it. A player without a readable
+/// name gets the plain annual update.
 pub(super) fn default_patch_name(username: &str) -> String {
-    if username.chars().count() <= LONGEST_NAME_IN_TITLE {
+    if username != UNKNOWN_PLAYER && username.chars().count() <= LONGEST_NAME_IN_TITLE {
         format!("The {username} Update")
     } else {
         "The Annual Update".to_owned()

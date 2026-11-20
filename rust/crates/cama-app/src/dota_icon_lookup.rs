@@ -1,4 +1,4 @@
-//! Item and ability icons by game key, read from the bundled Dotabase.
+//! Item and ability icons by game key, read through the Dotabase catalog.
 //!
 //! OpenDota names a purchase by the item's internal key (`blink`,
 //! `black_king_bar`); Steam serves the icon under the same key, so the key is
@@ -8,10 +8,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use rusqlite::{Connection, OpenFlags};
-
-use crate::dotabase_sqlite::PRODUCTION_DOTABASE_PATH;
-use crate::trivia_data::{ability_icon_url, item_icon_url};
+use crate::dotabase_sqlite::{DotabaseSqliteSource, PRODUCTION_DOTABASE_PATH};
+use crate::trivia_data::{
+    RawAbility, RawFacet, RawHero, RawItem, RawVoiceline, TriviaDataError, TriviaDataRegistry,
+    TriviaDataSource,
+};
 
 /// The most ability icons one hero block shows.
 pub const MAX_HERO_ABILITY_ICONS: usize = 4;
@@ -52,12 +53,23 @@ impl DotaIconLookup {
         Self::new(PRODUCTION_DOTABASE_PATH)
     }
 
-    fn icons(&self) -> &Icons {
-        self.icons
-            .get_or_init(|| load(&self.dotabase_path).unwrap_or_default())
+    /// A lookup over rows already in hand instead of a Dotabase file.
+    #[must_use]
+    pub fn from_rows(items: Vec<RawItem>, abilities: Vec<RawAbility>) -> Self {
+        let icons = OnceLock::new();
+        let _ = icons.set(catalog_icons(Rows { items, abilities }));
+        Self {
+            dotabase_path: PathBuf::new(),
+            icons,
+        }
     }
 
-    /// Every item with an icon, in Dotabase order.
+    fn icons(&self) -> &Icons {
+        self.icons
+            .get_or_init(|| catalog_icons(DotabaseSqliteSource::new(&self.dotabase_path)))
+    }
+
+    /// Every purchasable item with an icon, in Dotabase order.
     #[must_use]
     pub fn items(&self) -> &[DotaItem] {
         &self.icons().items
@@ -79,105 +91,145 @@ impl DotaIconLookup {
     }
 }
 
+/// Item and ability rows standing in for a Dotabase file.
+struct Rows {
+    items: Vec<RawItem>,
+    abilities: Vec<RawAbility>,
+}
+
+impl TriviaDataSource for Rows {
+    fn heroes(&self) -> Result<Vec<RawHero>, TriviaDataError> {
+        Ok(Vec::new())
+    }
+
+    fn abilities(&self) -> Result<Vec<RawAbility>, TriviaDataError> {
+        Ok(self.abilities.clone())
+    }
+
+    fn items(&self) -> Result<Vec<RawItem>, TriviaDataError> {
+        Ok(self.items.clone())
+    }
+
+    fn voicelines(&self) -> Result<Vec<RawVoiceline>, TriviaDataError> {
+        Ok(Vec::new())
+    }
+
+    fn facets(&self) -> Result<Vec<RawFacet>, TriviaDataError> {
+        Ok(Vec::new())
+    }
+}
+
 fn icon_key(url: &str) -> Option<&str> {
     let key = url.rsplit('/').next()?.strip_suffix(".png")?;
     (!key.is_empty()).then_some(key)
 }
 
-fn load(path: &Path) -> Result<Icons, rusqlite::Error> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    connection.pragma_update(None, "query_only", true)?;
+fn catalog_icons(source: impl TriviaDataSource) -> Icons {
+    let catalog = TriviaDataRegistry::new(source);
     let mut icons = Icons::default();
-
-    let mut statement =
-        connection.prepare("SELECT localized_name,cost,icon FROM items ORDER BY id")?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        let name = row.get::<_, Option<String>>(0)?.unwrap_or_default();
-        let Some(icon_url) = item_icon_url(row.get::<_, Option<String>>(2)?.as_deref()) else {
+    for item in catalog.load_items().unwrap_or_default() {
+        let Some(icon_url) = item.icon_url.as_deref() else {
             continue;
         };
-        let Some(key) = icon_key(&icon_url).map(str::to_owned) else {
+        let Some(key) = icon_key(icon_url) else {
             continue;
         };
-        // Leveled items share a name; the first row is the base item.
-        if name.is_empty() || name.contains('_') || icons.items.iter().any(|item| item.key == key) {
+        // Leveled items share an icon; the first row is the base item.
+        if icons.items.iter().any(|known| known.key == key) {
             continue;
         }
+        // The catalog numbers a leveled item's name ("Dagon 1"); the shop
+        // calls it by the plain name.
+        let level = item
+            .base_level
+            .filter(|_| item.is_leveled)
+            .map(|level| format!(" {level}"));
+        let name = level
+            .as_deref()
+            .and_then(|suffix| item.localized_name.strip_suffix(suffix))
+            .unwrap_or(&item.localized_name);
         icons.items.push(DotaItem {
-            key,
-            name,
-            cost: row.get::<_, Option<i64>>(1)?.unwrap_or(0).max(0),
-            icon_url,
+            key: key.to_owned(),
+            name: name.to_owned(),
+            cost: item.cost.unwrap_or(0),
+            icon_url: icon_url.to_owned(),
         });
     }
-
-    let mut statement = connection.prepare(
-        "SELECT a.hero_id,a.icon FROM abilities a
-         WHERE a.hero_id IS NOT NULL
-           AND a.localized_name IS NOT NULL AND instr(a.localized_name,'_')=0
-           AND COALESCE(a.innate,0)=0
-           AND NOT EXISTS (SELECT 1 FROM talents t WHERE t.ability_id=a.id)
-         ORDER BY a.hero_id,a.id",
-    )?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        let hero_id: i64 = row.get(0)?;
-        let Some(url) = ability_icon_url(row.get::<_, Option<String>>(1)?.as_deref()) else {
+    for ability in catalog.load_abilities().unwrap_or_default() {
+        let (Some(hero_id), Some(url), false) =
+            (ability.hero_id, ability.icon_url.as_ref(), ability.innate)
+        else {
             continue;
         };
         let urls = icons.abilities.entry(hero_id).or_default();
-        if urls.len() < MAX_HERO_ABILITY_ICONS && !urls.contains(&url) {
-            urls.push(url);
+        if urls.len() < MAX_HERO_ABILITY_ICONS && !urls.contains(url) {
+            urls.push(url.clone());
         }
     }
-    Ok(icons)
+    icons
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn dotabase(directory: &Path) -> PathBuf {
-        let path = directory.join("dotabase.db");
-        Connection::open(&path)
-            .unwrap()
-            .execute_batch(
-                "CREATE TABLE items (id INTEGER PRIMARY KEY,localized_name TEXT,cost INTEGER,icon TEXT);
-                 CREATE TABLE abilities (
-                     id INTEGER PRIMARY KEY,localized_name TEXT,hero_id INTEGER,icon TEXT,innate INTEGER
-                 );
-                 CREATE TABLE talents (ability_id INTEGER);
-                 INSERT INTO items VALUES
-                     (1,'Blink Dagger',2250,'/panorama/images/items/blink_png.png'),
-                     (2,'Dagon',2850,'/panorama/images/items/dagon_png.png'),
-                     (3,'Dagon',4000,'/panorama/images/items/dagon_png.png'),
-                     (4,'Tango',NULL,'/panorama/images/items/tango_png.png'),
-                     (5,'hidden_item',10,'/panorama/images/items/hidden_png.png'),
-                     (6,'No Icon',10,NULL);
-                 INSERT INTO abilities VALUES
-                     (10,'Mana Break',1,'/panorama/images/spellicons/antimage_mana_break_png.png',0),
-                     (11,'Blink',1,'/panorama/images/spellicons/antimage_blink_png.png',0),
-                     (12,'Persecutor',1,'/panorama/images/spellicons/antimage_persecutor_png.png',1),
-                     (13,'+10 Agility',1,'/panorama/images/spellicons/talent_png.png',0),
-                     (14,'Counterspell',1,'/panorama/images/spellicons/antimage_counterspell_png.png',0),
-                     (15,'Mana Void',1,'/panorama/images/spellicons/antimage_mana_void_png.png',0),
-                     (16,'Blink Fragment',1,'/panorama/images/spellicons/antimage_blink_fragment_png.png',0),
-                     (17,'hidden_ability',1,'/panorama/images/spellicons/hidden_png.png',0),
-                     (20,'Berserker''s Call',2,'/panorama/images/spellicons/axe_berserkers_call_png.png',0);
-                 INSERT INTO talents VALUES (13);",
-            )
-            .unwrap();
-        path
+    fn item(name: &str, cost: Option<i64>, key: Option<&str>) -> RawItem {
+        RawItem {
+            localized_name: Some(name.to_owned()),
+            cost,
+            icon_path: key.map(|key| format!("/panorama/images/items/{key}_png.png")),
+            ..RawItem::default()
+        }
+    }
+
+    fn ability(id: i64, name: &str, hero_id: i64, slug: &str) -> RawAbility {
+        RawAbility {
+            id,
+            localized_name: Some(name.to_owned()),
+            hero_id: Some(hero_id),
+            icon_path: Some(format!("/panorama/images/spellicons/{slug}_png.png")),
+            ..RawAbility::default()
+        }
+    }
+
+    fn lookup() -> DotaIconLookup {
+        let mut dagon = item("Dagon", Some(2850), Some("dagon"));
+        dagon.base_level = Some(1);
+        let mut dagon_two = item("Dagon", Some(4000), Some("dagon_2"));
+        dagon_two.base_level = Some(2);
+        let mut aegis = item("Aegis of the Immortal", None, Some("aegis"));
+        aegis.purchasable = Some(false);
+        let mut innate = ability(12, "Persecutor", 1, "antimage_persecutor");
+        innate.innate = true;
+        let mut talent = ability(13, "+10 Agility", 1, "talent");
+        talent.is_talent = true;
+        DotaIconLookup::from_rows(
+            vec![
+                item("Blink Dagger", Some(2250), Some("blink")),
+                dagon,
+                dagon_two,
+                item("Tango", None, Some("tango")),
+                item("hidden_item", Some(10), Some("hidden")),
+                item("No Icon", Some(10), None),
+                aegis,
+            ],
+            vec![
+                ability(10, "Mana Break", 1, "antimage_mana_break"),
+                ability(11, "Blink", 1, "antimage_blink"),
+                innate,
+                talent,
+                ability(14, "Counterspell", 1, "antimage_counterspell"),
+                ability(15, "Mana Void", 1, "antimage_mana_void"),
+                ability(16, "Blink Fragment", 1, "antimage_blink_fragment"),
+                ability(17, "hidden_ability", 1, "hidden"),
+                ability(20, "Battle Hunger", 2, "axe_battle_hunger"),
+            ],
+        )
     }
 
     #[test]
     fn items_are_keyed_by_their_purchase_log_name() {
-        let directory = tempfile::tempdir().unwrap();
-        let lookup = DotaIconLookup::new(dotabase(directory.path()));
+        let lookup = lookup();
         let keys = lookup
             .items()
             .iter()
@@ -188,6 +240,7 @@ mod tests {
             [
                 ("blink", "Blink Dagger", 2250),
                 ("dagon", "Dagon", 2850),
+                ("dagon_2", "Dagon", 4000),
                 ("tango", "Tango", 0),
             ]
         );
@@ -203,8 +256,7 @@ mod tests {
 
     #[test]
     fn a_hero_shows_at_most_four_castable_abilities_in_order() {
-        let directory = tempfile::tempdir().unwrap();
-        let lookup = DotaIconLookup::new(dotabase(directory.path()));
+        let lookup = lookup();
         let slugs = lookup
             .ability_icon_urls(1)
             .iter()

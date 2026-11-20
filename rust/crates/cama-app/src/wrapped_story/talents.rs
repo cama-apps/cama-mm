@@ -51,12 +51,12 @@ const KILLS_ASSISTS: Labels = &[
     ("+{} Kills/Game", "+{} Assists/Game"),
 ];
 const SIDES: Labels = &[
-    ("{}% Radiant", "{}% Dire"),
     ("{}% On Radiant", "{}% On Dire"),
+    ("{}% Radiant Wins", "{}% Dire Wins"),
 ];
 const ROLE_RATES: Labels = &[
-    ("{}% Core", "{}% Support"),
     ("{}% As Core", "{}% As Support"),
+    ("{}% Core Wins", "{}% Support Wins"),
 ];
 const ROLE_GAMES: Labels = &[
     ("+{} Core Games", "+{} Support Games"),
@@ -112,7 +112,7 @@ pub fn talent_tree(
         week(&games, timezone, seed),
         farm_fight(matches, player_id, seed),
         hero_pool(&games, seed),
-        halves(&games, timezone, seed),
+        halves(&games, seed),
     ]
     .into_iter()
     .flatten()
@@ -269,7 +269,7 @@ fn length(games: &[&DistinctMatch], seed: u64) -> Option<Pair> {
         games,
         |game| match minutes(game)? {
             played if played < 35.0 => Some(TalentSide::Left),
-            played if played > 45.0 => Some(TalentSide::Right),
+            played if played >= 45.0 => Some(TalentSide::Right),
             _ => None,
         },
     )
@@ -296,9 +296,12 @@ fn week(games: &[&DistinctMatch], timezone: Option<&str>, seed: u64) -> Option<P
     })
 }
 
-fn halves(games: &[&DistinctMatch], timezone: Option<&str>, seed: u64) -> Option<Pair> {
+/// The year is a UTC year, so its halves are UTC months: a game late on
+/// New Year's Eve in the player's zone still opens the year.
+fn halves(games: &[&DistinctMatch], seed: u64) -> Option<Pair> {
     rates(seed, "halves", HALVES, RATE_SCALE, games, |game| {
-        let finished = local_time(game.finished_at.filter(|time| *time > 0)?, timezone)?;
+        let finished =
+            chrono::DateTime::from_timestamp(game.finished_at.filter(|time| *time > 0)?, 0)?;
         Some(if finished.month() <= 6 {
             TalentSide::Left
         } else {
@@ -566,25 +569,25 @@ mod tests {
         assert_eq!((number(&pair.left), number(&pair.right)), (0.0, 80.0));
         assert_eq!(pair.picked, TalentSide::Right);
 
-        // 2026-07-01 02:00 UTC is still June in New York.
+        // 2026-07-01 02:00 UTC is July in the year's own clock, whatever
+        // the player's zone says.
         let july_utc = 1_782_871_200;
         let rows = (0..10)
             .map(|id| DistinctMatch {
                 finished_at: Some(if id < 5 {
-                    july_utc
+                    july_utc - 86_400 * (id + 1)
                 } else {
-                    july_utc + 86_400 * (id + 1)
+                    july_utc + 86_400 * (id - 5)
                 }),
                 won: Some(id < 5),
                 ..game(id)
             })
             .collect::<Vec<_>>();
-        let pair = halves(&refs(&rows), None, 0).expect("halves");
+        let pair = halves(&refs(&rows), 0).expect("halves");
         assert_eq!((number(&pair.left), number(&pair.right)), (100.0, 0.0));
-        assert!(halves(&refs(&rows), Some("Europe/Berlin"), 0).is_none());
         let mut undated = rows.clone();
         undated[0].finished_at = None;
-        assert!(halves(&refs(&undated), None, 0).is_none());
+        assert!(halves(&refs(&undated), 0).is_none());
     }
 
     /// Five players with six games each; player 7 has `gpm` and `fights`.

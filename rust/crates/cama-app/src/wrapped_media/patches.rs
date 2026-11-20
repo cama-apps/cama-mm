@@ -178,7 +178,7 @@ fn download(stage: &mut Stage<'_>) {
     let fill = downloaded(stage.progress(DOWNLOAD.0, DOWNLOAD.1));
     if leave < 0.3 {
         let label = if fill >= 1.0 {
-            "UPDATE READY"
+            "READY TO PLAY"
         } else {
             "DOWNLOADING UPDATE"
         };

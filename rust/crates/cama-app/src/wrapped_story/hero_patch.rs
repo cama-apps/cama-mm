@@ -26,8 +26,6 @@ pub struct HeroUpdate {
     pub tag: HeroChangeTag,
     /// One or two short lines.
     pub lines: Vec<String>,
-    /// The player's games on the hero this year.
-    pub games: usize,
 }
 
 pub const MAX_HERO_UPDATES: usize = 3;
@@ -140,7 +138,6 @@ pub fn hero_updates(
                                 .take(2)
                                 .map(|(_, _, line)| line.clone())
                                 .collect(),
-                            games: played.len(),
                         },
                     ));
                 }
@@ -187,7 +184,6 @@ pub fn hero_updates(
                     hero_id: hero,
                     tag,
                     lines,
-                    games: count,
                 },
             ));
         }
@@ -223,7 +219,6 @@ pub fn hero_updates(
                 hero_id: hero,
                 tag: HeroChangeTag::Banned,
                 lines,
-                games: played.len(),
             },
         ));
     }
@@ -370,7 +365,6 @@ mod tests {
         let updates = hero_updates(&rows, 7, &[], 0);
         assert_eq!(tags(&updates), [(1, HeroChangeTag::Buffed)]);
         assert_eq!(updates[0].lines, ["Win rate increased from 33% to 100%."]);
-        assert_eq!(updates[0].games, 6);
 
         let mut rows = year(SPLIT);
         rows[6].won = Some(false);
@@ -485,7 +479,6 @@ mod tests {
             [(1, HeroChangeTag::Removed), (3, HeroChangeTag::New)]
         );
         let removed = &updates[0];
-        assert_eq!(removed.games, 3);
         assert!(removed.lines[0].contains("after 3 games"));
         assert!(removed.lines[1].starts_with("Win rate was 33%."));
         let new = &updates[1];
@@ -553,7 +546,6 @@ mod tests {
         assert_eq!(tags(&updates), [(2, HeroChangeTag::Banned)]);
         assert!(updates[0].lines[0].contains("in 9 of your games"));
         assert!(updates[0].lines[1].starts_with("100% wins in"));
-        assert_eq!(updates[0].games, 12);
 
         // Without dates there is no timeline, but bans still tell a story.
         let undated = rows

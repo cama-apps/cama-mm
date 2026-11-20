@@ -44,8 +44,6 @@ pub struct ItemUpdate {
     pub direction: Option<BalanceDirection>,
 }
 
-pub const MAX_ITEM_UPDATES: usize = 4;
-
 /// Games with a purchase log before any item tells a story.
 const MIN_LOGGED_GAMES: usize = 5;
 /// Catalog cost from which an item counts as a real build decision.
@@ -828,7 +826,6 @@ mod tests {
                 (ItemNote::Oddity, "rapier"),
             ]
         );
-        assert!(updates.len() <= MAX_ITEM_UPDATES);
         rows.reverse();
         let mut shuffled = catalog();
         shuffled.reverse();
