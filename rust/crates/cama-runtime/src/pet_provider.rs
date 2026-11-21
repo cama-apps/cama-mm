@@ -98,6 +98,9 @@ const RATE_WINDOW: Duration = Duration::from_secs(60);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(180);
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(60);
 const PET_FLAVOR_AI_DEFAULT: bool = false;
+/// Shown privately when a move button outlives its battle: the fight already
+/// ended, or a restart dropped the process-local battle view.
+const BATTLE_INACTIVE_MESSAGE: &str = "This brawl is no longer active.";
 
 type ProductionPetService = SqlitePetCommandService<SeededPetRandom, SystemPetClock>;
 type ProductionPetAssets = PetAssetLoader<FilesystemPetAssets, HybridPetRenderer>;
@@ -176,6 +179,7 @@ impl PetRegistrationProvider {
             brawl: Mutex::new(brawl),
             challenges: Mutex::new(BTreeMap::new()),
             battle_views: Mutex::new(BTreeMap::new()),
+            battle_locks: Mutex::new(BTreeMap::new()),
             battle_channels: Mutex::new(BTreeMap::new()),
             battle_guilds: Mutex::new(BTreeMap::new()),
             challenge_receipts: Mutex::new(BTreeMap::new()),
@@ -245,15 +249,47 @@ struct PetRuntimeState {
     brawl: Mutex<ProductionBrawlCommands>,
     challenges: Mutex<BTreeMap<i64, ChallengeHandle>>,
     battle_views: Mutex<BTreeMap<i64, BattleHandle>>,
+    /// One async lock per live battle, held from reading the round handle
+    /// through the board edit that move clicks and the round timer produce.
+    ///
+    /// Without it two near-simultaneous picks raced: the first picker's
+    /// "locked in" board could land after the second picker's round-resolving
+    /// edit, freezing the board on a round already fought, and its stale
+    /// handle could overwrite the next round's. The runtime acknowledges a
+    /// waiting click automatically, so the wait never delays the callback.
+    battle_locks: Mutex<BTreeMap<i64, BattleLock>>,
     battle_channels: Mutex<BTreeMap<i64, i64>>,
     battle_guilds: Mutex<BTreeMap<i64, i64>>,
     challenge_receipts: Mutex<PetInteractionReceipts>,
     battle_receipts: Mutex<PetInteractionReceipts>,
 }
 
+impl PetRuntimeState {
+    /// The live battle's lock, or `None` once the battle is over.
+    fn battle_lock(&self, brawl_id: i64) -> Result<Option<BattleLock>, String> {
+        Ok(self
+            .battle_locks
+            .lock()
+            .map_err(|_| "pet battle lock map poisoned".to_owned())?
+            .get(&brawl_id)
+            .cloned())
+    }
+
+    /// Retire a finished battle's lock. Clicks already waiting on it still
+    /// acquire it, find no battle view, and are told the brawl is over.
+    fn forget_battle_lock(&self, brawl_id: i64) -> Result<(), String> {
+        self.battle_locks
+            .lock()
+            .map_err(|_| "pet battle lock map poisoned".to_owned())?
+            .remove(&brawl_id);
+        Ok(())
+    }
+}
+
 type PetRateLimits = BTreeMap<(i64, i64, &'static str), VecDeque<StdInstant>>;
 type PetInteractionReceipts =
     BTreeMap<i64, (InteractionMessageReceipt, Arc<dyn InteractionResponder>)>;
+type BattleLock = Arc<tokio::sync::Mutex<()>>;
 
 struct PetInteractionHandler {
     state: Arc<PetRuntimeState>,
@@ -2481,7 +2517,16 @@ impl PetInteractionHandler {
                 Ok((outcome, recorder, challenge))
             })
             .await?;
-        if verb == "accept" && outcome.is_some() {
+        // Hold the new battle's lock until this accept edit lands, so the
+        // board shows round one before the timer or any move can touch it.
+        let _battle_guard = if verb == "accept" && outcome.is_some() {
+            let battle_lock = BattleLock::default();
+            let guard = Arc::clone(&battle_lock).try_lock_owned().ok();
+            self.state
+                .battle_locks
+                .lock()
+                .map_err(|_| "pet battle lock map poisoned".to_owned())?
+                .insert(brawl_id, battle_lock);
             let _ = self
                 .state
                 .battle_channels
@@ -2507,7 +2552,10 @@ impl PetInteractionHandler {
                     .insert(brawl_id, delivery);
             }
             self.spawn_battle_timeout(brawl_id);
-        }
+            guard
+        } else {
+            None
+        };
         // A failed accept/decline/withdraw leaves the Python View alive: the
         // command layer resets its responded flag. Keep both the challenge
         // handle and its receipt so a later click can retry it. A pet-dead
@@ -2606,14 +2654,25 @@ impl PetInteractionHandler {
             .into_iter()
             .find(|candidate| candidate.as_str() == move_name)
             .ok_or_else(|| "invalid brawl move".to_owned())?;
+        // Buttons outlive the battle when its final edit is lost or a restart
+        // drops process-local views; that is an expected state, not a failure.
+        let Some(battle_lock) = self.state.battle_lock(brawl_id)? else {
+            return respond_battle_inactive(&responder).await;
+        };
+        let display_name = self.render_player_name(user_id, guild_id).await;
+        // Serialize with the other duelist's click and the round timer, from
+        // reading the handle through the board edit, so edits land in order.
+        let _battle_guard = battle_lock.lock().await;
         let view = self
             .state
             .battle_views
             .lock()
             .map_err(|_| "pet battle view lock poisoned".to_owned())?
             .get(&brawl_id)
-            .cloned()
-            .ok_or_else(|| "This brawl interaction expired.".to_owned())?;
+            .cloned();
+        let Some(view) = view else {
+            return respond_battle_inactive(&responder).await;
+        };
         // The round is encoded in the button precisely so a late click cannot
         // be counted against a round the player never saw: a double-click, or a
         // click racing the timeout that resolved the round, would otherwise
@@ -2625,7 +2684,6 @@ impl PetInteractionHandler {
             )
             .await;
         }
-        let display_name = self.render_player_name(user_id, guild_id).await;
         let interaction = brawl_interaction(user_id, guild_id, channel_id, display_name, true);
         let (outcome, recorder, mut view) = self
             .run_brawl(move |commands| {
@@ -2669,6 +2727,7 @@ impl PetInteractionHandler {
                 .lock()
                 .map_err(|_| "pet battle channel lock poisoned".to_owned())?
                 .remove(&brawl_id);
+            self.state.forget_battle_lock(brawl_id)?;
         } else {
             self.state
                 .battle_views
@@ -2853,6 +2912,10 @@ impl PetInteractionHandler {
         state: Arc<PetRuntimeState>,
         brawl_id: i64,
     ) -> Result<bool, String> {
+        let Some(battle_lock) = state.battle_lock(brawl_id)? else {
+            return Ok(true);
+        };
+        let _battle_guard = battle_lock.lock().await;
         let view = state
             .battle_views
             .lock()
@@ -2914,6 +2977,7 @@ impl PetInteractionHandler {
                 .lock()
                 .map_err(|_| "pet battle guild lock poisoned".to_owned())?
                 .remove(&brawl_id);
+            state.forget_battle_lock(brawl_id)?;
         } else {
             if matches!(
                 outcome,
@@ -3364,6 +3428,14 @@ async fn respond(
         .respond(response)
         .await
         .map_err(|error| error.to_string())
+}
+
+async fn respond_battle_inactive(responder: &Arc<dyn InteractionResponder>) -> Result<(), String> {
+    respond(
+        responder,
+        InteractionResponse::message(BATTLE_INACTIVE_MESSAGE).ephemeral(),
+    )
+    .await
 }
 
 async fn followup_error(
