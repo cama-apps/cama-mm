@@ -1035,6 +1035,15 @@ fn is_first_game_of_day(
     last_match.is_none_or(|last_match| game_date_for(last_match) != game_date_for(joined_at))
 }
 
+/// Seed for a rally's plea. The join time is part of it so that a lobby
+/// which keeps hovering at the same head count gets a new plea each time.
+fn plea_seed(event: &ConfirmedLobbyJoin) -> u64 {
+    event
+        .lobby_message_id
+        .unwrap_or_default()
+        .wrapping_add(event.joined_at_ns.unsigned_abs())
+}
+
 /// Before the day's first game, edit a plea into the rally that was just
 /// posted. The rally and its pings never wait on this.
 async fn add_first_game_plea(
@@ -1083,10 +1092,7 @@ async fn add_first_game_plea(
             .take(5)
             .collect(),
     };
-    let seed = event
-        .lobby_message_id
-        .unwrap_or_default()
-        .wrapping_add(needed as u64);
+    let seed = plea_seed(&event);
     let Ok(line) = tokio::task::spawn_blocking(move || hype.plea(&facts, seed)).await else {
         return;
     };
