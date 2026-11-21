@@ -23,8 +23,8 @@ use Theme::{Chaos, Clutch, Combat, Farm, Heroes, Items, Map, Time};
 mod records;
 
 pub use records::{
-    COUNT_RECORDS, HeroLine, HeroYear, PersonalRecord, RECORD_KEYS, hero_year, month_day,
-    personal_records, record_twin, select_records,
+    COUNT_RECORDS, HeroLine, HeroYear, PersonalRecord, RECORD_KEYS, hero_year, local_time,
+    month_day, personal_records, record_twin, select_records,
 };
 
 /// Below this many eligible players a metric is too thin to rank.
@@ -42,12 +42,13 @@ pub const TRACKED_ITEMS: [&str; 8] = [
     "radiance",
 ];
 
-/// Purchase counts per tracked item (plus rapiers) from OpenDota purchase-log
-/// keys. Untracked keys are ignored; an empty log yields an empty map.
-pub fn tracked_item_counts<'a>(keys: impl IntoIterator<Item = &'a str>) -> BTreeMap<String, i64> {
+/// Purchase counts per item from OpenDota purchase-log keys: every key is
+/// counted, consumables, components and recipes included. Blank keys are
+/// skipped; an empty log yields an empty map.
+pub fn purchase_counts<'a>(keys: impl IntoIterator<Item = &'a str>) -> BTreeMap<String, i64> {
     let mut counts = BTreeMap::new();
     for key in keys {
-        if key == "rapier" || TRACKED_ITEMS.contains(&key) {
+        if !key.is_empty() {
             *counts.entry(key.to_owned()).or_insert(0) += 1;
         }
     }
@@ -124,7 +125,7 @@ pub struct DistinctMatch {
     pub rapiers: Option<i64>,
     pub buybacks: Option<i64>,
     /// Purchase counts by OpenDota item key: `None` when the purchase log is
-    /// unknown, empty when it was parsed and no tracked item was bought.
+    /// unknown, empty when it was parsed and nothing was bought.
     pub items: Option<Vec<(String, i64)>>,
     /// Match-wide team gold figures.
     pub comeback: Option<f64>,
@@ -136,6 +137,15 @@ pub struct DistinctMatch {
     /// Parsed games only; `None` when unknown.
     pub first_blood: Option<bool>,
     pub roshans: Option<i64>,
+    /// The position actually played, 1 (safe-lane carry) to 5 (hard support),
+    /// from `match_participants.derived_role`; `None` when it was not derived.
+    pub position: Option<i64>,
+    pub last_hits_at_10: Option<i64>,
+    /// Share of the team's fights joined, 0.0 to 1.0.
+    pub teamfight_participation: Option<f64>,
+    pub net_worth: Option<i64>,
+    pub denies: Option<i64>,
+    pub tower_damage: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

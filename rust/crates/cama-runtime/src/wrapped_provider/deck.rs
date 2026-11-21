@@ -1,8 +1,9 @@
-//! The story's shape: at most twenty cards before the recap, Dota first.
+//! The story's shape: at most twenty-four cards before the recap, Dota first.
 //!
 //! After the fixed opening (cover, games, play time, top heroes) the
-//! sections fill in priority order, each up to its cap: distinct stories,
-//! personal records, hero stories, people, side games, and the persona.
+//! sections fill in priority order, each up to its cap: the patch chapter,
+//! distinct stories, personal records, hero stories, people, side games, and
+//! the persona.
 //! Slots a section leaves empty roll over to more distinct stories, up to
 //! eight, so a Dota-only player still gets a full Dota deck. Everything is
 //! deterministic; nothing is left to chance.
@@ -16,10 +17,14 @@ use cama_domain::wrapped_activity::ServerRank;
 use super::activity::ActivityData;
 
 /// Story cards before the recap.
-const STORY_BUDGET: usize = 20;
+const STORY_BUDGET: usize = 24;
 /// Distinct stories when every other section is full.
 #[cfg(all(test, feature = "runtime-test-core"))]
-const DISTINCT_STORIES: usize = 5;
+const DISTINCT_STORIES: usize = 2;
+/// The patch chapter at its fullest: balance changes, hero updates, item
+/// updates, talents, bug fixes and two superlatives.
+#[cfg(all(test, feature = "runtime-test-core"))]
+const MOST_PATCH_CARDS: usize = 7;
 /// Distinct stories when other sections leave room.
 const MOST_DISTINCT_STORIES: usize = 8;
 pub(super) const MOST_RECORDS: usize = 2;
@@ -196,17 +201,19 @@ mod tests {
     fn distinct_stories_take_what_the_other_sections_leave() {
         let personal = MOST_RECORDS + MOST_HERO_STORIES;
         let fixed = FIXED_KINDS.len();
-        let full = fixed + personal + MOST_PEOPLE + MOST_SIDE_GAMES + PERSONA_SLOTS;
+        let full =
+            fixed + MOST_PATCH_CARDS + personal + MOST_PEOPLE + MOST_SIDE_GAMES + PERSONA_SLOTS;
         assert_eq!(full + DISTINCT_STORIES, STORY_BUDGET);
-        // Every section full: five distinct stories.
+        // Every section full: two distinct stories.
         assert_eq!(distinct_slots(full), DISTINCT_STORIES);
         // Three side games instead of four: one slot rolls over.
         assert_eq!(distinct_slots(full - 1), DISTINCT_STORIES + 1);
-        // No records or hero stories: eight, never more.
-        assert_eq!(distinct_slots(full - personal), MOST_DISTINCT_STORIES);
-        // Dota only, no side games: eight.
-        let dota_only = fixed + MOST_PEOPLE + PERSONA_SLOTS;
+        // No records or hero stories: their four slots roll over too.
+        assert_eq!(distinct_slots(full - personal), DISTINCT_STORIES + personal);
+        // Dota only, no side games: eight, never more.
+        let dota_only = fixed + MOST_PATCH_CARDS + MOST_PEOPLE + PERSONA_SLOTS;
         assert_eq!(distinct_slots(dota_only), MOST_DISTINCT_STORIES);
+        assert_eq!(distinct_slots(0), MOST_DISTINCT_STORIES);
     }
 
     fn card(kind: &str) -> WrappedSlideData {

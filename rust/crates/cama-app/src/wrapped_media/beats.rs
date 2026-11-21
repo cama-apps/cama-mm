@@ -10,6 +10,7 @@
 use super::stage::{
     Align, DESCENT, FIRST_BASELINE, FOOTER_NAME, Face, HEIGHT, PILL_HEIGHT, Stage, WIDTH,
     block_height, count_up, fit_text, fit_text_within, pill_extent, pill_size, text_width,
+    whole_word_size,
 };
 use super::*;
 
@@ -133,17 +134,7 @@ impl Type {
     /// fit the column, so a long word shrinks instead of breaking mid-word,
     /// but never below the minimum: a word too wide even there breaks.
     fn size_for(self, text: &str) -> f32 {
-        let widest = text
-            .split_whitespace()
-            .map(|word| text_width(word, self.size, self.face))
-            .fold(0.0_f32, f32::max);
-        if widest <= COLUMN as f32 {
-            self.size
-        } else {
-            (self.size * COLUMN as f32 / widest)
-                .floor()
-                .max(self.minimum)
-        }
+        whole_word_size(text, self.face, self.size, COLUMN).max(self.minimum)
     }
 }
 
@@ -391,11 +382,18 @@ pub(super) fn chrome_ink(stage: &Stage<'_>, y: i32) -> Rgba {
 /// The setup's one large soft shape: its center, radius, and color. It sits in
 /// a corner clear of the type.
 fn setup_shape(stage: &Stage<'_>) -> ((f32, f32), f32, Rgba) {
-    match stage.slide.theme {
+    let (center, radius, color) = match stage.slide.theme {
         WrappedTheme::BeatPopoff => ((700.0, 10.0), 250.0, PINK),
         theme if theme.is_roast_beat() => ((640.0, 800.0), 260.0, stage.palette.soft),
         _ => ((700.0, 10.0), 250.0, stage.palette.soft),
-    }
+    };
+    // A player's shape sits a little differently in its corner.
+    let [across, along, size] = super::motifs::nudges(stage.slide, 61);
+    (
+        (center.0 + across * 60.0, center.1 + along * 60.0),
+        radius * (1.0 + size * 0.15),
+        color,
+    )
 }
 
 /// Beat one: hero art, the setup line, the big number, and its label.

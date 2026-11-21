@@ -1583,6 +1583,7 @@ fn test_enrich_match_projects_wrapped_facts_for_every_participant() {
                     ("blink".to_owned(), 1),
                     ("magic_wand".to_owned(), 2),
                     ("rapier".to_owned(), 2),
+                    ("ward_observer".to_owned(), 1),
                 ])),
             },
             WrappedEnrichmentFact {

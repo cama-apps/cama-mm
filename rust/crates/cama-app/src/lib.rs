@@ -55,6 +55,7 @@ pub mod dig_relic_recycling;
 pub mod dig_runtime;
 pub mod dig_social_runtime;
 pub mod dota_bet_seed;
+pub mod dota_icon_lookup;
 pub mod dota_streak;
 pub mod dotabase_sqlite;
 pub mod draft_analysis;

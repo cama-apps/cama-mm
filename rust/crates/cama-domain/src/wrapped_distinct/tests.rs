@@ -3,13 +3,18 @@ use chrono::{TimeZone, Utc};
 use super::*;
 
 #[test]
-fn tracked_item_counts_keep_only_tracked_keys_and_rapiers() {
-    let counts = tracked_item_counts([
+fn purchase_counts_keep_every_key() {
+    let counts = purchase_counts([
         "magic_wand",
         "blink",
         "magic_wand",
         "rapier",
         "ward_observer",
+        "tango",
+        "tpscroll",
+        "tango",
+        "recipe_magic_wand",
+        "",
     ]);
     assert_eq!(
         counts,
@@ -17,9 +22,14 @@ fn tracked_item_counts_keep_only_tracked_keys_and_rapiers() {
             ("blink".to_owned(), 1),
             ("magic_wand".to_owned(), 2),
             ("rapier".to_owned(), 1),
+            ("recipe_magic_wand".to_owned(), 1),
+            ("tango".to_owned(), 2),
+            ("tpscroll".to_owned(), 1),
+            ("ward_observer".to_owned(), 1),
         ])
     );
-    assert!(tracked_item_counts(["ward_observer"]).is_empty());
+    assert!(purchase_counts([""]).is_empty());
+    assert!(purchase_counts([]).is_empty());
 }
 
 const SINGLE_GAME_KEYS: &[&str] = &[
@@ -769,6 +779,11 @@ fn records_pick_personal_extremes_with_hero_and_date() {
         month_day(late, Some("Europe/Berlin")).as_deref(),
         Some("Mar 4")
     );
+    // So is the clock: Tuesday night at home, Wednesday morning in Berlin.
+    let clock = |zone| local_time(late, zone).map(|time| time.format("%a %H:%M").to_string());
+    assert_eq!(clock(None).as_deref(), Some("Tue 22:30"));
+    assert_eq!(clock(Some("Europe/Berlin")).as_deref(), Some("Wed 04:30"));
+    assert_eq!(clock(Some("Not/AZone")), clock(None));
 
     // The two strongest, one roast and one popoff.
     let keys = |picked: Vec<PersonalRecord>| picked.iter().map(|r| r.key).collect::<Vec<_>>();

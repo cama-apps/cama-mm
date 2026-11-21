@@ -7,7 +7,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use chrono::DateTime;
+use chrono::{DateTime, NaiveDateTime};
 
 use super::{Direction, DistinctMatch, commas, zone_for};
 use crate::formatting::count_noun;
@@ -371,4 +371,15 @@ pub fn hero_year(rows: &[DistinctMatch], target: i64) -> HeroYear {
 pub fn month_day(finished_at: i64, timezone: Option<&str>) -> Option<String> {
     let local = DateTime::from_timestamp(finished_at, 0)?.with_timezone(&zone_for(timezone));
     Some(local.format("%b %-d").to_string())
+}
+
+/// The wall-clock time a game finished at for the player: their time zone, or
+/// the default one when theirs is unset or unknown.
+#[must_use]
+pub fn local_time(finished_at: i64, timezone: Option<&str>) -> Option<NaiveDateTime> {
+    Some(
+        DateTime::from_timestamp(finished_at, 0)?
+            .with_timezone(&zone_for(timezone))
+            .naive_local(),
+    )
 }

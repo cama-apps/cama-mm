@@ -1,6 +1,8 @@
 //! The card layouts: big type, one reveal at a time.
 
-use super::stage::{Align, FOOTER_NAME, Face, HEIGHT, Stage, WIDTH, count_up};
+use super::stage::{
+    Align, FOOTER_NAME, Face, HEIGHT, Stage, WIDTH, count_up, text_width, tracked_width,
+};
 use super::*;
 
 const MARGIN: i32 = 40;
@@ -24,13 +26,7 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         WrappedLayout::Tiles => tiles(stage),
         WrappedLayout::Spotlight => spotlight(stage),
         WrappedLayout::Persona => persona(stage),
-        WrappedLayout::Award
-            if stage.slide.theme == WrappedTheme::Patch
-                || matches!(
-                    stage.slide.kind.as_str(),
-                    "story_patch_award" | "more_story_patch_award"
-                ) =>
-        {
+        WrappedLayout::Award if super::patches::is_patch_award(stage.slide) => {
             super::patches::award(stage)
         }
         WrappedLayout::Award => super::awards::paint(stage),
@@ -38,6 +34,10 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         WrappedLayout::Details => details(stage),
         WrappedLayout::TwoBeat => super::beats::paint(stage),
         WrappedLayout::PatchNotes => super::patches::notes(stage),
+        WrappedLayout::HeroPatch => super::updates::heroes(stage),
+        WrappedLayout::ItemPatch => super::updates::items(stage),
+        WrappedLayout::Talents => super::talents::paint(stage),
+        WrappedLayout::BugFixes => super::updates::fixes(stage),
     }
     chrome(stage);
 }
@@ -87,6 +87,7 @@ fn chrome(stage: &mut Stage<'_>) {
         Align::Left,
         (0.0, 0.0),
     );
+    section_tag(stage, label, label_ink);
     if slide.layout != WrappedLayout::Cover {
         let (top, height, size) = FOOTER_NAME;
         stage.block(
@@ -101,6 +102,70 @@ fn chrome(stage: &mut Stage<'_>) {
     }
 }
 
+/// The chapter name, small and tracked, at the right end of the year label's
+/// line. It shrinks to stay clear of a long label.
+fn section_tag(stage: &mut Stage<'_>, label: &str, ink: Rgba) {
+    const SIZE: f32 = 17.0;
+    const TRACKING: f32 = 0.16;
+    let tag = stage.slide.section.trim().to_uppercase();
+    if tag.is_empty() {
+        return;
+    }
+    let room = COLUMN as f32 - text_width(label, 23.0, Face::Bold) - 28.0;
+    let width = tracked_width(&tag, SIZE, Face::Bold, SIZE * TRACKING);
+    let size = if width > room {
+        (SIZE * room / width).max(9.0)
+    } else {
+        SIZE
+    };
+    let tracking = size * TRACKING;
+    let left = (WIDTH - MARGIN) as f32 - tracked_width(&tag, size, Face::Bold, tracking);
+    // The year label's baseline.
+    let baseline = 44.0 + 23.0 * super::stage::FIRST_BASELINE;
+    if stage.slide.layout != WrappedLayout::TwoBeat {
+        stage.tracked(&tag, left, baseline, size, Face::Bold, ink, tracking);
+        return;
+    }
+    // A two-beat setup grows a shape under the tag and then wipes to another
+    // color, so the tag is set as a mask of its own coverage and every pixel
+    // of it takes an ink that reads on what is under it.
+    let (black, white) = (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255));
+    let mask = Canvas::new(WRAPPED_SLIDE_WIDTH, TOP as usize, black);
+    let surface = std::mem::replace(&mut stage.canvas, mask);
+    stage.tracked(&tag, left, baseline, size, Face::Bold, white, tracking);
+    let mask = std::mem::replace(&mut stage.canvas, surface);
+    let inks = [ink, stage.palette.on_accent];
+    for (index, coverage) in mask.pixels.chunks_exact(4).enumerate() {
+        if coverage[0] == 0 {
+            continue;
+        }
+        let under = &stage.canvas.pixels[index * 4..index * 4 + 3];
+        let ink = readable_on(Rgba::rgb(under[0], under[1], under[2]), &inks);
+        stage.canvas.set(
+            (index % mask.width) as i32,
+            (index / mask.width) as i32,
+            ink.scaled_alpha(f32::from(coverage[0]) / 255.0),
+        );
+    }
+}
+
+/// The first of `inks` that reads as body text on `surface`. When none does,
+/// black or white, whichever stands out more: one of the two always reads.
+pub(super) fn readable_on(surface: Rgba, inks: &[Rgba]) -> Rgba {
+    use super::stage::contrast;
+    let (black, white) = (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255));
+    inks.iter()
+        .copied()
+        .find(|ink| contrast(*ink, surface) >= 4.5)
+        .unwrap_or_else(|| {
+            if contrast(black, surface) >= contrast(white, surface) {
+                black
+            } else {
+                white
+            }
+        })
+}
+
 /// The rows a layout should show, derived from legacy `lines`/`series` copy
 /// when a card has no structured rows.
 fn card_rows(slide: &WrappedSlideData) -> Vec<WrappedRow> {
@@ -113,9 +178,8 @@ fn card_rows(slide: &WrappedSlideData) -> Vec<WrappedRow> {
         .enumerate()
         .map(|(index, line)| WrappedRow {
             primary: line.clone(),
-            secondary: String::new(),
             value: slide.series.get(index).copied().unwrap_or(0.0),
-            image_png: None,
+            ..WrappedRow::default()
         })
         .collect()
 }

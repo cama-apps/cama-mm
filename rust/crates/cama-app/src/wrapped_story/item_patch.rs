@@ -1,0 +1,667 @@
+//! Item Updates: what a player's purchase logs say about their shopping.
+//!
+//! Only games with a purchase log count, and a log with a negative count is
+//! no log at all. Item names and costs come from the caller's catalog; an
+//! item the catalog does not know gets no line.
+
+use std::collections::BTreeMap;
+
+use cama_domain::formatting::format_grouped;
+use cama_domain::wrapped_distinct::DistinctMatch;
+
+use super::patch_support::{core, counted, own_games, percent};
+use super::personal_patch::BalanceDirection;
+
+/// One purchasable item, supplied by the runtime from the game database.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemInfo {
+    /// The OpenDota purchase-log key, such as `black_king_bar`.
+    pub key: String,
+    pub name: String,
+    pub cost: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ItemNote {
+    /// The big item built in the most games.
+    Signature,
+    /// A big item whose games were mostly won or mostly lost.
+    WinRate,
+    /// The consumable bought furthest beyond the guild's habit.
+    Consumable,
+    /// A Rapier, a Midas habit, or Gems.
+    Oddity,
+    /// Black King Bar never built as a core; it takes the oddity's place.
+    NeverBuilt,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemUpdate {
+    pub key: String,
+    pub name: String,
+    pub note: ItemNote,
+    pub line: String,
+    /// Set for win-rate notes only.
+    pub direction: Option<BalanceDirection>,
+}
+
+/// Games with a purchase log before any item tells a story.
+const MIN_LOGGED_GAMES: usize = 5;
+/// Catalog cost from which an item counts as a real build decision.
+const REAL_ITEM_COST: i64 = 2_000;
+const MIN_SIGNATURE_GAMES: usize = 3;
+const MIN_WIN_RATE_GAMES: usize = 5;
+/// Win rate with an item, in percent, that reads as a buff or a nerf.
+const BUFF_RATE: usize = 65;
+const NERF_RATE: usize = 35;
+/// Percentage points an item's win rate must sit from the player's own.
+const BASELINE_GAP: usize = 10;
+const MIN_CONSUMABLES: i64 = 10;
+/// Other players' logged games before their habits are a baseline.
+const MIN_GUILD_LOGS: usize = 10;
+const MIN_HABIT_GAMES: usize = 3;
+/// Logged core games without the item before its absence is conspicuous.
+const MIN_ABSENT_GAMES: usize = 15;
+
+/// Expensive parts that are bought on the way to something else.
+const COMPONENTS: &[&str] = &[
+    "demon_edge",
+    "eagle",
+    "hyperstone",
+    "mystic_staff",
+    "platemail",
+    "reaver",
+    "relic",
+    "soul_booster",
+    "ultimate_orb",
+];
+
+/// Consumables that can carry a note: key and fallback name.
+const CONSUMABLES: &[(&str, &str)] = &[
+    ("tango", "Tango"),
+    ("tpscroll", "Town Portal Scroll"),
+    ("clarity", "Clarity"),
+    ("flask", "Healing Salve"),
+    ("enchanted_mango", "Enchanted Mango"),
+    ("faerie_fire", "Faerie Fire"),
+    ("smoke_of_deceit", "Smoke of Deceit"),
+    ("dust", "Dust of Appearance"),
+    ("ward_observer", "Observer Ward"),
+    ("ward_sentry", "Sentry Ward"),
+    ("tome_of_knowledge", "Tome of Knowledge"),
+    ("bottle", "Bottle"),
+];
+
+/// How many of the player's games an item was built in.
+fn of_games(built: usize, games: usize) -> String {
+    format!("{built} of {games} games")
+}
+
+fn won_in(rate: usize, games: usize) -> String {
+    format!("{rate}% won in {games} games")
+}
+
+/// How many were bought and, when every result is known, the games won.
+fn bought(count: i64, wins: Option<usize>) -> String {
+    let count = format_grouped(count);
+    wins.map_or_else(
+        || format!("{count} bought"),
+        |wins| format!("{count} bought, {wins} won"),
+    )
+}
+
+/// Every line an item can carry, each at its widest: a four-digit pile,
+/// three-digit game counts and a 100% rate. Each opens with the figure its
+/// card sets large. For fit checks.
+#[must_use]
+pub fn widest_lines() -> Vec<String> {
+    vec![
+        of_games(888, 888),
+        of_games(0, 888),
+        won_in(100, 888),
+        bought(1_204, None),
+        bought(1_204, Some(888)),
+    ]
+}
+
+struct Log<'a> {
+    game: &'a DistinctMatch,
+    counts: BTreeMap<&'a str, i64>,
+}
+
+impl Log<'_> {
+    fn bought(&self, key: &str) -> i64 {
+        self.counts.get(key).copied().unwrap_or(0)
+    }
+}
+
+fn purchase_log(game: &DistinctMatch) -> Option<Log<'_>> {
+    let mut counts = BTreeMap::new();
+    for (key, count) in game.items.as_ref()? {
+        if *count < 0 {
+            return None;
+        }
+        *counts.entry(key.as_str()).or_insert(0) += count;
+    }
+    Some(Log { game, counts })
+}
+
+fn results(logs: &[&Log<'_>]) -> (usize, usize) {
+    let games = logs.iter().map(|log| log.game).collect::<Vec<_>>();
+    counted(&games, |game| game.won)
+}
+
+/// Up to four item notes for `player_id`, one of each kind and never the
+/// same item twice: signature, win rate, consumable, then an oddity or a
+/// never-built item.
+#[must_use]
+pub fn item_updates(
+    matches: &[DistinctMatch],
+    player_id: i64,
+    catalog: &[ItemInfo],
+) -> Vec<ItemUpdate> {
+    let games = own_games(matches, player_id);
+    let logs = games
+        .iter()
+        .filter_map(|game| purchase_log(game))
+        .collect::<Vec<_>>();
+    if logs.len() < MIN_LOGGED_GAMES {
+        return Vec::new();
+    }
+    let mut known: BTreeMap<&str, &ItemInfo> = BTreeMap::new();
+    for item in catalog {
+        known.entry(item.key.as_str()).or_insert(item);
+    }
+    let real = |key: &str| {
+        known.get(key).copied().filter(|item| {
+            item.cost >= REAL_ITEM_COST
+                && !key.starts_with("recipe")
+                && !COMPONENTS.contains(&key)
+                && !CONSUMABLES.iter().any(|(held, _)| *held == key)
+        })
+    };
+    let mut owners: BTreeMap<&str, Vec<&Log<'_>>> = BTreeMap::new();
+    for log in &logs {
+        for (key, count) in &log.counts {
+            if *count > 0 {
+                owners.entry(*key).or_default().push(log);
+            }
+        }
+    }
+    let total = |key: &str| logs.iter().map(|log| log.bought(key)).sum::<i64>();
+    let mut updates: Vec<ItemUpdate> = Vec::new();
+
+    let signature = owners
+        .iter()
+        .filter_map(|(&key, with)| Some((real(key)?, with.len())))
+        .filter(|(_, built)| *built >= MIN_SIGNATURE_GAMES)
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.key.cmp(&a.0.key)));
+    if let Some((item, built)) = signature {
+        updates.push(ItemUpdate {
+            key: item.key.clone(),
+            name: item.name.clone(),
+            note: ItemNote::Signature,
+            line: of_games(built, logs.len()),
+            direction: None,
+        });
+    }
+
+    let (all_wins, all_known) = results(&logs.iter().collect::<Vec<_>>());
+    let win_rate = owners
+        .iter()
+        .filter(|(key, _)| updates.iter().all(|held| held.key != **key))
+        .filter_map(|(&key, with)| {
+            let item = real(key)?;
+            let (wins, played) = results(with);
+            let lopsided = wins * 100 >= played * BUFF_RATE || wins * 100 <= played * NERF_RATE;
+            // Cross-multiplied against the player's own logged win rate.
+            let apart = (wins * all_known).abs_diff(all_wins * played) * 100
+                >= BASELINE_GAP * played * all_known;
+            (played >= MIN_WIN_RATE_GAMES && lopsided && apart).then_some((item, wins, played))
+        })
+        .max_by(|a, b| {
+            let extreme = |(_, wins, played): &(&ItemInfo, usize, usize)| {
+                (2 * wins).abs_diff(*played) as f64 / *played as f64
+            };
+            extreme(a)
+                .total_cmp(&extreme(b))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| b.0.key.cmp(&a.0.key))
+        });
+    if let Some((item, wins, played)) = win_rate {
+        let buff = wins * 2 > played;
+        updates.push(ItemUpdate {
+            key: item.key.clone(),
+            name: item.name.clone(),
+            note: ItemNote::WinRate,
+            line: won_in(percent(wins, played), played),
+            direction: Some(if buff {
+                BalanceDirection::Buff
+            } else {
+                BalanceDirection::Nerf
+            }),
+        });
+    }
+
+    let guild_logs = matches
+        .iter()
+        .filter(|game| game.discord_id != player_id)
+        .filter_map(purchase_log)
+        .collect::<Vec<_>>();
+    let consumable = CONSUMABLES
+        .iter()
+        .filter_map(|&(key, fallback)| {
+            let bought = total(key);
+            if bought < MIN_CONSUMABLES {
+                return None;
+            }
+            // Against the guild's own habit when there is one to compare
+            // with; otherwise the biggest pile wins.
+            let standout = if guild_logs.len() >= MIN_GUILD_LOGS {
+                let habit = guild_logs.iter().map(|log| log.bought(key)).sum::<i64>() as f64
+                    / guild_logs.len() as f64;
+                bought as f64 / logs.len() as f64 / habit.max(0.05)
+            } else {
+                bought as f64
+            };
+            Some((standout, key, fallback, bought))
+        })
+        // The first listed consumable wins a tie.
+        .reduce(|best, next| if next.0 > best.0 { next } else { best });
+    if let Some((_, key, fallback, count)) = consumable {
+        updates.push(ItemUpdate {
+            key: key.to_owned(),
+            name: known
+                .get(key)
+                .map_or(fallback, |item| item.name.as_str())
+                .to_owned(),
+            note: ItemNote::Consumable,
+            line: bought(count, None),
+            direction: None,
+        });
+    }
+
+    let fresh = |key: &str| {
+        known
+            .get(key)
+            .copied()
+            .filter(|_| updates.iter().all(|held| held.key != key))
+    };
+    let with = |key: &str| owners.get(key).map_or(&[][..], Vec::as_slice);
+    let oddity = None
+        .or_else(|| {
+            let (item, games) = (fresh("rapier")?, with("rapier"));
+            if games.is_empty() {
+                return None;
+            }
+            let (wins, decided) = results(games);
+            let wins = (decided == games.len()).then_some(wins);
+            Some((item, ItemNote::Oddity, bought(total("rapier"), wins)))
+        })
+        .or_else(|| {
+            let item = fresh("black_king_bar")?;
+            let cores = logs
+                .iter()
+                .filter(|log| core(log.game) == Some(true))
+                .collect::<Vec<_>>();
+            let never = cores.iter().all(|log| log.bought("black_king_bar") == 0);
+            (cores.len() >= MIN_ABSENT_GAMES && never)
+                .then(|| (item, ItemNote::NeverBuilt, of_games(0, cores.len())))
+        })
+        .or_else(|| {
+            let (item, games) = (fresh("hand_of_midas")?, with("hand_of_midas"));
+            (games.len() >= MIN_HABIT_GAMES)
+                .then(|| (item, ItemNote::Oddity, of_games(games.len(), logs.len())))
+        })
+        .or_else(|| {
+            let (item, count) = (fresh("gem")?, total("gem"));
+            (count >= MIN_HABIT_GAMES as i64).then(|| (item, ItemNote::Oddity, bought(count, None)))
+        });
+    if let Some((item, note, line)) = oddity {
+        updates.push(ItemUpdate {
+            key: item.key.clone(),
+            name: item.name.clone(),
+            note,
+            line,
+            direction: None,
+        });
+    }
+    updates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn catalog() -> Vec<ItemInfo> {
+        [
+            ("blink", "Blink Dagger", 2250),
+            ("black_king_bar", "Black King Bar", 4050),
+            ("bfury", "Battle Fury", 4100),
+            ("rapier", "Divine Rapier", 5600),
+            ("hand_of_midas", "Hand of Midas", 2200),
+            ("gem", "Gem of True Sight", 900),
+            ("magic_wand", "Magic Wand", 450),
+            ("relic", "Sacred Relic", 3400),
+            ("recipe_black_king_bar", "Black King Bar Recipe", 2250),
+            ("tpscroll", "Town Portal Scroll", 100),
+        ]
+        .into_iter()
+        .map(|(key, name, cost)| ItemInfo {
+            key: key.to_owned(),
+            name: name.to_owned(),
+            cost,
+        })
+        .collect()
+    }
+
+    fn game(id: i64, items: &[(&str, i64)], won: bool) -> DistinctMatch {
+        DistinctMatch {
+            match_id: id,
+            discord_id: 7,
+            finished_at: Some(id * 86_400),
+            won: Some(won),
+            items: Some(
+                items
+                    .iter()
+                    .map(|(key, count)| ((*key).to_owned(), *count))
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn note(updates: &[ItemUpdate], note: ItemNote) -> Option<&ItemUpdate> {
+        updates.iter().find(|update| update.note == note)
+    }
+
+    #[test]
+    fn nothing_is_said_without_five_purchase_logs() {
+        let mut rows = (1..=5)
+            .map(|id| game(id, &[("blink", 1), ("tango", 9)], true))
+            .collect::<Vec<_>>();
+        assert!(!item_updates(&rows, 7, &catalog()).is_empty());
+        // No log is unknown, not an empty shopping list.
+        rows[0].items = None;
+        assert!(item_updates(&rows, 7, &catalog()).is_empty());
+        // A negative count spoils the whole log.
+        rows[0].items = Some(vec![("blink".to_owned(), 1), ("tango".to_owned(), -1)]);
+        assert!(item_updates(&rows, 7, &catalog()).is_empty());
+        rows[0].items = Some(Vec::new());
+        assert!(!item_updates(&rows, 7, &catalog()).is_empty());
+        assert!(item_updates(&rows, 8, &catalog()).is_empty());
+    }
+
+    #[test]
+    fn signature_is_the_most_built_real_item() {
+        // Cheap items, recipes, components, consumables and anything the
+        // catalog does not know are out, however often they were bought.
+        let everywhere = [
+            ("magic_wand", 1),
+            ("recipe_black_king_bar", 1),
+            ("relic", 1),
+            ("tpscroll", 4),
+            ("mystery_item", 1),
+        ];
+        let mut rows = (1..=6)
+            .map(|id| {
+                let mut items = everywhere.to_vec();
+                if id <= 4 {
+                    items.push(("blink", 1));
+                }
+                if id <= 3 {
+                    items.push(("bfury", 2));
+                }
+                game(id, &items, id % 2 == 0)
+            })
+            .collect::<Vec<_>>();
+        let updates = item_updates(&rows, 7, &catalog());
+        let signature = note(&updates, ItemNote::Signature).expect("signature");
+        assert_eq!(
+            (signature.key.as_str(), signature.name.as_str()),
+            ("blink", "Blink Dagger")
+        );
+        assert_eq!(signature.line, "4 of 6 games");
+        assert_eq!(signature.direction, None);
+
+        // A game without a log is not one of the games counted.
+        rows.push(DistinctMatch {
+            match_id: 7,
+            discord_id: 7,
+            ..Default::default()
+        });
+        let updates = item_updates(&rows, 7, &catalog());
+        assert_eq!(
+            note(&updates, ItemNote::Signature).unwrap().line,
+            "4 of 6 games"
+        );
+
+        // Two games is a purchase, not a signature.
+        let rows = (1..=6)
+            .map(|id| game(id, &[("blink", i64::from(id <= 2))], true))
+            .collect::<Vec<_>>();
+        assert!(item_updates(&rows, 7, &catalog()).is_empty());
+    }
+
+    #[test]
+    fn win_rate_note_needs_five_games_a_lopsided_rate_and_a_gap_from_the_baseline() {
+        // Blink in all ten games; Battle Fury in five, four of them won.
+        let rows = |fury_wins: i64, other_wins: i64| {
+            (1..=10)
+                .map(|id| {
+                    if id <= 5 {
+                        game(id, &[("blink", 1), ("bfury", 1)], id <= fury_wins)
+                    } else {
+                        game(id, &[("blink", 1)], id - 5 <= other_wins)
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let updates = item_updates(&rows(4, 1), 7, &catalog());
+        let rate = note(&updates, ItemNote::WinRate).expect("win rate");
+        assert_eq!(rate.key, "bfury");
+        assert_eq!(rate.line, "80% won in 5 games");
+        assert_eq!(rate.direction, Some(BalanceDirection::Buff));
+        assert_eq!(note(&updates, ItemNote::Signature).unwrap().key, "blink");
+
+        let updates = item_updates(&rows(1, 4), 7, &catalog());
+        let rate = note(&updates, ItemNote::WinRate).expect("win rate");
+        assert_eq!(rate.line, "20% won in 5 games");
+        assert_eq!(rate.direction, Some(BalanceDirection::Nerf));
+
+        // 60% is not lopsided.
+        assert!(note(&item_updates(&rows(3, 1), 7, &catalog()), ItemNote::WinRate).is_none());
+        // 80% with the item means little when 80% is the player's norm.
+        assert!(note(&item_updates(&rows(4, 4), 7, &catalog()), ItemNote::WinRate).is_none());
+        // Four known results are not a sample.
+        let mut thin = rows(4, 1);
+        thin[4].won = None;
+        assert!(note(&item_updates(&thin, 7, &catalog()), ItemNote::WinRate).is_none());
+    }
+
+    #[test]
+    fn consumable_note_picks_the_biggest_pile_or_the_one_furthest_from_the_guild() {
+        let mut rows = (1..=5)
+            .map(|id| game(id, &[("tpscroll", 6), ("dust", 2), ("tango", 1)], true))
+            .collect::<Vec<_>>();
+        let updates = item_updates(&rows, 7, &catalog());
+        let consumable = note(&updates, ItemNote::Consumable).expect("consumable");
+        assert_eq!(consumable.key, "tpscroll");
+        assert_eq!(consumable.line, "30 bought");
+
+        // Everyone buys scrolls; nobody else buys ten Dust.
+        rows.extend((1..=10).map(|id| DistinctMatch {
+            discord_id: 8,
+            ..game(id, &[("tpscroll", 6)], true)
+        }));
+        let updates = item_updates(&rows, 7, &catalog());
+        let consumable = note(&updates, ItemNote::Consumable).expect("consumable");
+        // Dust is not in the catalog, so the built-in name stands in.
+        assert_eq!(
+            (consumable.key.as_str(), consumable.name.as_str()),
+            ("dust", "Dust of Appearance")
+        );
+        assert_eq!(consumable.line, "10 bought");
+
+        // Nine of anything is not a habit.
+        let rows = (1..=9)
+            .map(|id| game(id, &[("tango", 1)], true))
+            .collect::<Vec<_>>();
+        assert!(item_updates(&rows, 7, &catalog()).is_empty());
+    }
+
+    #[test]
+    fn rapier_note_reports_only_what_the_results_prove() {
+        let rows = |results: [Option<bool>; 2]| {
+            (1..=6)
+                .map(|id| {
+                    let mut row = game(id, &[("rapier", if id <= 2 { 2 } else { 0 })], true);
+                    if id <= 2 {
+                        row.won = results[id as usize - 1];
+                    }
+                    row
+                })
+                .collect::<Vec<_>>()
+        };
+        let line = |rows: &[DistinctMatch]| {
+            let updates = item_updates(rows, 7, &catalog());
+            let oddity = note(&updates, ItemNote::Oddity).expect("oddity");
+            assert_eq!(oddity.name, "Divine Rapier");
+            oddity.line.clone()
+        };
+        assert_eq!(line(&rows([Some(true), Some(false)])), "4 bought, 1 won");
+        assert_eq!(line(&rows([Some(true), None])), "4 bought");
+        let mut single = rows([Some(false), Some(true)]);
+        single[1].items = Some(Vec::new());
+        assert_eq!(line(&single), "2 bought, 0 won");
+    }
+
+    #[test]
+    fn absent_bkb_needs_fifteen_logged_core_games() {
+        let rows = |cores: i64| {
+            (1..=20)
+                .map(|id| DistinctMatch {
+                    position: Some(if id <= cores { 2 } else { 5 }),
+                    ..game(id, &[("magic_wand", 1)], true)
+                })
+                .collect::<Vec<_>>()
+        };
+        let updates = item_updates(&rows(15), 7, &catalog());
+        let never = note(&updates, ItemNote::NeverBuilt).expect("never built");
+        assert_eq!(never.key, "black_king_bar");
+        assert_eq!(never.line, "0 of 15 games");
+        assert!(note(&updates, ItemNote::Oddity).is_none());
+        assert!(item_updates(&rows(14), 7, &catalog()).is_empty());
+        // One purchase as a core and the absence is gone.
+        let mut bought = rows(15);
+        bought[0].items = Some(vec![("black_king_bar".to_owned(), 1)]);
+        assert!(note(&item_updates(&bought, 7, &catalog()), ItemNote::NeverBuilt).is_none());
+        // Unknown positions are not core games.
+        let mut unknown = rows(15);
+        unknown[0].position = None;
+        assert!(item_updates(&unknown, 7, &catalog()).is_empty());
+        // Without a name there is no line.
+        let nameless = catalog()
+            .into_iter()
+            .filter(|item| item.key != "black_king_bar")
+            .collect::<Vec<_>>();
+        assert!(item_updates(&rows(15), 7, &nameless).is_empty());
+    }
+
+    #[test]
+    fn midas_and_gem_habits_need_three_and_yield_to_a_rapier() {
+        // Blink in every game keeps the signature away from the oddities.
+        let rows = |items: &[(&'static str, i64)]| {
+            (1..=6)
+                .map(|id| {
+                    let mut bought = vec![("blink", 1)];
+                    if id <= 3 {
+                        bought.extend_from_slice(items);
+                    }
+                    game(id, &bought, id != 1)
+                })
+                .collect::<Vec<_>>()
+        };
+        let oddity = |rows: &[DistinctMatch]| {
+            note(&item_updates(rows, 7, &catalog()), ItemNote::Oddity).cloned()
+        };
+        let midas = oddity(&rows(&[("hand_of_midas", 1)])).expect("midas");
+        assert_eq!(midas.key, "hand_of_midas");
+        assert_eq!(midas.line, "3 of 6 games");
+        let gem = oddity(&rows(&[("gem", 1)])).expect("gem");
+        assert_eq!(gem.name, "Gem of True Sight");
+        assert_eq!(gem.line, "3 bought");
+        assert!(oddity(&rows(&[("gem", 1)])[1..]).is_none());
+        let both = oddity(&rows(&[("gem", 1), ("hand_of_midas", 1), ("rapier", 1)])).unwrap();
+        assert_eq!(both.key, "rapier");
+        let unknown = rows(&[("hand_of_midas", 1)])
+            .into_iter()
+            .map(|row| DistinctMatch { won: None, ..row })
+            .collect::<Vec<_>>();
+        assert_eq!(oddity(&unknown).unwrap().line, "3 of 6 games");
+    }
+
+    fn busy_year() -> Vec<DistinctMatch> {
+        (1..=20)
+            .map(|id| {
+                let mut items = vec![("blink", 1), ("tango", 3)];
+                if id <= 6 {
+                    items.push(("bfury", 1));
+                }
+                if id == 20 {
+                    items.push(("rapier", 1));
+                }
+                game(id, &items, id <= 6 || id % 4 == 0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn notes_are_capped_distinct_ordered_and_stable_under_reordering() {
+        let mut rows = busy_year();
+        let updates = item_updates(&rows, 7, &catalog());
+        assert_eq!(
+            updates
+                .iter()
+                .map(|update| (update.note, update.key.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (ItemNote::Signature, "blink"),
+                (ItemNote::WinRate, "bfury"),
+                (ItemNote::Consumable, "tango"),
+                (ItemNote::Oddity, "rapier"),
+            ]
+        );
+        rows.reverse();
+        let mut shuffled = catalog();
+        shuffled.reverse();
+        assert_eq!(item_updates(&rows, 7, &shuffled), updates);
+
+        // A Rapier in most games is the signature and is not repeated.
+        let rapiers = (1..=6)
+            .map(|id| game(id, &[("rapier", 1)], true))
+            .collect::<Vec<_>>();
+        let updates = item_updates(&rapiers, 7, &catalog());
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].note, ItemNote::Signature);
+    }
+
+    #[test]
+    fn every_line_opens_with_its_figure_and_stays_a_few_words() {
+        assert_eq!(CONSUMABLES.len(), 12);
+        // The card sets a line's leading figure large and the words after it
+        // small beside it, so the figure leads and the words stay few.
+        let lines = widest_lines();
+        assert_eq!(lines.len(), 5);
+        for line in lines {
+            assert!(!line.contains(['{', '.', '!']), "{line}");
+            let (figure, words) = line.split_once(' ').expect("a figure, then words");
+            assert!(
+                figure.starts_with(|character: char| character.is_ascii_digit())
+                    && figure.chars().count() <= 5,
+                "{line}"
+            );
+            assert!(words.split(' ').count() <= 4, "{line}");
+        }
+    }
+}

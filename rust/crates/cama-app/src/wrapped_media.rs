@@ -21,6 +21,8 @@ mod patches;
 mod placement;
 mod shapes;
 mod stage;
+mod talents;
+mod updates;
 
 pub const WRAPPED_SLIDE_WIDTH: usize = 720;
 pub const WRAPPED_SLIDE_HEIGHT: usize = 900;
@@ -49,6 +51,12 @@ pub struct WrappedRow {
     /// A picture beside the row, such as a hero portrait. Images that do not
     /// decode are skipped.
     pub image_png: Option<Vec<u8>>,
+    /// A short stamp on the row: a verdict such as `BUFFED`, a talent level,
+    /// or `KNOWN ISSUE`.
+    pub tag: String,
+    /// Small pictures that decorate the row, such as a hero's ability icons,
+    /// as PNG bytes. Ones that do not decode are skipped.
+    pub icons: Vec<Vec<u8>>,
 }
 
 impl WrappedRow {
@@ -57,8 +65,7 @@ impl WrappedRow {
         Self {
             primary: primary.into(),
             secondary: secondary.into(),
-            value: 0.0,
-            image_png: None,
+            ..Self::default()
         }
     }
 
@@ -66,9 +73,8 @@ impl WrappedRow {
     pub fn bar(primary: impl Into<String>, value: f64) -> Self {
         Self {
             primary: primary.into(),
-            secondary: String::new(),
             value,
-            image_png: None,
+            ..Self::default()
         }
     }
 }
@@ -92,6 +98,23 @@ pub enum WrappedLayout {
     TwoBeat,
     /// Up to three personal changes; row values select buff, nerf or rework marks.
     PatchNotes,
+    /// Up to three hero blocks. Each row: `primary` the hero, `image_png` its
+    /// portrait, `tag` the stamped verdict, `value` above zero for a buff and
+    /// below zero for a nerf, `secondary` one or two change lines split by a
+    /// newline, `icons` up to four ability icons.
+    HeroPatch,
+    /// Up to four items. Each row: `image_png` the item's icon, `primary` its
+    /// name, `secondary` one line whose leading figure counts up, `tag` an
+    /// optional stamp colored by the sign of `value`.
+    ItemPatch,
+    /// A talent tree of up to four levels, top row first. Each row: `tag` the
+    /// level, `primary` the left option, `secondary` the right, `value` below
+    /// zero when the left was picked and above zero for the right.
+    Talents,
+    /// Up to four fixes, each ticked off. Each row: `primary` the line,
+    /// `image_png` an optional hero portrait, and a `tag` such as
+    /// `KNOWN ISSUE` that marks it as still open.
+    BugFixes,
 }
 
 /// The color story and animated background of a card.
@@ -102,6 +125,12 @@ pub enum WrappedTheme {
     Cover,
     /// Slate and brass, like a carved gameplay update.
     Patch,
+    /// The patch chapters, one loud color each: teal hero updates, vermilion
+    /// item updates, an emerald talent tree and azure bug fixes.
+    PatchHeroes,
+    PatchItems,
+    PatchTalents,
+    PatchFixes,
     Queue,
     QueueAlt,
     Heroes,
@@ -247,6 +276,12 @@ pub struct WrappedSlideData {
     pub chapter_index: usize,
     pub chapter_count: usize,
     pub kind: String,
+    /// The chapter this card belongs to, such as `HERO UPDATES`, set small in
+    /// the top right corner. Empty draws nothing.
+    pub section: String,
+    /// Varies the moving background shapes from player to player. Zero keeps
+    /// the default composition.
+    pub seed: u64,
     pub title: String,
     pub username: String,
     pub year_label: String,
@@ -277,6 +312,8 @@ impl WrappedSlideData {
             chapter_index: 0,
             chapter_count: 1,
             kind,
+            section: String::new(),
+            seed: 0,
             title: title.into(),
             username: String::new(),
             year_label: String::new(),
@@ -299,6 +336,10 @@ fn default_style(kind: &str) -> (WrappedLayout, WrappedTheme) {
     match kind {
         "story_intro" => (WrappedLayout::Cover, WrappedTheme::Cover),
         "story_patch" => (WrappedLayout::PatchNotes, WrappedTheme::Patch),
+        "story_hero_patch" => (WrappedLayout::HeroPatch, WrappedTheme::PatchHeroes),
+        "story_items" => (WrappedLayout::ItemPatch, WrappedTheme::PatchItems),
+        "story_talents" => (WrappedLayout::Talents, WrappedTheme::PatchTalents),
+        "story_bugfixes" => (WrappedLayout::BugFixes, WrappedTheme::PatchFixes),
         "story_finale" => (WrappedLayout::Recap, WrappedTheme::Recap),
         "story_games" | "story_playtime" => (WrappedLayout::BigNumber, WrappedTheme::Queue),
         "story_moment" => (WrappedLayout::BigNumber, WrappedTheme::QueueAlt),
@@ -365,6 +406,17 @@ fn still(slide: &WrappedSlideData) -> WrappedRenderedMedia {
 pub fn render_wrapped_slide(slide: &WrappedSlideData) -> Result<Vec<u8>, WrappedMediaError> {
     validate_slide(slide)?;
     Ok(encode_png(&stage::render_still(slide)))
+}
+
+/// Render one instant of a card's reveal as a PNG, for visual review.
+/// `progress` runs from 0 to 1, where 1 is the finished still.
+pub fn render_wrapped_frame(
+    slide: &WrappedSlideData,
+    progress: f32,
+) -> Result<Vec<u8>, WrappedMediaError> {
+    validate_slide(slide)?;
+    let mut stage = stage::Stage::new(slide);
+    Ok(encode_png(stage.paint(progress)))
 }
 
 /// The background colors a card shows, first frame to last: one for most
@@ -594,7 +646,7 @@ fn validate_slide(slide: &WrappedSlideData) -> Result<(), WrappedMediaError> {
     let row_text = slide
         .rows
         .iter()
-        .flat_map(|row| [&row.primary, &row.secondary]);
+        .flat_map(|row| [&row.primary, &row.secondary, &row.tag]);
     let beat_text = slide.beat.iter().flat_map(|beat| {
         [
             &beat.setup,
@@ -611,6 +663,7 @@ fn validate_slide(slide: &WrappedSlideData) -> Result<(), WrappedMediaError> {
         .chain(beat_text)
         .chain([
             &slide.title,
+            &slide.section,
             &slide.username,
             &slide.year_label,
             &slide.headline,

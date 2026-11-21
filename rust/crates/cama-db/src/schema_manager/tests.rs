@@ -3046,10 +3046,13 @@ fn wrapped_item_facts_backfill_from_enrichment_data() {
         }
         let expected = (
             Some(2),
-            Some(r#"{"blink":1,"magic_wand":2,"rapier":1}"#.to_owned()),
+            Some(r#"{"blink":1,"magic_wand":2,"rapier":1,"ward_observer":1}"#.to_owned()),
         );
         assert_eq!(read(&connection, 1), expected);
-        assert_eq!(read(&connection, 2), (None, Some("{}".to_owned())));
+        assert_eq!(
+            read(&connection, 2),
+            (None, Some(r#"{"ward_observer":1}"#.to_owned()))
+        );
         assert_eq!(read(&connection, 3), (None, None));
         assert!(
             initialize_or_migrate(database.path())
@@ -3059,4 +3062,141 @@ fn wrapped_item_facts_backfill_from_enrichment_data() {
         );
         assert_eq!(read(&connection, 1), expected);
     }
+}
+
+#[test]
+fn full_wrapped_item_counts_backfill_recounts_existing_facts_only() {
+    const MIGRATION: &str = "backfill_full_wrapped_item_counts";
+    type Fact = (
+        Option<f64>,
+        Option<i64>,
+        Option<i64>,
+        i64,
+        Option<i64>,
+        Option<f64>,
+        Option<f64>,
+        Option<i64>,
+        Option<String>,
+    );
+    fn facts(connection: &Connection) -> BTreeMap<(i64, i64, i64), Fact> {
+        connection
+            .prepare(
+                "SELECT guild_id,match_id,discord_id,actions_per_min,courier_kills,pings,
+                        rapier_count,lane_role,comeback,throw,buybacks,item_counts
+                   FROM wrapped_enrichment_facts",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    (row.get(0)?, row.get(1)?, row.get(2)?),
+                    (
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                    ),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+    fn make_pending(connection: &Connection) {
+        connection
+            .execute("DELETE FROM schema_migrations WHERE name=?1", [MIGRATION])
+            .unwrap();
+    }
+    let payload = serde_json::json!({
+        "players": [
+            {"account_id": 555, "purchase_log": [
+                {"key": "tango"}, {"key": "tpscroll"}, {"key": "tango"},
+                {"key": "blink"}, {"key": "recipe_bracer"}, {"key": ""}, {"time": 9}
+            ]},
+            {"account_id": 556, "purchase_log": []},
+            {"account_id": 557}
+        ]
+    })
+    .to_string();
+
+    let database = empty_database();
+    let fresh = initialize_or_migrate(database.path()).unwrap();
+    assert!(fresh.newly_applied.iter().any(|name| name == MIGRATION));
+    let connection = open_runtime_connection(database.path()).unwrap();
+    assert!(facts(&connection).is_empty());
+
+    // Facts as the eight-item writers left them. Match 1 has a payload, match
+    // 2 has none, match 3's is malformed, and match 4 belongs to guild 20.
+    connection
+        .execute_batch(
+            "INSERT INTO players(discord_id,guild_id,discord_username,steam_id)
+               VALUES(1,10,'a',555),(2,10,'b',556),(3,10,'c',557),(4,10,'d',NULL),
+                     (1,20,'a',555);
+             INSERT INTO matches(match_id,guild_id,valve_match_id,team1_players,team2_players)
+               VALUES(1,10,901,'[]','[]'),(2,10,902,'[]','[]'),(3,10,903,'[]','[]'),
+                     (4,20,904,'[]','[]');
+             INSERT INTO match_participants(match_id,guild_id,discord_id,team_number,won,side)
+               VALUES(1,10,1,1,1,'radiant'),(1,10,2,1,1,'radiant'),(1,10,3,1,1,'radiant'),
+                     (1,10,4,1,1,'radiant'),(2,10,1,1,1,'radiant'),(2,10,2,1,1,'radiant'),
+                     (3,10,1,1,1,'radiant'),(4,20,1,1,1,'radiant');
+             INSERT INTO wrapped_enrichment_facts(
+                 guild_id,match_id,discord_id,actions_per_min,courier_kills,pings,
+                 rapier_count,lane_role,comeback,throw,buybacks,item_counts)
+               VALUES(10,1,1,321.5,2,44,7,2,9000.0,4000.0,3,'{\"blink\":1}'),
+                     (10,1,2,NULL,NULL,NULL,0,NULL,9000.0,4000.0,NULL,'{}'),
+                     (10,1,3,NULL,NULL,NULL,0,NULL,9000.0,4000.0,NULL,NULL),
+                     (10,1,4,NULL,NULL,NULL,0,NULL,9000.0,4000.0,NULL,NULL),
+                     (10,2,1,NULL,NULL,NULL,0,NULL,NULL,NULL,NULL,'{\"blink\":1}'),
+                     (10,2,2,NULL,NULL,NULL,0,NULL,NULL,NULL,NULL,NULL),
+                     (10,3,1,NULL,NULL,NULL,0,NULL,NULL,NULL,NULL,'{\"dust\":1}'),
+                     (20,4,1,NULL,NULL,NULL,0,NULL,NULL,NULL,NULL,'{\"blink\":1}'),
+                     (10,4,1,NULL,NULL,NULL,0,NULL,NULL,NULL,NULL,'{\"blink\":1}');",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE matches SET enrichment_data=?1 WHERE match_id IN (1,4)",
+            [&payload],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE matches SET enrichment_data='not json' WHERE match_id=3",
+            [],
+        )
+        .unwrap();
+    let before = facts(&connection);
+    make_pending(&connection);
+
+    let upgraded = initialize_or_migrate(database.path()).unwrap();
+    assert_eq!(upgraded.newly_applied, [MIGRATION]);
+    let after = facts(&connection);
+    let recounted = Some(r#"{"blink":1,"recipe_bracer":1,"tango":2,"tpscroll":1}"#.to_owned());
+    let mut expected = before.clone();
+    // Every key of a stored purchase log is counted, in the match's own guild.
+    expected.get_mut(&(10, 1, 1)).unwrap().8 = recounted.clone();
+    expected.get_mut(&(20, 4, 1)).unwrap().8 = recounted;
+    assert_eq!(after, expected, "only item_counts of payload rows changes");
+    assert_eq!(after[&(10, 1, 2)].8.as_deref(), Some("{}"), "empty log");
+    assert_eq!(after[&(10, 1, 3)].8, None, "no purchase log stays unknown");
+    assert_eq!(
+        after[&(10, 1, 4)].8,
+        None,
+        "no linked account stays unknown"
+    );
+    assert_eq!(after[&(10, 2, 2)].8, None, "no payload stays unknown");
+
+    assert!(
+        initialize_or_migrate(database.path())
+            .unwrap()
+            .was_current()
+    );
+    assert_eq!(facts(&connection), expected);
+    make_pending(&connection);
+    initialize_or_migrate(database.path()).unwrap();
+    assert_eq!(facts(&connection), expected, "a rerun recounts identically");
 }

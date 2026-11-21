@@ -1359,6 +1359,9 @@ fn run_consolidated_backfills(
         || pending(pending_migrations, "add_wrapped_item_facts")
     {
         backfill_wrapped_enrichment(transaction)?;
+    } else if pending(pending_migrations, "backfill_full_wrapped_item_counts") {
+        // The rebuild above already counts every purchase key.
+        backfill_wrapped_item_counts(transaction)?;
     }
     if pending(
         pending_migrations,
@@ -2056,55 +2059,8 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
         let Ok(JsonValue::Object(payload)) = serde_json::from_str::<JsonValue>(&raw) else {
             continue;
         };
-        let participant_rows = {
-            let mut statement = transaction.prepare(
-                "SELECT mp.discord_id,psi.steam_id,p.steam_id
-                 FROM match_participants mp
-                 LEFT JOIN player_steam_ids psi ON psi.discord_id=mp.discord_id
-                 LEFT JOIN players p
-                   ON p.discord_id=mp.discord_id AND p.guild_id=mp.guild_id
-                 WHERE mp.match_id=?1 AND mp.guild_id=?2
-                 ORDER BY mp.discord_id,psi.is_primary DESC,psi.added_at ASC",
-            )?;
-            statement
-                .query_map(params![match_id, guild_id], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let mut steam_ids: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
-        let mut legacy_ids = BTreeMap::new();
-        for (discord_id, junction, legacy) in participant_rows {
-            let ids = steam_ids.entry(discord_id).or_default();
-            if let Some(junction) = junction {
-                ids.insert(junction);
-            }
-            if let Some(legacy) = legacy {
-                legacy_ids.insert(discord_id, legacy);
-            }
-        }
-        for (discord_id, mut ids) in steam_ids {
-            if ids.is_empty()
-                && let Some(legacy) = legacy_ids.get(&discord_id)
-            {
-                ids.insert(*legacy);
-            }
-            let player = payload
-                .get("players")
-                .and_then(JsonValue::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(JsonValue::as_object)
-                .find(|candidate| {
-                    candidate
-                        .get("account_id")
-                        .and_then(JsonValue::as_i64)
-                        .is_some_and(|account_id| ids.contains(&account_id))
-                });
+        for (discord_id, ids) in wrapped_participant_steam_ids(transaction, match_id, guild_id)? {
+            let player = wrapped_payload_player(&payload, &ids);
             let purchases = crate::json_numeric::wrapped_purchase_facts(player)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             transaction.execute(
@@ -2135,6 +2091,119 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
                         .and_then(coerce_integral_i64),
                     purchases.item_counts,
                 ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Each participant's Steam accounts for one match: the linked accounts, or
+/// the legacy `players.steam_id` when none is linked.
+fn wrapped_participant_steam_ids(
+    transaction: &Transaction<'_>,
+    match_id: i64,
+    guild_id: i64,
+) -> Result<BTreeMap<i64, BTreeSet<i64>>, rusqlite::Error> {
+    let participant_rows = {
+        let mut statement = transaction.prepare(
+            "SELECT mp.discord_id,psi.steam_id,p.steam_id
+             FROM match_participants mp
+             LEFT JOIN player_steam_ids psi ON psi.discord_id=mp.discord_id
+             LEFT JOIN players p
+               ON p.discord_id=mp.discord_id AND p.guild_id=mp.guild_id
+             WHERE mp.match_id=?1 AND mp.guild_id=?2
+             ORDER BY mp.discord_id,psi.is_primary DESC,psi.added_at ASC",
+        )?;
+        statement
+            .query_map(params![match_id, guild_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut steam_ids: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
+    let mut legacy_ids = BTreeMap::new();
+    for (discord_id, junction, legacy) in participant_rows {
+        let ids = steam_ids.entry(discord_id).or_default();
+        if let Some(junction) = junction {
+            ids.insert(junction);
+        }
+        if let Some(legacy) = legacy {
+            legacy_ids.insert(discord_id, legacy);
+        }
+    }
+    for (discord_id, ids) in &mut steam_ids {
+        if ids.is_empty()
+            && let Some(legacy) = legacy_ids.get(discord_id)
+        {
+            ids.insert(*legacy);
+        }
+    }
+    Ok(steam_ids)
+}
+
+/// The OpenDota player object played from one of `steam_ids`.
+fn wrapped_payload_player<'a>(
+    payload: &'a serde_json::Map<String, JsonValue>,
+    steam_ids: &BTreeSet<i64>,
+) -> Option<&'a serde_json::Map<String, JsonValue>> {
+    payload
+        .get("players")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(JsonValue::as_object)
+        .find(|candidate| {
+            candidate
+                .get("account_id")
+                .and_then(coerce_integral_i64)
+                .is_some_and(|account_id| steam_ids.contains(&account_id))
+        })
+}
+
+/// Recount `item_counts` from the stored match payload for facts rows written
+/// while only a few item keys were kept. Nothing else on a row changes, and a
+/// row is left alone when its match has no readable payload or its player has
+/// no purchase log, so an unknown log stays NULL.
+fn backfill_wrapped_item_counts(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    let matches = {
+        let mut statement = transaction.prepare(
+            "SELECT m.match_id,m.guild_id FROM matches m
+             WHERE m.enrichment_data IS NOT NULL
+               AND EXISTS (
+                 SELECT 1 FROM wrapped_enrichment_facts wf
+                 WHERE wf.guild_id=m.guild_id AND wf.match_id=m.match_id
+               )
+             ORDER BY m.match_id",
+        )?;
+        statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (match_id, guild_id) in matches {
+        // One payload at a time: a parsed match is large.
+        let raw: String = transaction.query_row(
+            "SELECT enrichment_data FROM matches WHERE match_id=?1",
+            [match_id],
+            |row| row.get(0),
+        )?;
+        let Ok(JsonValue::Object(payload)) = serde_json::from_str::<JsonValue>(&raw) else {
+            continue;
+        };
+        for (discord_id, ids) in wrapped_participant_steam_ids(transaction, match_id, guild_id)? {
+            let purchases =
+                crate::json_numeric::wrapped_purchase_facts(wrapped_payload_player(&payload, &ids))
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let Some(item_counts) = purchases.item_counts else {
+                continue;
+            };
+            transaction.execute(
+                "UPDATE wrapped_enrichment_facts SET item_counts=?4
+                 WHERE guild_id=?1 AND match_id=?2 AND discord_id=?3",
+                params![guild_id, match_id, discord_id, item_counts],
             )?;
         }
     }

@@ -155,8 +155,8 @@ fn parse_match_date(raw: &str) -> Option<i64> {
         .ok()
 }
 
-/// `{"blink":1,"magic_wand":2}` sorted by key; `{}` is a parsed log with no
-/// tracked purchase, and malformed text is unknown.
+/// `{"blink":1,"tango":2}` sorted by key; `{}` is a parsed log with no
+/// purchase, and malformed text is unknown.
 fn parse_item_counts(raw: &str) -> Option<Vec<(String, i64)>> {
     serde_json::from_str::<BTreeMap<String, i64>>(raw)
         .map(|counts| counts.into_iter().collect())
@@ -618,7 +618,9 @@ impl WrappedLiveRepository {
                     wf.actions_per_min, wf.rapier_count, wf.buybacks, wf.item_counts,
                     wf.comeback, wf.throw,
                     rh.expected_team_win_prob, rh.rating - rh.rating_before,
-                    p.timezone, mp.firstblood_claimed, mp.roshans_killed
+                    p.timezone, mp.firstblood_claimed, mp.roshans_killed,
+                    mp.derived_role, mp.last_hits_at_10, mp.teamfight_participation,
+                    mp.net_worth, mp.denies, mp.tower_damage
                FROM match_participants AS mp
                JOIN matches AS m ON m.match_id = mp.match_id
                JOIN players AS p ON p.discord_id = mp.discord_id AND p.guild_id = ?1
@@ -675,6 +677,15 @@ impl WrappedLiveRepository {
                 rating_delta: row.get(28)?,
                 first_blood: row.get::<_, Option<i64>>(30)?.map(|claimed| claimed != 0),
                 roshans: row.get(31)?,
+                position: row
+                    .get::<_, Option<String>>(32)?
+                    .and_then(|role| role.trim().parse::<i64>().ok())
+                    .filter(|position| (1..=5).contains(position)),
+                last_hits_at_10: row.get(33)?,
+                teamfight_participation: row.get(34)?,
+                net_worth: row.get(35)?,
+                denies: row.get(36)?,
+                tower_damage: row.get(37)?,
             });
             players
                 .entry(discord_id)
@@ -688,6 +699,49 @@ impl WrappedLiveRepository {
             })
             .collect();
         Ok((matches, players))
+    }
+
+    /// `(hero_id, games)` for each hero the opposing team banned in the
+    /// player's recorded games in the window, most-banned first.
+    ///
+    /// `match_bans.team` is OpenDota's `picks_bans[].team`: 0 for Radiant and
+    /// 1 for Dire. A participant on team 1 (`side = 'radiant'`) therefore
+    /// faces the bans with `team = 1`, and one on team 2 (`side = 'dire'`)
+    /// those with `team = 0`. `side` decides only when `team_number` is
+    /// neither; a participant with no known team has no bans counted.
+    pub fn bans_against(
+        &self,
+        guild_id: i64,
+        discord_id: i64,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<Vec<(i64, i64)>, WrappedLiveRepositoryError> {
+        let connection = open_runtime_connection(&self.path)?;
+        let mut statement = connection.prepare(
+            "SELECT mb.hero_id, COUNT(DISTINCT mb.match_id) AS games
+               FROM match_participants AS mp
+               JOIN matches AS m ON m.match_id = mp.match_id
+               JOIN players AS p ON p.discord_id = mp.discord_id AND p.guild_id = ?1
+               JOIN match_bans AS mb
+                 ON mb.match_id = mp.match_id
+                AND mb.team = CASE WHEN mp.team_number = 1 THEN 1
+                                   WHEN mp.team_number = 2 THEN 0
+                                   WHEN mp.side = 'radiant' THEN 1
+                                   WHEN mp.side = 'dire' THEN 0 END
+              WHERE mp.discord_id = ?2
+                AND m.winning_team IS NOT NULL
+                AND m.guild_id = ?1
+                AND m.match_date >= datetime(?3, 'unixepoch')
+                AND m.match_date < datetime(?4, 'unixepoch')
+           GROUP BY mb.hero_id
+           ORDER BY games DESC, mb.hero_id ASC",
+        )?;
+        statement
+            .query_map(params![guild_id, discord_id, start_ts, end_ts], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Radiant gold advantage per minute, when the match was parsed.
@@ -1029,6 +1083,133 @@ mod tests {
         // A parsed zero is known; an unparsed game stays unknown.
         assert_eq!(facts(9), (Some(false), Some(0)));
         assert_eq!(facts(7), (None, None));
+    }
+
+    #[test]
+    fn guild_year_rows_reads_position_and_laning_columns() {
+        let (file, db) = year_fixture();
+        add_match(
+            &db,
+            1,
+            42,
+            "2026-03-14 21:05:00",
+            &[7, 8, 9, 10, 11, 12, 13],
+        );
+        db.execute_batch(
+            "UPDATE match_participants
+                SET derived_role='3', last_hits_at_10=61, teamfight_participation=0.625,
+                    net_worth=18250, denies=14, tower_damage=3120
+              WHERE discord_id=7;
+             UPDATE match_participants
+                SET derived_role='0', last_hits_at_10=0, teamfight_participation=0,
+                    net_worth=0, denies=0, tower_damage=0
+              WHERE discord_id=8;
+             UPDATE match_participants SET derived_role='6' WHERE discord_id=9;
+             UPDATE match_participants SET derived_role='carry' WHERE discord_id=10;
+             -- The enrichment writer binds an integer; the column stores it as text.
+             UPDATE match_participants SET derived_role=1 WHERE discord_id=12;
+             UPDATE match_participants SET derived_role='5' WHERE discord_id=13;",
+        )
+        .unwrap();
+        let (matches, _) = WrappedLiveRepository::new(file.path())
+            .guild_year_rows(42, START, END)
+            .unwrap();
+        let row = |id: i64| matches.iter().find(|m| m.discord_id == id).unwrap();
+        let laning = |id: i64| {
+            let row = row(id);
+            (
+                row.last_hits_at_10,
+                row.teamfight_participation,
+                row.net_worth,
+                row.denies,
+                row.tower_damage,
+            )
+        };
+        assert_eq!(row(7).position, Some(3));
+        assert_eq!(
+            laning(7),
+            (Some(61), Some(0.625), Some(18_250), Some(14), Some(3_120))
+        );
+        // A stored zero is known; an unparsed game stays unknown.
+        assert_eq!(laning(8), (Some(0), Some(0.0), Some(0), Some(0), Some(0)));
+        assert_eq!(laning(11), (None, None, None, None, None));
+        // Only a numeric position from 1 to 5 is a position.
+        let positions: Vec<_> = (8..=13).map(|id| row(id).position).collect();
+        assert_eq!(positions, [None, None, None, None, Some(1), Some(5)]);
+    }
+
+    fn bans_fixture() -> (NamedTempFile, Connection) {
+        let (file, db) = year_fixture();
+        db.execute_batch(
+            "INSERT INTO players(discord_id,guild_id,discord_username)
+                VALUES(7,42,'Seven'),(8,42,'Eight'),(7,99,'Seven');
+             INSERT INTO matches(match_id,team1_players,team2_players,winning_team,match_date,guild_id)
+                VALUES(1,'[]','[]',1,'2026-03-01 20:00:00',42),
+                      (2,'[]','[]',2,'2026-03-02 20:00:00',42),
+                      (3,'[]','[]',1,'2026-03-03 20:00:00',42),
+                      (4,'[]','[]',1,'2026-03-04 20:00:00',42),
+                      -- Unresolved, before the window, after it, and another guild.
+                      (5,'[]','[]',NULL,'2026-03-05 20:00:00',42),
+                      (6,'[]','[]',1,'2025-12-31 23:59:59',42),
+                      (7,'[]','[]',1,'2027-01-01 00:00:00',42),
+                      (8,'[]','[]',1,'2026-03-08 20:00:00',99);
+             INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,side,won)
+                VALUES(1,7,42,1,'radiant',1),(1,8,42,2,'dire',0),
+                      (2,7,42,2,'dire',1),(2,8,42,1,'radiant',0),
+                      (3,7,42,NULL,'dire',0),
+                      (4,7,42,NULL,NULL,1),
+                      (5,7,42,1,'radiant',NULL),(6,7,42,1,'radiant',1),
+                      (7,7,42,1,'radiant',1),(8,7,99,1,'radiant',1);
+             INSERT INTO match_bans(match_id,ban_index,team,hero_id)
+                VALUES
+                -- Game 1: player 7 is Radiant, so the Dire (team 1) bans count.
+                (1,0,0,50),(1,1,1,10),(1,2,1,20),(1,3,1,10),
+                -- Game 2: player 7 is Dire, so the Radiant (team 0) bans count.
+                (2,0,0,10),(2,1,1,50),(2,2,0,30),
+                -- Game 3: no team number, and the side says Dire.
+                (3,0,0,20),(3,1,1,60),
+                -- Game 4: no known team.
+                (4,0,0,80),(4,1,1,80),
+                (5,0,1,70),(6,0,1,70),(7,0,1,70),(8,0,1,70);",
+        )
+        .unwrap();
+        (file, db)
+    }
+
+    #[test]
+    fn bans_against_counts_games_where_the_opposing_team_banned_the_hero() {
+        let (file, _db) = bans_fixture();
+        let repo = WrappedLiveRepository::new(file.path());
+        // Hero 10 was banned twice in game 1 and counts one game there; heroes
+        // 50 and 60 were banned by player 7's own team.
+        assert_eq!(
+            repo.bans_against(42, 7, START, END).unwrap(),
+            [(10, 2), (20, 2), (30, 1)]
+        );
+        assert_eq!(repo.bans_against(42, 8, START, END).unwrap(), [(50, 2)]);
+    }
+
+    #[test]
+    fn bans_against_skips_other_guilds_windows_and_unresolved_matches() {
+        let (file, db) = bans_fixture();
+        let repo = WrappedLiveRepository::new(file.path());
+        let in_guild = repo.bans_against(42, 7, START, END).unwrap();
+        assert!(in_guild.iter().all(|(hero_id, _)| *hero_id != 70));
+        assert_eq!(repo.bans_against(99, 7, START, END).unwrap(), [(70, 1)]);
+        assert!(repo.bans_against(99, 8, START, END).unwrap().is_empty());
+        // Each excluded game appears once its own filter is lifted.
+        assert_eq!(
+            repo.bans_against(42, 7, START - 1, START).unwrap(),
+            [(70, 1)]
+        );
+        assert_eq!(repo.bans_against(42, 7, END, END + 1).unwrap(), [(70, 1)]);
+        db.execute("UPDATE matches SET winning_team=1 WHERE match_id=5", [])
+            .unwrap();
+        assert!(
+            repo.bans_against(42, 7, START, END)
+                .unwrap()
+                .contains(&(70, 1))
+        );
     }
 
     #[test]

@@ -16,8 +16,12 @@ use cama_app::wrapped_media::{
     WrappedArtwork, WrappedLayout, WrappedRenderedMedia, WrappedRow, WrappedSlideData,
     WrappedTheme, render_wrapped_media, render_wrapped_slide, vary_beat_palettes,
 };
+use cama_app::wrapped_story::bug_fixes::bug_fixes;
 use cama_app::wrapped_story::chapters::{cave_in_line, months_card, story_seed};
-use cama_app::wrapped_story::personal_patch::personal_patch;
+use cama_app::wrapped_story::hero_patch::hero_updates;
+use cama_app::wrapped_story::item_patch::item_updates;
+use cama_app::wrapped_story::personal_patch::{patch_name, personal_patch};
+use cama_app::wrapped_story::talents::talent_tree;
 use cama_app::wrapped_story::{
     HeroRow, MatchDetails, MatchStatsRow, PersonalMoment, PersonalMomentMatch,
     PersonalSummaryInput, PersonalSummaryWrapped, YearMatchRow, flavor_pool, get_flavor,
@@ -275,6 +279,14 @@ impl WrappedSources {
                 (Vec::new(), Vec::new())
             });
         let people = people_year(&year_rows, target_id);
+        // Bans only decorate the hero updates; the deck stands without them.
+        let bans = self
+            .wrapped
+            .bans_against(guild_id, target_id, start_ts, end_ts)
+            .unwrap_or_else(|error| {
+                warn!(%error, target_id, guild_id, "failed to fetch Wrapped bans");
+                Vec::new()
+            });
         let rating_history = self
             .wrapped
             .rating_history(target_id, guild_id, start_ts, end_ts)
@@ -318,6 +330,7 @@ impl WrappedSources {
             year_rows,
             year_players,
             people,
+            bans,
             rating_history,
             gamba_stats,
             activity,
@@ -368,6 +381,8 @@ struct WrappedRawData {
     year_players: Vec<DistinctPlayer>,
     /// Who the player shared the year with.
     people: PeopleYear,
+    /// Heroes the opposing team banned in the player's games: hero id, games.
+    bans: Vec<(i64, i64)>,
     rating_history: Vec<WrappedRatingPoint>,
     gamba_stats: Option<cama_db::gambling_stats_repository::GambaStats>,
     activity: ActivityData,
@@ -1067,16 +1082,20 @@ const MOMENT_THEMES: [WrappedTheme; 4] = [
     WrappedTheme::Months,
 ];
 /// The story's running order. The recap always closes it.
-const STORY_ORDER: [&str; 21] = [
+const STORY_ORDER: [&str; 25] = [
     "story_intro",
     "story_games",
     "story_playtime",
-    "story_hero",
     "story_patch",
-    "story_distinct",
-    "story_patch_award",
-    "story_record",
+    "story_hero",
+    "story_hero_patch",
     "story_hero_year",
+    "story_items",
+    "story_talents",
+    "story_distinct",
+    "story_record",
+    "story_bugfixes",
+    "story_patch_award",
     "story_people",
     "chart_gamba",
     "story_gamba",
@@ -1109,8 +1128,10 @@ fn is_detail_page(kind: &str) -> bool {
 fn story_position(kind: &str) -> usize {
     match kind {
         "story_mafia_accuser" => story_position("story_mafia_victim"),
-        // A thin deck's borrowed cards stand in for the distinct stories.
-        "story_moment" | "story_superlative" => story_position("story_distinct"),
+        // A thin deck's borrowed cards stand in for the distinct stories;
+        // its superlatives sit with the earned ones.
+        "story_moment" => story_position("story_distinct"),
+        "story_superlative" => story_position("story_patch_award"),
         _ => STORY_ORDER
             .iter()
             .position(|candidate| *candidate == kind)
@@ -1155,9 +1176,8 @@ fn build_slides(
         &year_label,
     );
     intro.theme = WrappedTheme::Patch;
-    intro.headline = format!("Your\n{year}\npatch notes");
-    intro.stat_value = target_display_name.to_owned();
-    intro.stat_label = "Cama Wrapped".to_owned();
+    intro.stat_value = patch::patch_version(year);
+    intro.headline = patch::default_patch_name(target_display_name);
     if raw.matches.is_empty() {
         intro
             .lines
@@ -1367,8 +1387,39 @@ fn build_slides(
     let stories = personal_moments(&moment_rows);
     let superlatives = personal_superlatives(&moment_rows);
     let seed = story_seed(target_id, year);
-    let patch = personal_patch(&raw.year_rows, target_id);
-    let patch_cards = patch::patch_slides(&patch, target_display_name, &year_label);
+    let timezone = raw
+        .year_players
+        .iter()
+        .find(|player| player.discord_id == target_id)
+        .and_then(|player| player.timezone.as_deref());
+    let patch = personal_patch(&raw.year_rows, target_id, timezone);
+    let mut patch_cards = patch::patch_slides(&patch, &raw.art, target_display_name, &year_label);
+    // The rest of the notes wait for a year worth measuring.
+    if raw.matches.len() >= minimum_games {
+        patch_cards.extend(patch::hero_patch_slide(
+            &hero_updates(&raw.year_rows, target_id, &raw.bans),
+            &raw.art,
+            target_display_name,
+            &year_label,
+        ));
+        patch_cards.extend(patch::item_slide(
+            &item_updates(&raw.year_rows, target_id, &patch::item_catalog(&raw.art)),
+            &raw.art,
+            target_display_name,
+            &year_label,
+        ));
+        patch_cards.extend(patch::talent_slide(
+            &talent_tree(&raw.year_rows, target_id, timezone, seed),
+            target_display_name,
+            &year_label,
+        ));
+        patch_cards.extend(patch::bug_fix_slide(
+            &bug_fixes(&raw.year_rows, target_id, timezone, seed),
+            &raw.art,
+            target_display_name,
+            &year_label,
+        ));
+    }
     let patch_slots = patch_cards
         .iter()
         .filter(|slide| !is_detail_page(&slide.kind))
@@ -1619,6 +1670,12 @@ fn build_slides(
         }
         (held, heroes_held) = (fits, heroes_fit);
     };
+    // The loudest story of the year names the update.
+    if let Some(name) = patch_name(selected.first().map(|story| story.theme), seed)
+        && let Some(intro) = slides.iter_mut().find(|slide| slide.kind == "story_intro")
+    {
+        intro.headline = name.to_owned();
+    }
     let distinct = distinct_slides(
         &selected,
         &raw.year_rows,
@@ -1756,6 +1813,12 @@ fn build_slides(
         .into_iter()
         .partition(|slide| is_detail_page(&slide.kind));
     story.push(finale);
+    // Every story card files under a section of the notes and carries the
+    // background variation that belongs to this player.
+    for slide in &mut story {
+        slide.section = patch::section(&slide.kind).to_owned();
+        slide.seed = seed;
+    }
     deck::space_fixed_backgrounds(&mut story);
     deck::separate_neighbors(&mut story);
     vary_beat_palettes(&mut story);

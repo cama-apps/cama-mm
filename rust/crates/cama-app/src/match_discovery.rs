@@ -21,7 +21,7 @@ use cama_db::match_recording_repository::{
     WrappedEnrichmentFactUpdate as DbWrappedEnrichmentFactUpdate,
 };
 use cama_db::opendota_player::OpenDotaPlayerRepository;
-use cama_domain::wrapped_distinct::tracked_item_counts;
+use cama_domain::wrapped_distinct::purchase_counts;
 use chrono::{DateTime, NaiveDateTime};
 use rusqlite::types::Value as SqlValue;
 use serde::Serialize;
@@ -1978,7 +1978,7 @@ impl<W: EnrichmentWritePort> MatchEnrichmentPolicy<W> {
                     buybacks: player.and_then(|player| player.wrapped.buyback_count),
                     item_counts: player
                         .and_then(|player| player.wrapped.purchase_keys.as_ref())
-                        .map(|keys| tracked_item_counts(keys.iter().map(String::as_str))),
+                        .map(|keys| purchase_counts(keys.iter().map(String::as_str))),
                 }
             })
             .collect::<Vec<_>>();

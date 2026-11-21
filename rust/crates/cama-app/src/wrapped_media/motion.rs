@@ -28,6 +28,15 @@ const TWO_BEAT_PACE: [(f32, f32); 6] = [
 ];
 /// One frame every `FRAME_DELAY`, start to end of the paced timeline.
 const TWO_BEAT_FRAMES: usize = 189;
+/// The patch cover downloads its update for about two seconds, then resolves
+/// into the title: five seconds in all.
+const PATCH_COVER_FRAMES: usize = 126;
+/// The patch chapters reveal row by row, slowly enough to read along: about
+/// four and a half seconds for a full card.
+const HERO_PATCH_FRAMES: usize = 116;
+const ITEM_PATCH_FRAMES: usize = 112;
+const TALENT_FRAMES: usize = 116;
+const BUG_FIX_FRAMES: usize = 116;
 /// No loop extension: one reveal, then the finished card. If a client replays it
 /// anyway, a long hold keeps the card readable between plays.
 const FINAL_HOLD: u16 = 600;
@@ -39,7 +48,24 @@ const COLORS: usize = 255;
 pub(super) fn frame_count(layout: WrappedLayout) -> usize {
     match layout {
         WrappedLayout::TwoBeat => TWO_BEAT_FRAMES,
+        WrappedLayout::HeroPatch => HERO_PATCH_FRAMES,
+        WrappedLayout::ItemPatch => ITEM_PATCH_FRAMES,
+        WrappedLayout::Talents => TALENT_FRAMES,
+        WrappedLayout::BugFixes => BUG_FIX_FRAMES,
         _ => FRAMES,
+    }
+}
+
+/// A card's frame count and the delay of each frame.
+pub(super) fn pace(slide: &WrappedSlideData) -> (usize, u16) {
+    match slide.layout {
+        WrappedLayout::Cover if slide.theme == WrappedTheme::Patch => {
+            (PATCH_COVER_FRAMES, FRAME_DELAY)
+        }
+        // Award setups need a beat before the prize is named. Keep the same
+        // timeline and final frame, but give that reveal twice the reading time.
+        WrappedLayout::Award | WrappedLayout::PatchNotes => (FRAMES, FRAME_DELAY * 2),
+        layout => (frame_count(layout), FRAME_DELAY),
     }
 }
 
@@ -57,17 +83,7 @@ pub(super) fn frame_time(layout: WrappedLayout, index: usize, frames: usize) -> 
 }
 
 pub(super) fn animate(slide: &WrappedSlideData) -> Result<Vec<u8>, gif::EncodingError> {
-    // Award setups need a beat before the prize is named. Keep the same
-    // timeline and final frame, but give that reveal twice the reading time.
-    let frame_delay = if matches!(
-        slide.layout,
-        WrappedLayout::Award | WrappedLayout::PatchNotes
-    ) {
-        FRAME_DELAY * 2
-    } else {
-        FRAME_DELAY
-    };
-    let frames = frame_count(slide.layout);
+    let (frames, frame_delay) = pace(slide);
     let mut stage = Stage::new(slide);
     let colors = shared_palette(&mut stage, frames);
     let transparent = (colors.len() / 3) as u8;
