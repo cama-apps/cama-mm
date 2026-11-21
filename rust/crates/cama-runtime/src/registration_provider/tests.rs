@@ -2491,6 +2491,18 @@ fn first_game_of_day_changes_at_four_am_fixed_pst() {
     ));
 }
 
+#[test]
+fn a_lobby_refilling_to_the_same_count_reseeds_its_plea() {
+    let earlier = plea_join(8);
+    let later = ConfirmedLobbyJoin {
+        joined_at_ns: PLEA_JOIN_NS + 3_600_000_000_000,
+        ..plea_join(8)
+    };
+    assert_eq!(earlier.lobby_message_id, later.lobby_message_id);
+    assert_ne!(plea_seed(&earlier), plea_seed(&later));
+    assert_eq!(plea_seed(&earlier), plea_seed(&plea_join(8)));
+}
+
 #[tokio::test]
 async fn rally_gains_a_plea_before_the_first_game_of_the_day() {
     let database = database();

@@ -3,7 +3,8 @@
 //! Text is model-written when an AI service is available and otherwise
 //! comes from the prewritten pools, so a message is always produced.
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use cama_domain::formatting::escape_discord_text;
 
@@ -11,13 +12,15 @@ use crate::ai_services::{AIService, FlavorPersona, betting_personas, contains_li
 use crate::duel_flavor::sanitize_detail;
 use crate::flavor_lines::{
     BAIT_BET_LOST, BAIT_BLAME_LOSER, BAIT_CROWN_WINNER, BAIT_GENERIC, BAIT_STREAK, BAIT_UPSET,
-    BAIT_VERSUS, PLEA_LINES, mix, pick_line,
+    BAIT_VERSUS, PLEA_LINES, fill, mix, pick_line,
 };
 
 const PLEA_FEATURE: &str = "queue_hype.plea";
 const HYPE_FEATURE: &str = "queue_hype.post_match";
 const PLEA_MAX_CHARS: usize = 240;
 const HYPE_MAX_CHARS: usize = 400;
+/// Prewritten pleas that must be used before one of them can come up again.
+const RECENT_PLEAS: usize = 40;
 const TEMPERATURE: f64 = 0.9;
 /// Recorded matches that get a post-game message, out of every ten.
 const HYPE_MATCHES_IN_TEN: u64 = 7;
@@ -57,12 +60,17 @@ pub fn should_post_hype(match_id: i64) -> bool {
 
 pub struct QueueHype {
     ai: Option<Arc<AIService>>,
+    /// The prewritten pleas posted most recently, oldest first.
+    recent_pleas: Mutex<VecDeque<&'static str>>,
 }
 
 impl QueueHype {
     #[must_use]
     pub const fn new(ai: Option<Arc<AIService>>) -> Self {
-        Self { ai }
+        Self {
+            ai,
+            recent_pleas: Mutex::new(VecDeque::new()),
+        }
     }
 
     /// A plea for the day's first lobby. Blocking; never empty.
@@ -70,7 +78,34 @@ impl QueueHype {
     pub fn plea(&self, facts: &PleaFacts, seed: u64) -> String {
         let (system, prompt) = plea_prompt(facts, seed);
         self.model_line(&system, &prompt, PLEA_FEATURE, &facts.names, PLEA_MAX_CHARS)
-            .unwrap_or_else(|| plea_fallback(facts, seed))
+            .unwrap_or_else(|| self.plea_fallback(facts, seed))
+    }
+
+    /// A prewritten plea that was not among the last [`RECENT_PLEAS`] posted.
+    fn plea_fallback(&self, facts: &PleaFacts, seed: u64) -> String {
+        let start = (mix(seed) % PLEA_LINES.len() as u64) as usize;
+        let template = {
+            let mut recent = self
+                .recent_pleas
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let template = (0..PLEA_LINES.len())
+                .map(|offset| PLEA_LINES[(start + offset) % PLEA_LINES.len()])
+                .find(|line| !recent.contains(line))
+                .unwrap_or(PLEA_LINES[start]);
+            if recent.len() >= RECENT_PLEAS {
+                recent.pop_front();
+            }
+            recent.push_back(template);
+            template
+        };
+        let lobby = escape_discord_text(&facts.lobby);
+        let players_in = facts.players_in.to_string();
+        let needed = facts.players_needed.to_string();
+        fill(
+            template,
+            &[("lobby", &lobby), ("in", &players_in), ("needed", &needed)],
+        )
     }
 
     /// A pot-stirring line about a finished match. Blocking; never empty.
@@ -279,18 +314,6 @@ fn usable_line(raw: &str, names: &[String], max_chars: usize) -> Option<String> 
     Some(line.replace('@', "\u{ff20}"))
 }
 
-fn plea_fallback(facts: &PleaFacts, seed: u64) -> String {
-    let lobby = escape_discord_text(&facts.lobby);
-    let players_in = facts.players_in.to_string();
-    let needed = facts.players_needed.to_string();
-    pick_line(
-        PLEA_LINES,
-        seed,
-        &[("lobby", &lobby), ("in", &players_in), ("needed", &needed)],
-    )
-    .unwrap_or_default()
-}
-
 fn seeded<T>(items: &[T], seed: u64) -> Option<&T> {
     (!items.is_empty()).then(|| &items[(mix(seed) % items.len() as u64) as usize])
 }
@@ -457,7 +480,34 @@ mod tests {
         for line in &lines {
             assert!(!line.is_empty() && !line.contains('{'), "{line}");
         }
-        assert_eq!(hype.plea(&facts, 9), hype.plea(&facts, 9));
+    }
+
+    #[test]
+    fn a_prewritten_plea_is_not_repeated_while_it_is_recent() {
+        let hype = QueueHype::new(None);
+        let mut facts = plea_facts();
+        let first = hype.plea(&facts, 9);
+        assert_eq!(first, QueueHype::new(None).plea(&facts, 9));
+
+        // The same lobby begging again, even with the same seed.
+        let mut seen = std::collections::BTreeSet::from([first]);
+        for _ in 1..RECENT_PLEAS {
+            assert!(seen.insert(hype.plea(&facts, 9)), "a recent plea repeated");
+        }
+
+        // A changed head count does not make a recent line new again.
+        let villain = (0..1_000)
+            .find(|seed| {
+                QueueHype::new(None)
+                    .plea(&facts, *seed)
+                    .contains("villain arcs")
+            })
+            .expect("seed for the villain line");
+        let hype = QueueHype::new(None);
+        assert!(hype.plea(&facts, villain).contains("villain arcs"));
+        facts.players_in = 9;
+        facts.players_needed = 1;
+        assert!(!hype.plea(&facts, villain).contains("villain arcs"));
     }
 
     #[test]
