@@ -939,7 +939,7 @@ fn change_row(change: &BalanceChange) -> WrappedRow {
 /// The balance card's footnote: which games every change compares.
 fn compared(change: &BalanceChange) -> String {
     let games = change.compared_games;
-    format!("First {games} games vs last {games}.")
+    format!("Your first {games} games vs your last {games}")
 }
 
 /// Hero updates: a full card with real art, the same card with nothing
@@ -1260,7 +1260,7 @@ fn patch_gallery() -> Vec<WrappedSlideData> {
     changes.rows[0].value = 1.0;
     changes.rows[1].value = -1.0;
     changes.rows[2].value = 1.0;
-    changes.lines = lines(&["First 6 games vs last 6."]);
+    changes.lines = lines(&["Your first 6 games vs your last 6"]);
 
     let mut long = changes.clone();
     long.kind = "story_patch_long".to_owned();
@@ -1287,7 +1287,7 @@ fn patch_gallery() -> Vec<WrappedSlideData> {
     sparse.username = "New arrival".to_owned();
     sparse.rows = rows(&[("More gold", "400 to 450 gold a minute")]);
     sparse.rows[0].value = 1.0;
-    sparse.lines = lines(&["First 5 games vs last 5."]);
+    sparse.lines = lines(&["Your first 5 games vs your last 5"]);
 
     let mut medal = styled(
         "story_patch_award",

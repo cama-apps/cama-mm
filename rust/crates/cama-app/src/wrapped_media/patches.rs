@@ -20,10 +20,11 @@ const CHANGE_PITCH: i32 = 148;
 /// Three generous reading bands, with the verdict encoded in both color and shape.
 pub(super) fn notes(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
+    // The top line says what is being compared; without one it names the card.
     stage.block(
-        &slide.title,
+        slide.lines.first().unwrap_or(&slide.title),
         (LEFT, 96, COLUMN, 40),
-        25.0,
+        28.0,
         Face::Medium,
         p.accent,
         Align::Left,
@@ -44,7 +45,7 @@ pub(super) fn notes(stage: &mut Stage<'_>) {
     );
     rule(stage, 282.0);
     for (index, row) in slide.rows.iter().take(3).enumerate() {
-        // Three changes sit evenly between the rule and the footnote.
+        // Three changes sit evenly below the rule.
         let top = 328 + index as i32 * CHANGE_PITCH;
         let start = 0.19 + index as f32 * 0.17;
         let color = if row.value > 0.0 {
@@ -74,17 +75,6 @@ pub(super) fn notes(stage: &mut Stage<'_>) {
             p.fg,
             Align::Left,
             (start + 0.04, start + 0.22),
-        );
-    }
-    if let Some(note) = slide.lines.first() {
-        stage.block(
-            note,
-            (LEFT, 777, COLUMN, 54),
-            23.0,
-            Face::Medium,
-            MUTED,
-            Align::Left,
-            (0.66, 0.82),
         );
     }
 }

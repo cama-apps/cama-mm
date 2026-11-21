@@ -2176,7 +2176,7 @@ fn personal_patch_cards_use_recorded_changes_and_fit_the_story() {
     // Each change is a title and one value line; the card says once which
     // games were compared.
     assert!(patch.rows.iter().all(|row| !row.secondary.contains('\n')));
-    assert_eq!(patch.lines, ["First 6 games vs last 6."]);
+    assert_eq!(patch.lines, ["Your first 6 games vs your last 6"]);
     assert!(patch.rows.len() <= 3);
     let awards = story
         .iter()

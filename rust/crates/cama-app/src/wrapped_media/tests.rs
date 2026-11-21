@@ -51,7 +51,7 @@ fn patch_slide() -> WrappedSlideData {
     ];
     slide.rows[0].value = 1.0;
     slide.rows[1].value = -1.0;
-    slide.lines = vec!["First 24 games vs last 24.".to_owned()];
+    slide.lines = vec!["Your first 24 games vs your last 24".to_owned()];
     slide
 }
 

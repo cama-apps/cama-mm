@@ -99,7 +99,7 @@ pub(super) fn patch_slides(
         let games = patch.changes[0].compared_games;
         slide
             .lines
-            .push(format!("First {games} games vs last {games}."));
+            .push(format!("Your first {games} games vs your last {games}"));
         slides.push(slide);
     }
     for (index, award) in patch.awards.iter().enumerate() {
