@@ -42,7 +42,7 @@ pub(super) fn section(kind: &str) -> &'static str {
         "story_distinct" | "story_record" | "story_moment" => "GAMEPLAY",
         "story_bugfixes" => "BUG FIXES",
         "story_patch_award" | "story_superlative" => "SUPERLATIVES",
-        "story_people" => "MATCHMAKING",
+        "story_people" => "TEAMMATES",
         "chart_gamba"
         | "story_gamba"
         | "story_dig"
@@ -53,9 +53,7 @@ pub(super) fn section(kind: &str) -> &'static str {
         | "story_pet_grave"
         | "story_mafia"
         | "story_mafia_victim"
-        | "story_mafia_accuser" => "ARCADE",
-        "story_persona" => "PROFILE",
-        "story_finale" => "SUMMARY",
+        | "story_mafia_accuser" => "SIDE GAMES",
         _ => "",
     }
 }
@@ -89,33 +87,19 @@ pub(super) fn patch_slides(
             .iter()
             .take(3)
             .map(|change| {
-                let (label, sign) = match change.direction {
-                    BalanceDirection::Buff => ("Buff", 1.0),
-                    BalanceDirection::Nerf => ("Nerf", -1.0),
+                let mut row = WrappedRow::new(&change.title, &change.value);
+                row.value = match change.direction {
+                    BalanceDirection::Buff => 1.0,
+                    BalanceDirection::Nerf => -1.0,
                 };
-                let mut row = WrappedRow::new(
-                    format!("{label}: {}", change.title),
-                    format!("{}\n{}", change.value, change.evidence),
-                );
-                row.value = sign;
                 row
             })
             .collect();
-        let buffs = patch
-            .changes
-            .iter()
-            .filter(|change| change.direction == BalanceDirection::Buff)
-            .count();
-        slide.lines.push(
-            if buffs == patch.changes.len() {
-                "Nerfs postponed. Enjoy responsibly."
-            } else if buffs == 0 {
-                "Hotfix requested."
-            } else {
-                "Perfectly balanced. Allegedly."
-            }
-            .to_owned(),
-        );
+        // Every change compares the same two groups of games.
+        let games = patch.changes[0].compared_games;
+        slide
+            .lines
+            .push(format!("First {games} games vs last {games}."));
         slides.push(slide);
     }
     for (index, award) in patch.awards.iter().enumerate() {
@@ -139,8 +123,8 @@ pub(super) fn patch_slides(
     slides
 }
 
-/// The player's heroes as a patch would list them: a verdict, the change
-/// lines, and the hero's own ability icons.
+/// The player's heroes as a patch would list them: a verdict, one line, and
+/// the hero's own ability icons.
 pub(super) fn hero_patch_slide(
     updates: &[HeroUpdate],
     art: &ArtSources,
@@ -150,8 +134,7 @@ pub(super) fn hero_patch_slide(
     let rows = updates
         .iter()
         .filter_map(|update| {
-            let mut row =
-                WrappedRow::new(bundled_hero_name(update.hero_id)?, update.lines.join("\n"));
+            let mut row = WrappedRow::new(bundled_hero_name(update.hero_id)?, &update.line);
             let (tag, value) = match update.tag {
                 HeroChangeTag::Buffed => ("BUFFED", 1.0),
                 HeroChangeTag::Nerfed => ("NERFED", -1.0),
@@ -170,11 +153,6 @@ pub(super) fn hero_patch_slide(
         return None;
     }
     let mut slide = base_slide("story_hero_patch", "Hero updates", username, year_label);
-    slide.headline = if rows.len() == 1 {
-        "1 hero rebalanced this year.".to_owned()
-    } else {
-        format!("{} heroes rebalanced this year.", rows.len())
-    };
     slide.rows = rows;
     Some(slide)
 }
@@ -195,10 +173,11 @@ pub(super) fn item_slide(
         .map(|update| {
             let mut row = WrappedRow::new(&update.name, &update.line);
             let (tag, value) = match (update.note, update.direction) {
-                (ItemNote::Signature, _) => ("SIGNATURE", 0.0),
-                (ItemNote::WinRate, Some(BalanceDirection::Nerf)) => ("NERF", -1.0),
-                (ItemNote::WinRate, _) => ("BUFF", 1.0),
-                (ItemNote::Consumable, _) => ("STOCKED", 0.0),
+                (ItemNote::Signature, _) => ("MOST BUILT", 0.0),
+                (ItemNote::WinRate, Some(BalanceDirection::Nerf)) => ("LOSES WITH", -1.0),
+                (ItemNote::WinRate, _) => ("WINS WITH", 1.0),
+                (ItemNote::Consumable, _) => ("MOST BOUGHT", 0.0),
+                (ItemNote::NeverBuilt, _) => ("NEVER BUILT", 0.0),
                 (ItemNote::Oddity, _) => ("", 0.0),
             };
             row.tag = tag.to_owned();
@@ -210,7 +189,7 @@ pub(super) fn item_slide(
     Some(slide)
 }
 
-/// Four either-or talents, each lit on the side the year's results chose.
+/// Four either-or talents, each lit on the side the player won more on.
 pub(super) fn talent_slide(
     tiers: &[TalentTier],
     username: &str,
@@ -232,9 +211,7 @@ pub(super) fn talent_slide(
             row
         })
         .collect();
-    slide
-        .lines
-        .push("Picked by your results this year.".to_owned());
+    slide.lines.push("Your win rate each way.".to_owned());
     Some(slide)
 }
 
@@ -243,7 +220,6 @@ pub(super) fn talent_slide(
 pub(super) fn bug_fix_slide(
     fixes: &[BugFix],
     art: &ArtSources,
-    year: i32,
     username: &str,
     year_label: &str,
 ) -> Option<WrappedSlideData> {
@@ -266,10 +242,6 @@ pub(super) fn bug_fix_slide(
         return None;
     }
     let mut slide = base_slide("story_bugfixes", "Bug fixes", username, year_label);
-    slide.headline = format!("Resolved during the {year} season.");
     slide.rows = rows;
-    slide
-        .lines
-        .push("Thanks to the teammates who reported these.".to_owned());
     Some(slide)
 }

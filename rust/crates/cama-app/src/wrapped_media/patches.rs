@@ -11,6 +11,12 @@ const MUTED: Rgba = Rgba::rgb(179, 194, 196);
 const LEFT: i32 = 48;
 const COLUMN: i32 = WIDTH - LEFT * 2;
 
+/// A balance change's title and its value under it, each as `(width, height,
+/// size)`, and the distance from one change to the next.
+pub(super) const CHANGE_TITLE: (i32, i32, f32) = (554, 56, 44.0);
+pub(super) const CHANGE_VALUE: (i32, i32, f32) = (554, 50, 36.0);
+const CHANGE_PITCH: i32 = 148;
+
 /// Three generous reading bands, with the verdict encoded in both color and shape.
 pub(super) fn notes(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
@@ -38,7 +44,8 @@ pub(super) fn notes(stage: &mut Stage<'_>) {
     );
     rule(stage, 282.0);
     for (index, row) in slide.rows.iter().take(3).enumerate() {
-        let top = 309 + index as i32 * 148;
+        // Three changes sit evenly between the rule and the footnote.
+        let top = 328 + index as i32 * CHANGE_PITCH;
         let start = 0.19 + index as f32 * 0.17;
         let color = if row.value > 0.0 {
             TEAL
@@ -48,19 +55,21 @@ pub(super) fn notes(stage: &mut Stage<'_>) {
             p.accent
         };
         change_mark(stage, (74.0, top as f32 + 28.0), row.value, color, start);
+        let (width, height, size) = CHANGE_TITLE;
         stage.block(
             &row.primary,
-            (118, top, 554, 46),
-            32.0,
+            (118, top, width, height),
+            size,
             Face::Bold,
             color,
             Align::Left,
             (start, start + 0.16),
         );
+        let (width, value_height, size) = CHANGE_VALUE;
         stage.block(
             &row.secondary,
-            (118, top + 47, 554, 92),
-            27.0,
+            (118, top + height, width, value_height),
+            size,
             Face::Medium,
             p.fg,
             Align::Left,

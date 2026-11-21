@@ -2164,13 +2164,19 @@ fn personal_patch_cards_use_recorded_changes_and_fit_the_story() {
         .iter()
         .find(|slide| slide.kind == "story_patch")
         .unwrap();
-    assert!(
-        patch
-            .rows
-            .iter()
-            .any(|row| row.secondary.contains("400") && row.secondary.contains("650"))
+    let gold = patch
+        .rows
+        .iter()
+        .find(|row| row.primary == "More gold")
+        .expect("the gold change");
+    assert_eq!(
+        (gold.secondary.as_str(), gold.value),
+        ("400 to 650 gold a minute", 1.0)
     );
-    assert!(patch.rows.iter().any(|row| row.secondary.contains("5/6")));
+    // Each change is a title and one value line; the card says once which
+    // games were compared.
+    assert!(patch.rows.iter().all(|row| !row.secondary.contains('\n')));
+    assert_eq!(patch.lines, ["First 6 games vs last 6."]);
     assert!(patch.rows.len() <= 3);
     let awards = story
         .iter()
@@ -3209,7 +3215,8 @@ fn patch_chapter_tells_heroes_items_talents_and_fixes_with_game_icons() {
         .unwrap()
         .unwrap();
     // Twelve dated games: Axe for the first six, Anti-Mage for the rest;
-    // Radiant early and Dire late; cores on even games, supports on odd.
+    // Radiant favorites early and Dire underdogs late; cores in short games
+    // on even ids, supports in long ones on odd.
     let mut games = 0;
     for row in &mut raw.year_rows {
         if row.discord_id != OWNER as i64 {
@@ -3222,6 +3229,8 @@ fn patch_chapter_tells_heroes_items_talents_and_fixes_with_game_icons() {
         row.side = Some(if id <= 6 { "radiant" } else { "dire" }.to_owned());
         row.won = Some(id <= 4 || id == 12);
         row.position = Some(if id % 2 == 0 { 1 } else { 5 });
+        row.duration_seconds = Some(if id % 2 == 0 { 30 * 60 } else { 50 * 60 });
+        row.expected_win = Some(if id <= 6 { 0.6 } else { 0.4 });
         row.kills = Some(10);
         row.assists = Some(5);
         row.deaths = Some(if id == 3 { 15 } else { 4 });
@@ -3267,20 +3276,23 @@ fn patch_chapter_tells_heroes_items_talents_and_fixes_with_game_icons() {
         .unwrap();
     assert!(anti_mage.image_png.is_some());
     assert_eq!(anti_mage.icons.len(), 2);
-    assert!(heroes.rows.iter().all(|row| !row.secondary.is_empty()));
+    // One line per hero, and no headline over them.
+    assert!(
+        heroes
+            .rows
+            .iter()
+            .all(|row| !row.secondary.is_empty() && !row.secondary.contains('\n'))
+    );
+    assert!(heroes.headline.is_empty());
 
     let items = card("story_items");
     assert_eq!(items.layout, WrappedLayout::ItemPatch);
     let signature = &items.rows[0];
     assert_eq!(
         (signature.primary.as_str(), signature.tag.as_str()),
-        ("Blink Dagger", "SIGNATURE")
+        ("Blink Dagger", "MOST BUILT")
     );
-    assert!(
-        signature.secondary.contains("12"),
-        "{}",
-        signature.secondary
-    );
+    assert_eq!(signature.secondary, "12 of 12 games");
     assert!(items.rows.iter().all(|row| row.image_png.is_some()));
     assert!(items.rows.iter().any(|row| row.primary == "Tango"));
 
@@ -3294,27 +3306,33 @@ fn patch_chapter_tells_heroes_items_talents_and_fixes_with_game_icons() {
             .collect::<Vec<_>>(),
         ["25", "20", "15", "10"]
     );
-    assert!(
-        talents.rows.iter().all(|row| row.value.abs() == 1.0
-            && !row.primary.is_empty()
-            && !row.secondary.is_empty())
-    );
+    // Every talent is a win-rate split.
+    assert!(talents.rows.iter().all(|row| row.value.abs() == 1.0
+        && row.primary.contains("% ")
+        && row.secondary.contains("% ")));
+    assert_eq!(talents.lines, ["Your win rate each way."]);
 
     let fixes = card("story_bugfixes");
     assert_eq!(fixes.layout, WrappedLayout::BugFixes);
     assert!(fixes.rows.iter().all(|row| !row.primary.contains('{')));
-    // The fifteen-death Axe game is named by its hero.
+    // The fifteen-death game makes the list, and a line about a hero names
+    // that hero.
+    let lines = fixes
+        .rows
+        .iter()
+        .map(|row| row.primary.as_str())
+        .collect::<Vec<_>>();
     assert!(
-        fixes
-            .rows
+        lines
             .iter()
-            .any(|row| row.primary.contains("15") && row.primary.contains("Axe")),
-        "{:?}",
-        fixes
-            .rows
+            .any(|line| line.contains("15 deaths") || line.contains("dying 15 times")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
             .iter()
-            .map(|row| &row.primary)
-            .collect::<Vec<_>>()
+            .any(|line| line.contains("Axe") || line.contains("Anti-Mage")),
+        "{lines:?}"
     );
     let known = fixes
         .rows
@@ -3325,6 +3343,8 @@ fn patch_chapter_tells_heroes_items_talents_and_fixes_with_game_icons() {
     if known == 1 {
         assert_eq!(fixes.rows.last().unwrap().tag, "KNOWN ISSUE");
     }
+    // The fixes stand alone: no headline and no footnote.
+    assert!(fixes.headline.is_empty() && fixes.lines.is_empty());
 
     // The cover carries the version; awards wear their item icon.
     let cover = story.first().unwrap();
@@ -3338,20 +3358,32 @@ fn patch_chapter_tells_heroes_items_talents_and_fixes_with_game_icons() {
     {
         assert!(award.art_png.is_some(), "{}", award.title);
     }
-    // Every story card after the cover names its section, and all of them
-    // share the background variation that belongs to this player.
+    // Every story card between the cover and the closing pair names its
+    // section, and all of them share the background variation that belongs
+    // to this player.
     let seed = story_seed(OWNER as i64, 2026);
     for slide in &story {
         assert_eq!(slide.seed, seed, "{}", slide.kind);
         assert_eq!(
             slide.section.is_empty(),
-            slide.kind == "story_intro",
+            matches!(
+                slide.kind.as_str(),
+                "story_intro" | "story_persona" | "story_finale"
+            ),
             "{}",
             slide.kind
         );
     }
     assert_eq!(heroes.section, "HERO UPDATES");
     assert_eq!(fixes.section, "BUG FIXES");
+    for (kind, section) in [
+        ("story_people", "TEAMMATES"),
+        ("story_dig", "SIDE GAMES"),
+        ("story_persona", ""),
+        ("story_finale", ""),
+    ] {
+        assert_eq!(patch::section(kind), section, "{kind}");
+    }
     // The chapter runs in patch-notes order and stays inside the budget.
     let position = |kind: &str| story.iter().position(|slide| slide.kind == kind).unwrap();
     assert!(position("story_hero") < position("story_hero_patch"));

@@ -45,13 +45,13 @@ fn patch_slide() -> WrappedSlideData {
     slide.headline = "You got\npatched.".to_owned();
     slide.username = "The Last Support".to_owned();
     slide.rows = vec![
-        WrappedRow::new("Buff: Wards placed", "12.4 to 18.7 wards/game"),
-        WrappedRow::new("Nerf: Deaths", "7.1 to 9.2 deaths/game"),
-        WrappedRow::new("Rework: Hero pool", "24 heroes tested. Balance pending."),
+        WrappedRow::new("More wards", "12.4 to 18.7 a game"),
+        WrappedRow::new("More deaths", "7.1 to 9.2 a game"),
+        WrappedRow::new("Same hero pool", "24 to 24 heroes"),
     ];
     slide.rows[0].value = 1.0;
     slide.rows[1].value = -1.0;
-    slide.lines = vec!["Early vs. late: 24 tracked matches each.".to_owned()];
+    slide.lines = vec!["First 24 games vs last 24.".to_owned()];
     slide
 }
 
@@ -90,7 +90,7 @@ fn patch_notes_reveal_rows_in_order_before_the_final_hold() {
         pixels[top * WRAPPED_SLIDE_WIDTH * 4..bottom * WRAPPED_SLIDE_WIDTH * 4].to_vec()
     };
     let mut changed = slide.clone();
-    changed.rows[2].primary = "Rework: Third note".to_owned();
+    changed.rows[2].primary = "A third change".to_owned();
     let mut other = stage::Stage::new(&changed);
     assert!(row_band(&early, 600, 740) == row_band(&other.paint(0.35).pixels, 600, 740));
     assert!(row_band(&late, 600, 740) != row_band(&other.paint(0.9).pixels, 600, 740));
@@ -122,18 +122,50 @@ fn patch_cover_keeps_the_courier_colors_and_player_identity() {
 
 #[test]
 fn patch_notes_and_medal_evidence_fit_at_readable_sizes() {
-    for (text, width, height) in [
-        ("400 to 650 GPM\nFirst 6 vs last 6 dated games.", 554, 92),
+    let (title_width, title_height, title_size) = patches::CHANGE_TITLE;
+    let (value_width, value_height, value_size) = patches::CHANGE_VALUE;
+    for (text, face, design, smallest, width, height) in [
+        // The longest title and the widest values a balance change shows.
         (
-            "Ranked #1 of 24 players in tracked matches.\n712 gold per minute across 48 games.",
+            "Fewer last hits early",
+            stage::Face::Bold,
+            title_size,
+            title_size,
+            title_width,
+            title_height,
+        ),
+        (
+            "128,000 to 128,000 a game",
+            stage::Face::Medium,
+            value_size,
+            value_size,
+            value_width,
+            value_height,
+        ),
+        (
+            "400 to 650 gold a minute",
+            stage::Face::Medium,
+            value_size,
+            value_size,
+            value_width,
+            value_height,
+        ),
+        (
+            "60+ stun seconds and 20+ assists in 17 of 48 games.",
+            stage::Face::Medium,
+            27.0,
+            25.0,
             600,
             108,
         ),
     ] {
-        let (size, lines) = stage::fit_text(text, stage::Face::Medium, 27.0, width, height);
-        assert!(size >= 25.0, "evidence must be legible on a phone: {size}");
+        let (size, lines) = stage::fit_text(text, face, design, width, height);
+        assert!(
+            size >= smallest,
+            "{text:?} must be legible on a phone: {size}"
+        );
         assert!(lines.iter().all(|line| !line.ends_with('…')));
-        assert!(stage::block_height(lines.len(), size, stage::Face::Medium) <= height as f32);
+        assert!(stage::block_height(lines.len(), size, face) <= height as f32);
     }
 }
 
@@ -144,12 +176,11 @@ fn patch_cover_and_awards_finish_on_the_same_still_and_fit_discord() {
     cover.stat_value = "20.26".to_owned();
     cover.headline = "The Bloodbath\nUpdate".to_owned();
     cover.stat_label = "Alexandria".to_owned();
-    let mut award = WrappedSlideData::new("story_patch_award", "The Last Building Standing");
+    let mut award = WrappedSlideData::new("story_patch_award", "Tower breaker");
     award.layout = WrappedLayout::Award;
     award.theme = WrappedTheme::Awards;
-    award.stat_value = "12,480".to_owned();
-    award.stat_label =
-        "Building damage per game\n#1 of 24 eligible players\nAcross 48 tracked games".to_owned();
+    award.stat_value = "12 games".to_owned();
+    award.stat_label = "8,000+ tower damage in 12 of 48 games.".to_owned();
     award.art_png = Some(textured(88, 64));
     for slide in [cover, award] {
         let media = render_wrapped_media(&slide, true).unwrap();
@@ -173,7 +204,7 @@ fn patch_cover_and_awards_finish_on_the_same_still_and_fit_discord() {
 }
 
 #[test]
-fn measured_patch_with_partial_coverage_fits_without_losing_the_denominator() {
+fn measured_patch_changes_keep_each_line_whole_at_its_design_size() {
     let games = (1..=12)
         .map(|id| cama_domain::wrapped_distinct::DistinctMatch {
             match_id: id,
@@ -185,14 +216,17 @@ fn measured_patch_with_partial_coverage_fits_without_losing_the_denominator() {
             ..Default::default()
         })
         .collect::<Vec<_>>();
-    let report = crate::wrapped_story::personal_patch::personal_patch(&games, 7, None, 0);
+    let report = crate::wrapped_story::personal_patch::personal_patch(&games, 7, None);
     assert_eq!(report.changes.len(), 3);
     for change in report.changes {
-        let copy = format!("{}\n{}", change.value, change.evidence);
-        let (size, lines) = stage::fit_text(&copy, stage::Face::Medium, 27.0, 554, 92);
-        assert!(size >= 25.0, "{} at {size}px: {copy}", change.key);
-        assert!(!lines.iter().any(|line| line.contains('…')));
-        assert_eq!(lines.join(" "), copy.replace('\n', " "));
+        for (copy, face, (width, height, design)) in [
+            (&change.title, stage::Face::Bold, patches::CHANGE_TITLE),
+            (&change.value, stage::Face::Medium, patches::CHANGE_VALUE),
+        ] {
+            let (size, lines) = stage::fit_text(copy, face, design, width, height);
+            assert_eq!(size, design, "{}: {copy}", change.key);
+            assert_eq!(lines, [copy.as_str()], "{} wraps", change.key);
+        }
     }
 }
 
@@ -1581,9 +1615,8 @@ fn tagged(primary: &str, secondary: &str, tag: &str, value: f64) -> WrappedRow {
 fn patch_chapters() -> Vec<WrappedSlideData> {
     use crate::wrapped_story::{hero_patch, item_patch};
     let mut changes = hero_patch::widest_lines();
-    changes.sort_by_key(|lines| std::cmp::Reverse(lines.iter().map(String::len).sum::<usize>()));
+    changes.sort_by_key(|line| std::cmp::Reverse(line.len()));
     let mut heroes = WrappedSlideData::new("story_hero_patch", "Hero updates");
-    heroes.headline = "5 heroes rebalanced across 186 picks.".to_owned();
     heroes.rows = [
         ("Keeper of the Light", "REMOVED", -1.0),
         ("Queen of Pain", "BUFFED", 1.0),
@@ -1591,7 +1624,7 @@ fn patch_chapters() -> Vec<WrappedSlideData> {
     ]
     .into_iter()
     .zip(&changes)
-    .map(|((hero, tag, value), lines)| tagged(hero, &lines.join("\n"), tag, value))
+    .map(|((hero, tag, value), line)| tagged(hero, line, tag, value))
     .collect();
     for row in &mut heroes.rows {
         row.image_png = Some(textured(256, 144));
@@ -1602,9 +1635,9 @@ fn patch_chapters() -> Vec<WrappedSlideData> {
     lines.sort_by_key(|line| std::cmp::Reverse(line.len()));
     let mut items = WrappedSlideData::new("story_items", "Item updates");
     items.rows = [
-        ("Black King Bar", "SIGNATURE", 0.0),
-        ("Aghanim's Scepter", "NERF", -1.0),
-        ("Observer Ward", "BUFF", 1.0),
+        ("Black King Bar", "MOST BUILT", 0.0),
+        ("Aghanim's Scepter", "LOSES WITH", -1.0),
+        ("Observer Ward", "MOST BOUGHT", 0.0),
         ("Divine Rapier", "", 0.0),
     ]
     .into_iter()
@@ -1617,15 +1650,14 @@ fn patch_chapters() -> Vec<WrappedSlideData> {
 
     let mut talents = WrappedSlideData::new("story_talents", "Talents");
     talents.rows = vec![
-        tagged("+1.5s Hex Duration", "-2s Blink Cooldown", "25", -1.0),
-        tagged("+25 Attack Speed", "+40 Sonic Wave Dmg", "20", 1.0),
-        tagged("+300 Health", "+400 Night Vision", "15", 1.0),
-        tagged("+8 Strength", "+20 Damage", "10", -1.0),
+        tagged("100% under 35 min", "100% over 45 min", "25", -1.0),
+        tagged("100% as favorite", "100% as underdog", "20", 1.0),
+        tagged("100% as core", "100% as support", "15", 1.0),
+        tagged("100% Radiant", "100% Dire", "10", -1.0),
     ];
-    talents.lines = vec!["Most picked at each level across 48 games.".to_owned()];
+    talents.lines = vec!["Your win rate each way.".to_owned()];
 
     let mut fixes = WrappedSlideData::new("story_bugfixes", "Bug fixes");
-    fixes.headline = "Resolved during the 2026 season.".to_owned();
     fixes.rows = [
         "Fixed an issue where the player would buy back and immediately die again anyway.",
         "Fixed Black King Bar being purchased only after the team fight had already ended",
@@ -1639,7 +1671,6 @@ fn patch_chapters() -> Vec<WrappedSlideData> {
     for row in &mut fixes.rows {
         row.image_png = Some(textured(256, 144));
     }
-    fixes.lines = vec!["No further fixes are planned.".to_owned()];
 
     let mut cards = vec![heroes, items, talents, fixes];
     for card in &mut cards {

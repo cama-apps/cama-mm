@@ -15,7 +15,7 @@ use cama_app::wrapped_media::{
     WrappedArtwork, WrappedBeat, WrappedLayout, WrappedPunch, WrappedRow, WrappedSlideData,
     WrappedTheme, render_wrapped_frame, render_wrapped_media, render_wrapped_slide,
 };
-use cama_app::wrapped_story::personal_patch::{BalanceDirection, personal_patch};
+use cama_app::wrapped_story::personal_patch::{BalanceChange, BalanceDirection, personal_patch};
 use cama_app::wrapped_story::roast_pools::{
     CopyVars, Punch, StoryCopy, hero_copy, people_copy, persona_title, record_copy, side_game_copy,
     story_copy,
@@ -799,7 +799,7 @@ fn measured_chapter_cards() -> Vec<WrappedSlideData> {
         WrappedLayout::HeroPatch,
         WrappedTheme::PatchHeroes,
     );
-    heroes.rows = hero_updates(&year, 7, &[(39, 9)], SEED)
+    heroes.rows = hero_updates(&year, 7, &[(39, 9)])
         .iter()
         .map(|update| {
             let (tag, value) = match update.tag {
@@ -811,7 +811,7 @@ fn measured_chapter_cards() -> Vec<WrappedSlideData> {
             };
             let mut row = tagged(
                 bundled_hero_name(update.hero_id).unwrap_or("Unknown hero"),
-                &update.lines.join("\n"),
+                &update.line,
                 tag,
                 value,
             );
@@ -824,7 +824,6 @@ fn measured_chapter_cards() -> Vec<WrappedSlideData> {
             row
         })
         .collect();
-    heroes.headline = format!("{} heroes rebalanced this year.", heroes.rows.len());
     cards.push(heroes);
 
     let mut items = styled(
@@ -833,14 +832,15 @@ fn measured_chapter_cards() -> Vec<WrappedSlideData> {
         WrappedLayout::ItemPatch,
         WrappedTheme::PatchItems,
     );
-    items.rows = item_updates(&year, 7, &catalog, SEED)
+    items.rows = item_updates(&year, 7, &catalog)
         .iter()
         .map(|update| {
             let (tag, value) = match (update.note, update.direction) {
-                (ItemNote::Signature, _) => ("Signature", 0.0),
-                (ItemNote::WinRate, Some(BalanceDirection::Nerf)) => ("Nerf", -1.0),
-                (ItemNote::WinRate, _) => ("Buff", 1.0),
-                (ItemNote::Consumable, _) => ("Stocked", 0.0),
+                (ItemNote::Signature, _) => ("Most built", 0.0),
+                (ItemNote::WinRate, Some(BalanceDirection::Nerf)) => ("Loses with", -1.0),
+                (ItemNote::WinRate, _) => ("Wins with", 1.0),
+                (ItemNote::Consumable, _) => ("Most bought", 0.0),
+                (ItemNote::NeverBuilt, _) => ("Never built", 0.0),
                 (ItemNote::Oddity, _) => ("", 0.0),
             };
             let mut row = tagged(&update.name, &update.line, tag, value);
@@ -870,7 +870,7 @@ fn measured_chapter_cards() -> Vec<WrappedSlideData> {
             )
         })
         .collect();
-    talents.lines = lines(&["Picked by your results this year."]);
+    talents.lines = lines(&["Your win rate each way."]);
     cards.push(talents);
 
     let mut fixes = styled(
@@ -879,7 +879,6 @@ fn measured_chapter_cards() -> Vec<WrappedSlideData> {
         WrappedLayout::BugFixes,
         WrappedTheme::PatchFixes,
     );
-    fixes.headline = "Resolved during the 2026 season.".to_owned();
     fixes.rows = bug_fixes(&year, 7, None, SEED)
         .iter()
         .map(|fix| {
@@ -896,14 +895,10 @@ fn measured_chapter_cards() -> Vec<WrappedSlideData> {
             row
         })
         .collect();
-    fixes.lines = lines(&["Thanks to the teammates who reported these."]);
     cards.push(fixes);
 
-    for (index, award) in personal_patch(&year, 7, None, SEED)
-        .awards
-        .iter()
-        .enumerate()
-    {
+    let patch = personal_patch(&year, 7, None);
+    for (index, award) in patch.awards.iter().enumerate() {
         let mut medal = styled(
             "story_patch_award_measured",
             &award.title,
@@ -926,24 +921,25 @@ fn measured_chapter_cards() -> Vec<WrappedSlideData> {
         WrappedTheme::Patch,
     );
     changes.headline = "You got\npatched.".to_owned();
-    changes.rows = personal_patch(&year, 7, None, SEED)
-        .changes
-        .iter()
-        .map(|change| {
-            let (label, sign) = match change.direction {
-                BalanceDirection::Buff => ("Buff", 1.0),
-                BalanceDirection::Nerf => ("Nerf", -1.0),
-            };
-            tagged(
-                &format!("{label}: {}", change.title),
-                &format!("{}\n{}", change.value, change.evidence),
-                "",
-                sign,
-            )
-        })
-        .collect();
+    changes.rows = patch.changes.iter().map(change_row).collect();
+    changes.lines = patch.changes.first().map(compared).into_iter().collect();
     cards.push(changes);
     cards
+}
+
+/// A balance change as its card shows it: the title, then the value.
+fn change_row(change: &BalanceChange) -> WrappedRow {
+    let sign = match change.direction {
+        BalanceDirection::Buff => 1.0,
+        BalanceDirection::Nerf => -1.0,
+    };
+    tagged(&change.title, &change.value, "", sign)
+}
+
+/// The balance card's footnote: which games every change compares.
+fn compared(change: &BalanceChange) -> String {
+    let games = change.compared_games;
+    format!("First {games} games vs last {games}.")
 }
 
 /// Hero updates: a full card with real art, the same card with nothing
@@ -964,7 +960,7 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
         "queenofpain",
         "BUFFED",
         1.0,
-        "Win rate increased from 48% to 62%.\nNow first-picked. Nobody objected.",
+        "Win rate 48% to 62%",
         &["shadow_strike", "blink", "scream_of_pain", "sonic_wave"],
     );
     let pudge = hero(
@@ -972,7 +968,7 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
         "pudge",
         "NERFED",
         -1.0,
-        "Win rate reduced from 51% to 37%.\nMeat Hook accuracy unchanged.",
+        "Deaths 6.2 to 9.4 a game",
         &["meat_hook", "rot", "dismember"],
     );
     let keeper = hero(
@@ -980,7 +976,7 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
         "keeper_of_the_light",
         "NEW",
         0.0,
-        "Added to the hero pool.\nWin rate increased from 40% to 67%.",
+        "12 games, 67% won",
         &["illuminate"],
     );
     let maiden = hero(
@@ -988,7 +984,7 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
         "crystal_maiden",
         "BANNED",
         -1.0,
-        "Banned against you in 14 games.\nTaken as a compliment.",
+        "Banned against you 14 times",
         &["crystal_nova", "frostbite", "freezing_field"],
     );
     let willow = hero(
@@ -996,12 +992,11 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
         "dark_willow",
         "REMOVED",
         -1.0,
-        "Removed from the hero pool.\nLast seen in March.",
+        "Dropped after 9 games, 33% won",
         &["bramble_maze", "shadow_realm", "cursed_crown"],
     );
 
     let mut full = card("story_hero_patch", "Hero updates");
-    full.headline = "5 heroes rebalanced across 186 picks.".to_owned();
     full.rows = vec![queen.clone(), pudge.clone(), keeper.clone()];
 
     let mut bare = styled(
@@ -1022,7 +1017,6 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
 
     let mut solo = bare.clone();
     solo.kind = "story_hero_patch_solo".to_owned();
-    solo.headline = "One hero. One opinion.".to_owned();
     solo.rows = vec![queen];
 
     let mut solo_bare = solo.clone();
@@ -1031,14 +1025,14 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
     solo_bare.rows[0].image_png = None;
     solo_bare.rows[0].icons.clear();
 
-    // One-word names wider than their box, each under the longest lines the
+    // One-word names wider than their box, each under the widest line the
     // story functions write for its verdict.
-    let sets = cama_app::wrapped_story::hero_patch::widest_lines();
+    let lines = cama_app::wrapped_story::hero_patch::widest_lines();
     let longest = |opening: &str| {
-        sets.iter()
-            .filter(|lines| lines[0].starts_with(opening))
-            .max_by_key(|lines| lines.iter().map(String::len).sum::<usize>())
-            .map(|lines| lines.join("\n"))
+        lines
+            .iter()
+            .find(|line| line.starts_with(opening))
+            .cloned()
             .unwrap_or_default()
     };
     let shaker = hero(
@@ -1046,7 +1040,7 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
         "earthshaker",
         "BANNED",
         0.0,
-        &longest("Opponents"),
+        &longest("Banned"),
         &["fissure", "enchant_totem", "aftershock", "echo_slam"],
     );
     let dawn = hero(
@@ -1054,7 +1048,7 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
         "dawnbreaker",
         "NERFED",
         -1.0,
-        &longest("Win rate reduced"),
+        &longest("Deaths"),
         &[
             "fire_wreath",
             "celestial_hammer",
@@ -1067,7 +1061,7 @@ fn hero_update_cards() -> Vec<WrappedSlideData> {
         "legion_commander",
         "REMOVED",
         -1.0,
-        &longest("Removed"),
+        &longest("Dropped"),
         &[],
     );
     let mut duo_long = bare.clone();
@@ -1096,22 +1090,22 @@ fn item_update_cards() -> Vec<WrappedSlideData> {
         row.image_png = icon_image("items", key);
         row
     };
-    let blink = item("Blink Dagger", "blink", "SIGNATURE", 0.0, "41 of 48 games");
+    let blink = item("Blink Dagger", "blink", "MOST BUILT", 0.0, "41 of 48 games");
     let bar = item(
         "Black King Bar",
         "black_king_bar",
-        "NERF",
+        "LOSES WITH",
         -1.0,
-        "Purchased after the fight ended.",
+        "31% won in 13 games",
     );
     let ward = item(
         "Observer Ward",
         "ward_observer",
-        "BUFF",
-        1.0,
-        "+212 placed this year",
+        "MOST BOUGHT",
+        0.0,
+        "212 bought",
     );
-    let rapier = item("Divine Rapier", "rapier", "", 0.0, "3 bought. 3 lost.");
+    let rapier = item("Divine Rapier", "rapier", "", 0.0, "3 bought, 0 won");
 
     let mut full = card("story_items", "Item updates");
     full.rows = vec![blink.clone(), bar.clone(), ward.clone(), rapier.clone()];
@@ -1123,20 +1117,10 @@ fn item_update_cards() -> Vec<WrappedSlideData> {
         WrappedTheme::PatchItems,
     );
     bare.rows = vec![
-        tagged(
-            "Aghanim's Scepter",
-            "68% win rate when built",
-            "SIGNATURE",
-            0.0,
-        ),
-        tagged(
-            "Smoke of Deceit",
-            "Purchased in every game you lost.",
-            "NERF",
-            -1.0,
-        ),
-        tagged("Town Portal Scroll", "1,204 bought", "BUFF", 1.0),
-        tagged("Hand of Midas", "0 before minute 20", "", 0.0),
+        tagged("Aghanim's Scepter", "22 of 48 games", "MOST BUILT", 0.0),
+        tagged("Desolator", "68% won in 19 games", "WINS WITH", 1.0),
+        tagged("Town Portal Scroll", "1,204 bought", "MOST BOUGHT", 0.0),
+        tagged("Black King Bar", "0 of 31 games", "NEVER BUILT", 0.0),
     ];
 
     let mut trio = bare.clone();
@@ -1161,16 +1145,22 @@ fn item_update_cards() -> Vec<WrappedSlideData> {
             .map_or("", String::as_str)
     };
     let wide_rows = vec![
+        item("Divine Rapier", "rapier", "", 0.0, longest("1,204 bought")),
+        item("Desolator", "desolator", "WINS WITH", 1.0, longest("100%")),
         item(
-            "Dust of Appearance",
-            "dust",
-            "STOCKED",
+            "Blink Dagger",
+            "blink",
+            "MOST BUILT",
             0.0,
-            longest("1,204 bought. Nowhere"),
+            longest("888 of"),
         ),
-        item("Desolator", "desolator", "BUFF", 1.0, longest("100%")),
-        item("Blink Dagger", "blink", "SIGNATURE", 0.0, longest("888 of")),
-        item("Black King Bar", "black_king_bar", "", 0.0, longest("0 of")),
+        item(
+            "Black King Bar",
+            "black_king_bar",
+            "NEVER BUILT",
+            0.0,
+            longest("0 of"),
+        ),
     ];
     let mut wide = bare.clone();
     wide.kind = "story_items_wide".to_owned();
@@ -1190,12 +1180,12 @@ fn talent_cards() -> Vec<WrappedSlideData> {
     let level = |tag: &str, left: &str, right: &str, value: f64| tagged(left, right, tag, value);
     let mut full = card("story_talents", "Talents");
     full.rows = vec![
-        level("25", "+1.5s Hex Duration", "-2s Blink Cooldown", -1.0),
-        level("20", "+25 Attack Speed", "+40 Sonic Wave Dmg", 1.0),
-        level("15", "+300 Health", "+400 Night Vision", 1.0),
-        level("10", "+8 Strength", "+20 Damage", -1.0),
+        level("25", "71% under 35m", "38% over 45m", -1.0),
+        level("20", "44% as favorite", "62% as underdog", 1.0),
+        level("15", "48% Jan\u{2013}Jun", "63% Jul\u{2013}Dec", 1.0),
+        level("10", "58% Radiant", "51% Dire", -1.0),
     ];
-    full.lines = lines(&["Most picked at each level across 48 games."]);
+    full.lines = lines(&["Your win rate each way."]);
 
     let mut sparse = styled(
         "story_talents_sparse",
@@ -1204,11 +1194,11 @@ fn talent_cards() -> Vec<WrappedSlideData> {
         WrappedTheme::PatchTalents,
     );
     sparse.rows = vec![
-        level("20", "+25 Attack Speed", "+12% Spell Amp", 0.0),
-        level("15", "+300 Health", "+30 Movement Speed", -1.0),
-        level("10", "+8 Strength", "+20 Damage", 1.0),
+        level("20", "50% weekdays", "50% weekends", 0.0),
+        level("15", "64% as core", "41% as support", -1.0),
+        level("10", "47% Radiant", "55% Dire", 1.0),
     ];
-    sparse.lines = lines(&["Level 20 reached in 4 of 48 games."]);
+    sparse.lines = lines(&["Your win rate each way."]);
 
     let mut pair = sparse.clone();
     pair.kind = "story_talents_pair".to_owned();
@@ -1217,8 +1207,8 @@ fn talent_cards() -> Vec<WrappedSlideData> {
     vec![full, sparse, pair]
 }
 
-/// Bug fixes: four 80-character lines with portraits and a known issue, and
-/// two short ones with nothing cached.
+/// Bug fixes: four lines with portraits and a known issue, and two short
+/// ones with nothing cached.
 fn bug_fix_cards() -> Vec<WrappedSlideData> {
     let fix = |line: &str, hero: Option<&str>, tag: &str| {
         let mut row = tagged(line, "", tag, 0.0);
@@ -1226,30 +1216,24 @@ fn bug_fix_cards() -> Vec<WrappedSlideData> {
         row
     };
     let mut full = card("story_bugfixes", "Bug fixes");
-    full.headline = "Resolved during the 2026 season.".to_owned();
     full.rows = vec![
         fix(
-            "Fixed an issue where the player would buy back and immediately die again anyway.",
+            "Fixed Pudge dying 19 times in a single game.",
             Some("pudge"),
             "",
         ),
+        fix("A 14k gold lead no longer counts as a win.", None, ""),
         fix(
-            "Fixed Black King Bar being purchased only after the team fight had already ended",
-            None,
-            "",
-        ),
-        fix(
-            "Fixed an issue where wards were placed exclusively on the high ground cliff. OK.",
+            "Fixed Crystal Maiden losing the game in 17 minutes.",
             Some("crystal_maiden"),
             "",
         ),
         fix(
-            "Sonic Wave still occasionally targets the single enemy hero who is already dead.",
+            "Queen of Pain win rate remains 31% after 13 games.",
             Some("queenofpain"),
             "KNOWN ISSUE",
         ),
     ];
-    full.lines = lines(&["Thanks to the teammates who reported these."]);
 
     let mut sparse = styled(
         "story_bugfixes_sparse",
@@ -1258,8 +1242,8 @@ fn bug_fix_cards() -> Vec<WrappedSlideData> {
         WrappedTheme::PatchFixes,
     );
     sparse.rows = vec![
-        fix("Fixed a rare case where the courier was used.", None, ""),
-        fix("Deaths before minute five persist.", None, "KNOWN ISSUE"),
+        fix("Fixed a 6-game losing streak.", None, ""),
+        fix("Map pings still average 61 per game.", None, "KNOWN ISSUE"),
     ];
     vec![full, sparse]
 }
@@ -1269,23 +1253,14 @@ fn patch_gallery() -> Vec<WrappedSlideData> {
     let mut changes = card("story_patch", "Balance changes");
     changes.headline = "You got\npatched.".to_owned();
     changes.rows = rows(&[
-        (
-            "Buff: Gold income",
-            "400 to 650 GPM\nFirst 6 vs last 6 dated games.",
-        ),
-        (
-            "Nerf: Deaths",
-            "7.1 to 9.2 deaths/game\nFirst 6 vs last 6 dated games.",
-        ),
-        (
-            "Buff: Win rate",
-            "50% to 83%\nFirst 6 vs last 6 dated games.",
-        ),
+        ("More gold", "400 to 650 gold a minute"),
+        ("More deaths", "7.1 to 9.2 a game"),
+        ("More wins", "50% to 83% of games"),
     ]);
     changes.rows[0].value = 1.0;
     changes.rows[1].value = -1.0;
     changes.rows[2].value = 1.0;
-    changes.lines = lines(&["Perfectly balanced. Allegedly."]);
+    changes.lines = lines(&["First 6 games vs last 6."]);
 
     let mut long = changes.clone();
     long.kind = "story_patch_long".to_owned();
@@ -1301,60 +1276,41 @@ fn patch_gallery() -> Vec<WrappedSlideData> {
             ..Default::default()
         })
         .collect::<Vec<_>>();
-    long.rows = personal_patch(&matches, 7, None, 0)
-        .changes
-        .into_iter()
-        .map(|change| {
-            let (label, sign) = match change.direction {
-                BalanceDirection::Buff => ("Buff", 1.0),
-                BalanceDirection::Nerf => ("Nerf", -1.0),
-            };
-            let mut row = WrappedRow::new(
-                format!("{label}: {}", change.title),
-                format!("{}\n{}", change.value, change.evidence),
-            );
-            row.value = sign;
-            row
-        })
-        .collect();
-    long.lines = lines(&["Nerfs postponed. Enjoy responsibly."]);
+    let measured = personal_patch(&matches, 7, None).changes;
+    long.rows = measured.iter().map(change_row).collect();
+    long.lines = measured.first().map(compared).into_iter().collect();
 
     let mut sparse = card("story_patch_sparse", "Balance changes");
     sparse.layout = WrappedLayout::PatchNotes;
     sparse.theme = WrappedTheme::Patch;
     sparse.headline = "You got\npatched.".to_owned();
     sparse.username = "New arrival".to_owned();
-    sparse.rows = rows(&[(
-        "Buff: Gold income",
-        "400 to 450 GPM\nFirst 5 vs last 5 dated games.",
-    )]);
+    sparse.rows = rows(&[("More gold", "400 to 450 gold a minute")]);
     sparse.rows[0].value = 1.0;
-    sparse.lines = lines(&["Nerfs postponed. Enjoy responsibly."]);
+    sparse.lines = lines(&["First 5 games vs last 5."]);
 
     let mut medal = styled(
         "story_patch_award",
-        "Please remain\nseated",
+        "Stuns and assists",
         WrappedLayout::Award,
         WrappedTheme::Patch,
     );
     medal.stat_value = "17 games".to_owned();
-    medal.stat_label =
-        "60+ stun seconds and 20+ assists in 17 of 48 games with the required data recorded."
-            .to_owned();
+    medal.stat_label = "60+ stun seconds and 20+ assists in 17 of 48 games.".to_owned();
     let mut alternate = medal.clone();
     alternate.theme = WrappedTheme::Awards;
-    alternate.title = "Side selection\ndisabled".to_owned();
-    alternate.stat_value = "67% Radiant · 80% Dire".to_owned();
-    alternate.stat_label = "Won 4/6 on Radiant and 4/5 on Dire; known results only.".to_owned();
+    alternate.title = "Wins on both sides".to_owned();
+    alternate.stat_value = "67% / 80%".to_owned();
+    alternate.stat_label = "Won 67% on Radiant and 80% on Dire.".to_owned();
     // The medal wears the item an award is named for; without one it is a crest.
-    medal.art_png = icon_image("items", "black_king_bar");
-    let mut rapier = alternate.clone();
-    rapier.kind = "more_story_patch_award".to_owned();
-    rapier.title = "Fully committed".to_owned();
-    rapier.stat_value = "3 Rapiers".to_owned();
-    rapier.stat_label = "Bought in 3 of 48 games. Lost all three.".to_owned();
-    rapier.art_png = icon_image("items", "rapier");
-    vec![changes, long, sparse, medal, alternate, rapier]
+    medal.art_png = icon_image("items", "basher");
+    let mut richest = alternate.clone();
+    richest.kind = "more_story_patch_award".to_owned();
+    richest.title = "Richest in the game".to_owned();
+    richest.stat_value = "9 games".to_owned();
+    richest.stat_label = "Highest net worth in 9 of 20 games.".to_owned();
+    richest.art_png = icon_image("items", "hand_of_midas");
+    vec![changes, long, sparse, medal, alternate, richest]
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

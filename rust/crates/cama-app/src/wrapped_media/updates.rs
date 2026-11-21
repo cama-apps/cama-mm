@@ -14,8 +14,8 @@ const TOP: i32 = 88;
 /// Lowest y a row may reach, leaving clear air above the username footer.
 const BOTTOM: i32 = HEIGHT - 72;
 const TITLE_HEIGHT: i32 = 78;
-const SUBTITLE_HEIGHT: i32 = 36;
-const FOOTNOTE_HEIGHT: i32 = 40;
+/// The top of the rows under the title.
+const CONTENT_TOP: i32 = TOP + TITLE_HEIGHT + 12;
 const GAP: i32 = 12;
 
 /// The ink panel behind a hero block, and the lighter tile set into it.
@@ -45,13 +45,7 @@ fn verdict(value: f64, neutral: Rgba) -> Rgba {
     }
 }
 
-/// The top of the rows under the title and, when a card has one, its subtitle.
-fn content_top(slide: &WrappedSlideData, subtitle: bool) -> i32 {
-    let subtitle = subtitle && !slide.headline.trim().is_empty();
-    TOP + TITLE_HEIGHT + if subtitle { SUBTITLE_HEIGHT } else { 0 } + 12
-}
-
-fn heading(stage: &mut Stage<'_>, subtitle: bool) {
+fn heading(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
     stage.block(
         &slide.title,
@@ -62,37 +56,6 @@ fn heading(stage: &mut Stage<'_>, subtitle: bool) {
         Align::Left,
         (0.0, 0.1),
     );
-    if subtitle {
-        stage.block(
-            &slide.headline,
-            (MARGIN, TOP + TITLE_HEIGHT, COLUMN, SUBTITLE_HEIGHT),
-            26.0,
-            Face::Medium,
-            p.fg,
-            Align::Left,
-            (0.03, 0.13),
-        );
-    }
-}
-
-fn footnote(stage: &mut Stage<'_>) {
-    let (slide, p) = (stage.slide, stage.palette);
-    if let Some(note) = slide.lines.first() {
-        stage.block(
-            note,
-            (
-                MARGIN,
-                BOTTOM - FOOTNOTE_HEIGHT + 8,
-                COLUMN,
-                FOOTNOTE_HEIGHT - 8,
-            ),
-            23.0,
-            Face::Medium,
-            p.fg,
-            Align::Left,
-            (0.86, 0.98),
-        );
-    }
 }
 
 /// When row `index` of `count` starts on the timeline and how long its
@@ -298,8 +261,8 @@ struct HeroBlock {
     name_size: f32,
     /// The ability icons' left edge, top, and size.
     strip: (i32, i32, i32),
+    /// The hero's one change line.
     changes: (i32, i32, i32, i32),
-    change_size: f32,
     stamp_size: f32,
     /// Centered for a lone hero, whose portrait stands above its name.
     align: Align,
@@ -308,20 +271,20 @@ struct HeroBlock {
 const INNER: i32 = MARGIN + 16;
 const INNER_WIDTH: i32 = COLUMN - 32;
 const HERO_PAD: i32 = 14;
-
-fn change_lines_height(size: f32) -> i32 {
-    block_height(2, size, Face::Medium).ceil() as i32 + 2
-}
+/// The size of a hero's change line: the largest at which the widest line
+/// the deck writes stays on one row, so every hero's line is set alike.
+const CHANGE_SIZE: f32 = 31.0;
+/// The height of the box a change line is set in.
+const CHANGE_HEIGHT: i32 = 39;
 
 /// A hero block with its portrait on the left and the name and ability
-/// icons beside it, the change lines running full width underneath.
-fn side_block(portrait_height: i32, icon: i32, name_size: f32, change_size: f32) -> HeroBlock {
+/// icons beside it, the change line running full width underneath.
+fn side_block(portrait_height: i32, icon: i32, name_size: f32) -> HeroBlock {
     let portrait_width = portrait_height * 16 / 9;
     let text_left = INNER + portrait_width + 18;
     let changes_top = HERO_PAD + portrait_height + 10;
-    let changes_height = change_lines_height(change_size);
     HeroBlock {
-        height: changes_top + changes_height + HERO_PAD,
+        height: changes_top + CHANGE_HEIGHT + HERO_PAD,
         portrait: (INNER, HERO_PAD, portrait_width, portrait_height),
         name: (
             text_left,
@@ -331,8 +294,7 @@ fn side_block(portrait_height: i32, icon: i32, name_size: f32, change_size: f32)
         ),
         name_size,
         strip: (text_left, HERO_PAD + portrait_height - icon, icon),
-        changes: (INNER, changes_top, INNER_WIDTH, changes_height),
-        change_size,
+        changes: (INNER, changes_top, INNER_WIDTH, CHANGE_HEIGHT),
         stamp_size: name_size * 0.5,
         align: Align::Left,
     }
@@ -342,8 +304,7 @@ fn side_block(portrait_height: i32, icon: i32, name_size: f32, change_size: f32)
 /// share the card evenly, two grow, and one stands its portrait above its
 /// name.
 fn hero_blocks(slide: &WrappedSlideData) -> (i32, HeroBlock) {
-    let top = content_top(slide, true);
-    let room = BOTTOM - top;
+    let room = BOTTOM - CONTENT_TOP;
     let count = slide.rows.len().clamp(1, 3) as i32;
     let block = match count {
         1 => {
@@ -351,28 +312,26 @@ fn hero_blocks(slide: &WrappedSlideData) -> (i32, HeroBlock) {
             let name_top = 22 + portrait.1 + 12;
             let strip_top = name_top + name + 8;
             let changes_top = strip_top + icon + 16;
-            let changes_height = change_lines_height(30.0);
             HeroBlock {
-                height: changes_top + changes_height + 22,
+                height: changes_top + CHANGE_HEIGHT + 22,
                 portrait: ((WIDTH - portrait.0) / 2, 22, portrait.0, portrait.1),
                 name: (INNER, name_top, INNER_WIDTH, name),
                 name_size: 52.0,
                 strip: (INNER, strip_top, icon),
-                changes: (INNER, changes_top, INNER_WIDTH, changes_height),
-                change_size: 30.0,
+                changes: (INNER, changes_top, INNER_WIDTH, CHANGE_HEIGHT),
                 stamp_size: 26.0,
                 align: Align::Center,
             }
         }
-        2 => side_block(180, 58, 44.0, 30.0),
+        2 => side_block(180, 58, 44.0),
         _ => {
             let height = (room - GAP * 2) / 3;
-            let fixed = HERO_PAD * 2 + 10 + change_lines_height(26.0);
-            side_block((height - fixed).clamp(72, 126), 52, 38.0, 26.0)
+            let fixed = HERO_PAD * 2 + 10 + CHANGE_HEIGHT;
+            side_block((height - fixed).clamp(72, 126), 52, 38.0)
         }
     };
     let used = block.height * count + GAP * (count - 1);
-    (top + (room - used).max(0) / 2, block)
+    (CONTENT_TOP + (room - used).max(0) / 2, block)
 }
 
 /// The size hero portraits are drawn at on this card.
@@ -387,10 +346,10 @@ pub(super) fn hero_icon(slide: &WrappedSlideData) -> usize {
 }
 
 /// Hero updates: each hero's portrait, stamped verdict, ability icons and
-/// change lines on an ink panel, like a block of official patch notes.
+/// change line on an ink panel, like a block of official patch notes.
 pub(super) fn heroes(stage: &mut Stage<'_>) {
     let slide = stage.slide;
-    heading(stage, true);
+    heading(stage);
     let (first, block) = hero_blocks(slide);
     let count = slide.rows.len().min(3);
     for (index, row) in slide.rows.iter().take(3).enumerate() {
@@ -540,7 +499,7 @@ fn hero(
         stage,
         &row.secondary,
         (left, top + offset - lift, width, height),
-        block.change_size,
+        CHANGE_SIZE,
         (PAPER, color),
         block.align,
         span(0.55, 0.8),
@@ -585,7 +544,7 @@ const ITEM_BORDER: i32 = 6;
 const ITEM_SHADOW: i32 = 8;
 
 fn item_rows(slide: &WrappedSlideData) -> (i32, ItemRow) {
-    let top = content_top(slide, false) + 8;
+    let top = CONTENT_TOP + 8;
     let room = BOTTOM - top;
     let count = slide.rows.len().clamp(1, 4) as i32;
     let scaled = |scale: i32| (ITEM_ICON.0 * scale / 4, ITEM_ICON.1 * scale / 4);
@@ -658,7 +617,7 @@ fn leading_figure(line: &str) -> Option<(&str, &str)> {
 /// one line whose leading figure counts up.
 pub(super) fn items(stage: &mut Stage<'_>) {
     let slide = stage.slide;
-    heading(stage, false);
+    heading(stage);
     let (first, geometry) = item_rows(slide);
     let count = slide.rows.len().min(4);
     for (index, row) in slide.rows.iter().take(4).enumerate() {
@@ -877,16 +836,11 @@ fn figure_split(
 /// Where a fixed issue puts its pieces: the first row's top, the distance
 /// between rows, and each row's panel height.
 fn fix_rows(slide: &WrappedSlideData) -> (i32, i32, i32) {
-    let top = content_top(slide, true);
-    let bottom = if slide.lines.is_empty() {
-        BOTTOM
-    } else {
-        BOTTOM - FOOTNOTE_HEIGHT
-    };
+    let room = BOTTOM - CONTENT_TOP;
     let count = slide.rows.len().clamp(1, 4) as i32;
-    let pitch = ((bottom - top + GAP) / count).min(172);
+    let pitch = ((room + GAP) / count).min(172);
     let used = pitch * count - GAP;
-    (top + (bottom - top - used).max(0) / 2, pitch, pitch - GAP)
+    (CONTENT_TOP + (room - used).max(0) / 2, pitch, pitch - GAP)
 }
 
 const FIX_PAD: i32 = 18;
@@ -910,7 +864,7 @@ fn fix_text_box(panel_height: i32, portrait: bool) -> (i32, i32, i32, i32) {
 /// issue keeps its warning color and mark instead.
 pub(super) fn fixes(stage: &mut Stage<'_>) {
     let slide = stage.slide;
-    heading(stage, true);
+    heading(stage);
     let (first, pitch, height) = fix_rows(slide);
     let count = slide.rows.len().min(4);
     // One or two tickets are taller, and their lines are set larger.
@@ -920,7 +874,6 @@ pub(super) fn fixes(stage: &mut Stage<'_>) {
         let window = row_window(index, count);
         fix(stage, index, row, (top, height), size, window);
     }
-    footnote(stage);
 }
 
 fn fix(
@@ -1008,7 +961,7 @@ fn fix(
 }
 
 /// The design size of a fixed issue's line.
-const FIX_TYPE: f32 = 27.0;
+const FIX_TYPE: f32 = 30.0;
 
 /// A green disc whose tick is drawn stroke by stroke.
 fn check_mark(stage: &mut Stage<'_>, center: (f32, f32), grow: f32, drawn: f32) {
@@ -1063,60 +1016,42 @@ mod tests {
         );
     }
 
-    fn slide(kind: &str, rows: usize, subtitle: bool, note: bool) -> WrappedSlideData {
+    fn slide(kind: &str, rows: usize) -> WrappedSlideData {
         let mut slide = WrappedSlideData::new(kind, "Updates");
-        if subtitle {
-            slide.headline = "Across 186 recorded picks.".to_owned();
-        }
-        if note {
-            slide.lines = vec!["Known issues remain known.".to_owned()];
-        }
         slide.rows = vec![WrappedRow::default(); rows];
         slide
     }
 
     #[test]
     fn hero_blocks_stay_on_the_card_and_keep_their_copy_readable() {
-        const CHANGES: &str = "Win rate increased from 40% to 67%.\nRemoved from Captain's Mode.";
         for rows in 1..=3 {
-            for subtitle in [false, true] {
-                let slide = slide("story_hero_patch", rows, subtitle, false);
-                let (first, block) = hero_blocks(&slide);
-                assert!(first >= content_top(&slide, true));
-                let last = first + (rows as i32 - 1) * (block.height + GAP) + block.height;
-                assert!(last <= BOTTOM, "{rows} rows end at {last}");
-                assert!(block.portrait.3 >= 90, "portrait {:?}", block.portrait);
-                let (_, _, width, height) = block.name;
-                assert_fits(
-                    "Keeper of the Light",
-                    Face::Black,
-                    block.name_size,
-                    32.0,
-                    width,
-                    height,
-                );
-                let (_, _, width, height) = block.changes;
-                assert_fits(
-                    CHANGES,
-                    Face::Medium,
-                    block.change_size,
-                    25.0,
-                    width - BULLET_INDENT,
-                    height,
-                );
-                // Four ability icons fit beside or under the name.
-                let (left, _, icon) = block.strip;
-                assert!(left + icon * 4 + 24 <= WIDTH - MARGIN - 16);
-            }
+            let slide = slide("story_hero_patch", rows);
+            let (first, block) = hero_blocks(&slide);
+            assert!(first >= CONTENT_TOP);
+            let last = first + (rows as i32 - 1) * (block.height + GAP) + block.height;
+            assert!(last <= BOTTOM, "{rows} rows end at {last}");
+            assert!(block.portrait.3 >= 90, "portrait {:?}", block.portrait);
+            let (_, _, width, height) = block.name;
+            assert_fits(
+                "Keeper of the Light",
+                Face::Black,
+                block.name_size,
+                32.0,
+                width,
+                height,
+            );
+            // Four ability icons fit beside or under the name.
+            let (left, _, icon) = block.strip;
+            assert!(left + icon * 4 + 24 <= WIDTH - MARGIN - 16);
         }
     }
 
     #[test]
     fn item_rows_stay_on_the_card_and_keep_their_copy_readable() {
         for rows in 1..=4 {
-            let slide = slide("story_items", rows, false, false);
+            let slide = slide("story_items", rows);
             let (first, row) = item_rows(&slide);
-            assert!(first >= content_top(&slide, false));
+            assert!(first >= CONTENT_TOP);
             let frame = row.icon.1 + ITEM_BORDER * 2 + ITEM_SHADOW;
             let last = first + (rows as i32 - 1) * row.pitch + frame.max(row.line.1 + row.line.3);
             assert!(last <= BOTTOM, "{rows} rows end at {last}");
@@ -1169,21 +1104,17 @@ mod tests {
             "Fixed an issue where wards were placed exclusively on the high ground cliff. OK.",
             "Wwwwwwww mmmmmmmm wwwwwwww mmmmmmmm wwwwwwww mmmmmmmm wwwwwwww mmmmmmmm wwwwwww.",
         ];
-        for subtitle in [false, true] {
-            for note in [false, true] {
-                let slide = slide("story_bugfixes", 4, subtitle, note);
-                let (first, pitch, height) = fix_rows(&slide);
-                assert!(first >= content_top(&slide, true));
-                assert!(first + pitch * 3 + height <= BOTTOM);
-                let (_, _, width, box_height) = fix_text_box(height, true);
-                for (index, line) in lines.into_iter().enumerate() {
-                    assert_eq!(line.chars().count(), 80);
-                    // Prose stays at reading size on the fullest card. Even
-                    // eighty of the widest letters stay whole and legible.
-                    let smallest = if index < 3 { 25.0 } else { 20.0 };
-                    assert_fits(line, Face::Medium, FIX_TYPE, smallest, width, box_height);
-                }
-            }
+        let slide = slide("story_bugfixes", 4);
+        let (first, pitch, height) = fix_rows(&slide);
+        assert!(first >= CONTENT_TOP);
+        assert!(first + pitch * 3 + height <= BOTTOM);
+        let (_, _, width, box_height) = fix_text_box(height, true);
+        for (index, line) in lines.into_iter().enumerate() {
+            assert_eq!(line.chars().count(), 80);
+            // Prose stays at reading size on the fullest card. Even eighty
+            // of the widest letters stay whole and legible.
+            let smallest = if index < 3 { 25.0 } else { 20.0 };
+            assert_fits(line, Face::Medium, FIX_TYPE, smallest, width, box_height);
         }
     }
 
@@ -1220,7 +1151,7 @@ mod tests {
         for rows in 1..=3 {
             for icons in [0, 4] {
                 for with_portrait in [false, true] {
-                    let mut slide = slide("story_hero_patch", rows, true, false);
+                    let mut slide = slide("story_hero_patch", rows);
                     for row in &mut slide.rows {
                         row.image_png = with_portrait.then(|| portrait.clone());
                         row.icons = vec![icon.clone(); icons];
@@ -1242,20 +1173,20 @@ mod tests {
     }
 
     #[test]
-    fn every_hero_change_the_deck_writes_keeps_to_its_own_row_at_reading_size() {
-        let sets = crate::wrapped_story::hero_patch::widest_lines();
-        assert!(sets.len() > 20, "{} sets", sets.len());
+    fn every_hero_change_the_deck_writes_keeps_to_one_row_at_its_design_size() {
+        let lines = crate::wrapped_story::hero_patch::widest_lines();
+        assert!(!lines.is_empty());
         for rows in 1..=3 {
-            let slide = slide("story_hero_patch", rows, true, false);
+            let slide = slide("story_hero_patch", rows);
             let (_, block) = hero_blocks(&slide);
             let (_, _, width, height) = block.changes;
             let column = width - BULLET_INDENT;
-            for lines in &sets {
-                let text = lines.join("\n");
-                // Three heroes set their lines at 26; no card goes below it.
-                assert_fits(&text, Face::Medium, block.change_size, 26.0, column, height);
-                let (_, set) = fit_text(&text, Face::Medium, block.change_size, column, height);
-                assert_eq!(set, *lines, "{rows} heroes: a line wraps");
+            // Every hero's line is set at the same size, so even the widest
+            // fits without shrinking.
+            for line in &lines {
+                assert_fits(line, Face::Medium, CHANGE_SIZE, CHANGE_SIZE, column, height);
+                let (_, set) = fit_text(line, Face::Medium, CHANGE_SIZE, column, height);
+                assert_eq!(set, [line.as_str()], "{rows} heroes: {line:?} wraps");
             }
         }
     }
@@ -1263,9 +1194,9 @@ mod tests {
     #[test]
     fn every_item_line_the_deck_writes_keeps_its_words_readable_beside_its_figure() {
         let lines = crate::wrapped_story::item_patch::widest_lines();
-        assert!(lines.len() > 40, "{} lines", lines.len());
+        assert!(!lines.is_empty());
         for rows in 1..=4 {
-            let slide = slide("story_items", rows, false, false);
+            let slide = slide("story_items", rows);
             let (_, row) = item_rows(&slide);
             let mut stage = Stage::new(&slide);
             let (_, _, width, height) = row.line;
@@ -1341,7 +1272,7 @@ mod tests {
         slide.rows = ["Queen of Pain", "Pudge", "Keeper of the Light"]
             .into_iter()
             .map(|name| {
-                let mut row = WrappedRow::new(name, "Win rate increased from 40% to 67%.");
+                let mut row = WrappedRow::new(name, "Win rate 40% to 67%");
                 row.tag = "BUFFED".to_owned();
                 row.value = 1.0;
                 row.image_png = Some(flat(256, 144, GREEN));
@@ -1383,7 +1314,7 @@ mod tests {
         slide.rows = (0..4)
             .map(|_| {
                 let mut row = WrappedRow::new("Blink Dagger", "41 of 48 games");
-                row.tag = "SIGNATURE".to_owned();
+                row.tag = "MOST BUILT".to_owned();
                 row.image_png = Some(flat(88, 64, GREEN));
                 row
             })

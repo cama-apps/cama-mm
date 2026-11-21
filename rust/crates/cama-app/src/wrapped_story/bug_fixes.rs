@@ -60,8 +60,7 @@ const BUGS: &[Bug] = &[
         theme: Theme::Deaths,
         fixed: &[
             "Fixed {hero} dying {n} times in a single game.",
-            "Fixed an issue where one game contained {n} deaths.",
-            "{hero} no longer dies {n} times in one game. Probably.",
+            "Fixed one game containing {n} deaths.",
         ],
         ongoing: &[],
     },
@@ -69,8 +68,7 @@ const BUGS: &[Bug] = &[
         key: "loss_streak",
         theme: Theme::Results,
         fixed: &[
-            "Fixed an issue causing {n} consecutive losses.",
-            "Fixed a {n}-game losing streak. Cause still unknown.",
+            "Fixed a {n}-game losing streak.",
             "Losing {n} games in a row is no longer a strategy.",
         ],
         ongoing: &[],
@@ -91,7 +89,6 @@ const BUGS: &[Bug] = &[
         fixed: &[
             "Fixed {n} kills not being enough.",
             "Fixed {hero} getting {n} kills and losing anyway.",
-            "Fixed an issue where {n} kills did not win the game.",
         ],
         ongoing: &[],
     },
@@ -123,7 +120,7 @@ const BUGS: &[Bug] = &[
         fixed: &[
             "Fixed a Divine Rapier not preventing a loss.",
             "Fixed {hero} buying a Divine Rapier and losing.",
-            "Divine Rapier no longer guarantees a win. It never did.",
+            "Divine Rapier no longer guarantees a win.",
         ],
         ongoing: &[],
     },
@@ -135,8 +132,8 @@ const BUGS: &[Bug] = &[
             "Fixed {l} games being lost with a Divine Rapier.",
         ],
         ongoing: &[
-            "Divine Rapier games are still being lost. {l} so far.",
-            "Games with a Divine Rapier still get lost. {l} so far.",
+            "Divine Rapier games still get lost. {l} so far.",
+            "Still losing with a Divine Rapier: {l} games.",
         ],
     },
     Bug {
@@ -144,7 +141,7 @@ const BUGS: &[Bug] = &[
         theme: Theme::Comms,
         fixed: &[
             "Fixed map pings averaging {n} per game.",
-            "Reduced map pings from {n} per game. Teammates notified.",
+            "Reduced map pings from {n} per game.",
         ],
         ongoing: &[
             "Map pings still average {n} per game.",
@@ -177,7 +174,7 @@ const BUGS: &[Bug] = &[
         key: "late_nights",
         theme: Theme::Clock,
         fixed: &[
-            "Fixed {n} games finishing between midnight and 6 AM.",
+            "Fixed {n} games ending between midnight and 6 AM.",
             "Fixed {n} games running past midnight.",
         ],
         ongoing: &[
@@ -189,12 +186,12 @@ const BUGS: &[Bug] = &[
         key: "no_wards",
         theme: Theme::Vision,
         fixed: &[
-            "Fixed {z} support games ending with 0 wards placed.",
-            "Fixed 0 wards being placed in {z} of {k} support games.",
+            "Fixed {z} support games ending with 0 wards.",
+            "Fixed 0 wards in {z} of {k} support games.",
         ],
         ongoing: &[
-            "0 wards placed in {z} of {k} support games. Unresolved.",
-            "Support games still end with 0 wards placed: {z} of {k}.",
+            "Still 0 wards in {z} of {k} support games.",
+            "Support games still end with 0 wards: {z} of {k}.",
         ],
     },
     Bug {
@@ -211,11 +208,11 @@ const BUGS: &[Bug] = &[
         key: "no_first_blood",
         theme: Theme::Kills,
         fixed: &[
-            "Fixed 0 first bloods being claimed across {n} games.",
-            "Fixed first blood going to someone else for {n} games.",
+            "Fixed 0 first bloods across {n} games.",
+            "Fixed first blood going elsewhere for {n} games.",
         ],
         ongoing: &[
-            "0 first bloods in {n} games. Investigation ongoing.",
+            "Still 0 first bloods in {n} games.",
             "First blood still goes to someone else. {n} games.",
         ],
     },
@@ -224,11 +221,11 @@ const BUGS: &[Bug] = &[
         theme: Theme::Deaths,
         fixed: &[
             "Fixed deaths per game rising from {a} to {b}.",
-            "Deaths per game are no longer {a}. They are now {b}.",
+            "Deaths per game are no longer {a}. Now {b}.",
         ],
         ongoing: &[
             "Deaths per game still rising: {a} to {b}.",
-            "Deaths per game went from {a} to {b}. Not yet fixed.",
+            "Deaths per game went {a} to {b}. Not yet fixed.",
         ],
     },
     Bug {
@@ -257,7 +254,7 @@ const BUGS: &[Bug] = &[
         key: "bad_side",
         theme: Theme::Results,
         fixed: &[
-            "Fixed {side} games being won only {p}% of the time.",
+            "Fixed winning only {p}% of {side} games.",
             "Fixed a {p}% win rate across {n} {side} games.",
         ],
         ongoing: &[
@@ -1251,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_is_varied_in_voice_and_short() {
+    fn the_catalog_is_varied_in_voice_and_every_wording_is_fifty_characters_or_fewer() {
         assert!(BUGS.len() >= 14);
         assert_eq!(
             BUGS.iter()
@@ -1298,13 +1295,15 @@ mod tests {
             for template in bug.ongoing {
                 assert!(!template.starts_with("Fixed "), "{template}");
                 assert!(
-                    ["still", "remains", "Unresolved", "ongoing", "Not yet fixed"]
+                    ["still", "Still", "remains", "Not yet fixed"]
                         .iter()
                         .any(|word| template.contains(word)),
                     "{template}"
                 );
             }
             for template in bug.fixed.iter().chain(bug.ongoing) {
+                // Measured as written, before the hero is named.
+                assert!(template.chars().count() <= 50, "{template}");
                 let line = format_flavor(template, &wide);
                 assert!(!line.contains('{'), "{template}");
                 assert!(line.chars().count() <= 80, "{line}");

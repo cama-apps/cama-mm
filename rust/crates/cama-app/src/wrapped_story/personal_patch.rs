@@ -36,110 +36,43 @@ pub struct BalanceChange {
     pub key: &'static str,
     pub title: String,
     pub value: String,
-    pub evidence: String,
     pub direction: BalanceDirection,
+    /// Games in each of the two groups compared: the first and the last.
+    pub compared_games: usize,
     /// Games with a valid measurement in each chronological group.
     pub early_games: usize,
     pub late_games: usize,
 }
 
-/// Every award: its key, its icon, and its two titles. `{day}` in a title
-/// is the weekday the award was earned on.
-pub const AWARDS: [(&str, &str, [&str; 2]); 22] = [
-    (
-        "buyback_wins",
-        "refresher",
-        ["Buyback approved", "Money well spent"],
-    ),
-    (
-        "first_blood_wins",
-        "dagon",
-        ["Started it. Finished it.", "First blood, last laugh"],
-    ),
-    (
-        "roshan_wins",
-        "vladmir",
-        ["Roshan eviction notice", "Pit inspection passed"],
-    ),
+/// Every award: its key, its icon, and its title. `{day}` in a title is the
+/// weekday the award was earned on.
+pub const AWARDS: [(&str, &str, &str); 22] = [
+    ("buyback_wins", "refresher", "Buybacks that paid off"),
+    ("first_blood_wins", "dagon", "First blood winner"),
+    ("roshan_wins", "vladmir", "Roshan taker"),
     (
         "support_infrastructure",
         "ward_observer",
-        ["Support budget increased", "Infrastructure week"],
+        "Wards and stacks",
     ),
-    (
-        "crowd_control",
-        "basher",
-        ["Please remain seated", "Movement disabled"],
-    ),
-    (
-        "rune_pace",
-        "bottle",
-        ["River patrol", "Rune tax collected"],
-    ),
-    (
-        "team_shopping",
-        "smoke_of_deceit",
-        ["Packed for the team", "Shared inventory"],
-    ),
-    (
-        "both_sides",
-        "travel_boots",
-        ["Side selection disabled", "Map agnostic"],
-    ),
-    (
-        "late_game",
-        "heart",
-        ["Late game insurance", "Scales with time"],
-    ),
-    (
-        "closer",
-        "phase_boots",
-        ["Early checkout", "Done by 30 minutes"],
-    ),
-    ("underdog", "blade_mail", ["Odds ignored", "Upset special"]),
-    (
-        "lane_dominance",
-        "quelling_blade",
-        ["Lane closed for farming", "Creep wave secured"],
-    ),
-    (
-        "always_fighting",
-        "blink",
-        ["Attendance: mandatory", "Never missed a fight"],
-    ),
-    (
-        "building_damage",
-        "desolator",
-        ["Structural damage", "Demolition permit"],
-    ),
-    ("denies", "branches", ["Access denied", "Not your creep"]),
-    ("healer", "mekansm", ["Health services", "Fountain on legs"]),
-    (
-        "clean_hands",
-        "ghost",
-        ["Clean hands", "Respawn timer unused"],
-    ),
-    (
-        "deathless_wins",
-        "aeon_disk",
-        ["Zero deaths recorded", "Death timer: disabled"],
-    ),
-    (
-        "comeback_wins",
-        "satanic",
-        ["Deficit denied", "Comeback mechanics"],
-    ),
-    (
-        "top_net_worth",
-        "hand_of_midas",
-        ["Top of the scoreboard", "Net worth leader"],
-    ),
-    ("flex", "power_treads", ["Role queue: all", "Flex pick"]),
-    (
-        "weekday_specialist",
-        "tpscroll",
-        ["{day} specialist", "Scheduled for {day}s"],
-    ),
+    ("crowd_control", "basher", "Stuns and assists"),
+    ("rune_pace", "bottle", "Rune collector"),
+    ("team_shopping", "smoke_of_deceit", "Smoke and dust buyer"),
+    ("both_sides", "travel_boots", "Wins on both sides"),
+    ("late_game", "heart", "Late-game winner"),
+    ("closer", "phase_boots", "Fast finisher"),
+    ("underdog", "blade_mail", "Underdog winner"),
+    ("lane_dominance", "quelling_blade", "Lane farmer"),
+    ("always_fighting", "blink", "Always in the fight"),
+    ("building_damage", "desolator", "Tower breaker"),
+    ("denies", "branches", "Deny specialist"),
+    ("healer", "mekansm", "Team healer"),
+    ("clean_hands", "ghost", "Hard to kill"),
+    ("deathless_wins", "aeon_disk", "Deathless wins"),
+    ("comeback_wins", "satanic", "Comeback winner"),
+    ("top_net_worth", "hand_of_midas", "Richest in the game"),
+    ("flex", "power_treads", "Plays every role"),
+    ("weekday_specialist", "tpscroll", "{day} winner"),
 ];
 
 /// Awards that tell the same kind of story; the first three shown differ.
@@ -163,20 +96,19 @@ enum AwardTheme {
 }
 
 /// The player's awards and balance changes. `timezone` places games on the
-/// player's own weekdays; `seed` picks each award's title.
+/// player's own weekdays.
 #[must_use]
 pub fn personal_patch(
     matches: &[DistinctMatch],
     player_id: i64,
     timezone: Option<&str>,
-    seed: u64,
 ) -> PersonalPatch {
     let games = matches
         .iter()
         .filter(|game| game.discord_id == player_id)
         .collect::<Vec<_>>();
     PersonalPatch {
-        awards: awards(&games, matches, timezone, seed),
+        awards: awards(&games, matches, timezone),
         changes: balance_changes(&games),
     }
 }
@@ -241,14 +173,14 @@ fn patch_names(theme: Theme) -> &'static [&'static str] {
     }
 }
 
-fn award(seed: u64, key: &'static str, value: String, evidence: String) -> PatchAward {
-    let (_, icon, titles) = AWARDS
+fn award(key: &'static str, value: String, evidence: String) -> PatchAward {
+    let (_, icon, title) = AWARDS
         .iter()
         .find(|(held, _, _)| *held == key)
         .expect("every award is in the catalog");
     PatchAward {
         key,
-        title: variant(seed, key, titles).to_owned(),
+        title: (*title).to_owned(),
         value,
         evidence,
         icon,
@@ -262,7 +194,6 @@ fn awards(
     games: &[&DistinctMatch],
     matches: &[DistinctMatch],
     timezone: Option<&str>,
-    seed: u64,
 ) -> Vec<PatchAward> {
     let mut candidates: Vec<(AwardTheme, f64, PatchAward)> = Vec::new();
 
@@ -278,7 +209,7 @@ fn awards(
         ),
         (
             "first_blood_wins",
-            "with your first blood",
+            "where you got first blood",
             AwardTheme::FirstBlood,
             (3, 3, 60),
             (|game: &DistinctMatch| game.first_blood) as Condition,
@@ -292,7 +223,7 @@ fn awards(
         ),
         (
             "late_game",
-            "lasting 45+ minutes",
+            "over 45 minutes",
             AwardTheme::Tempo,
             (5, 3, 60),
             (|game: &DistinctMatch| Some(minutes(game)? >= 45.0)) as Condition,
@@ -321,10 +252,9 @@ fn awards(
                 theme,
                 1.0 + wins as f64 / known as f64,
                 award(
-                    seed,
                     key,
                     format!("{wins} wins"),
-                    format!("Won {wins} of {known} recorded games {event}."),
+                    format!("Won {wins} of {known} games {event}."),
                 ),
             ));
         }
@@ -343,7 +273,6 @@ fn awards(
                 theme,
                 1.0 + weight * hits as f64 / known as f64,
                 award(
-                    seed,
                     key,
                     format!("{hits} games"),
                     format!("{detail} in {hits} of {known} {sample}."),
@@ -355,7 +284,7 @@ fn awards(
         (
             "support_infrastructure",
             "10+ wards and 3+ camps stacked",
-            "games with stats",
+            "games",
             AwardTheme::Support,
             (1.0, 0),
             (|game: &DistinctMatch| {
@@ -366,7 +295,7 @@ fn awards(
         (
             "crowd_control",
             "60+ stun seconds and 20+ assists",
-            "games with stats",
+            "games",
             AwardTheme::Support,
             (1.0, 0),
             (|game: &DistinctMatch| {
@@ -376,8 +305,8 @@ fn awards(
         ),
         (
             "rune_pace",
-            "At least 2 rune pickups per 10 minutes",
-            "games with stats",
+            "2+ runes every 10 minutes",
+            "games",
             AwardTheme::Runes,
             (1.0, 0),
             (|game: &DistinctMatch| {
@@ -389,8 +318,8 @@ fn awards(
         ),
         (
             "team_shopping",
-            "Bought both Smoke of Deceit and Dust",
-            "games with stats",
+            "Bought Smoke and Dust",
+            "games",
             AwardTheme::Shopping,
             (1.0, 0),
             (|game: &DistinctMatch| {
@@ -407,8 +336,8 @@ fn awards(
         ),
         (
             "lane_dominance",
-            "50+ last hits by 10:00",
-            "core games with stats",
+            "50+ last hits at 10 minutes",
+            "core games",
             AwardTheme::Lane,
             (1.0, 0),
             (|game: &DistinctMatch| {
@@ -419,7 +348,7 @@ fn awards(
         (
             "always_fighting",
             "Joined 80%+ of team fights",
-            "games with stats",
+            "games",
             AwardTheme::Fighting,
             (1.0, 0),
             (|game: &DistinctMatch| {
@@ -429,8 +358,8 @@ fn awards(
         ),
         (
             "building_damage",
-            "8,000+ building damage",
-            "games with stats",
+            "8,000+ tower damage",
+            "games",
             AwardTheme::Objectives,
             (1.0, 0),
             (|game: &DistinctMatch| Some(nonnegative(game.tower_damage)? >= 8_000)) as Condition,
@@ -438,15 +367,15 @@ fn awards(
         (
             "denies",
             "10+ denies",
-            "games with stats",
+            "games",
             AwardTheme::Lane,
             (1.0, 0),
             (|game: &DistinctMatch| Some(nonnegative(game.denies)? >= 10)) as Condition,
         ),
         (
             "healer",
-            "5,000+ hero healing",
-            "games with stats",
+            "5,000+ healing",
+            "games",
             AwardTheme::Support,
             (1.0, 0),
             (|game: &DistinctMatch| Some(nonnegative(game.hero_healing)? >= 5_000)) as Condition,
@@ -454,7 +383,7 @@ fn awards(
         (
             "clean_hands",
             "3 or fewer deaths",
-            "games with stats",
+            "games",
             AwardTheme::Survival,
             (1.0, 40),
             (|game: &DistinctMatch| Some(nonnegative(game.deaths)? <= 3)) as Condition,
@@ -462,7 +391,7 @@ fn awards(
         (
             "deathless_wins",
             "Won without dying",
-            "games with stats",
+            "games",
             AwardTheme::Survival,
             (4.0, 0),
             (|game: &DistinctMatch| Some(nonnegative(game.deaths)? == 0 && game.won?)) as Condition,
@@ -470,7 +399,7 @@ fn awards(
         (
             "comeback_wins",
             "Won from 5,000+ gold behind",
-            "games with stats",
+            "games",
             AwardTheme::Odds,
             (3.0, 0),
             // A loss is never a comeback; a win is one only when the
@@ -492,7 +421,7 @@ fn awards(
     }
     tally(
         "top_net_worth",
-        "Top net worth among tracked players",
+        "Highest net worth",
         "games",
         AwardTheme::Wealth,
         (1.5, 0),
@@ -521,12 +450,9 @@ fn awards(
             AwardTheme::Sides,
             1.0 + radiant.min(dire) / 100.0,
             award(
-                seed,
                 "both_sides",
                 format!("{radiant:.0}% / {dire:.0}%"),
-                format!(
-                    "Won {radiant_wins}/{radiant_games} on Radiant and {dire_wins}/{dire_games} on Dire."
-                ),
+                format!("Won {radiant:.0}% on Radiant and {dire:.0}% on Dire."),
             ),
         ));
     }
@@ -550,7 +476,6 @@ fn awards(
             AwardTheme::Roles,
             1.0 + played.len() as f64 / 5.0,
             award(
-                seed,
                 "flex",
                 format!("{} roles", played.len()),
                 format!(
@@ -601,10 +526,9 @@ fn awards(
             Weekday::Sun => "Sunday",
         };
         let mut specialist = award(
-            seed,
             "weekday_specialist",
             format!("{wins} wins"),
-            format!("Won {wins} of {known} recorded games that ended on a {day}."),
+            format!("Won {wins} of {known} games on {day}s."),
         );
         specialist.title = specialist.title.replace("{day}", day);
         candidates.push((
@@ -641,62 +565,61 @@ fn balance_changes(games: &[&DistinctMatch]) -> Vec<BalanceChange> {
     let Some(split) = timeline(games) else {
         return Vec::new();
     };
-    let group_size = split.early.len();
     let grouped = |value: f64| format_grouped(value.round() as i64);
     let mut changes = Vec::new();
-    for (key, title, threshold, lower_is_better, measure) in [
+    for (key, (more, less), threshold, lower_is_better, measure) in [
         (
             "gpm",
-            "Gold income",
+            ("More gold", "Less gold"),
             40.0,
             false,
             (|game: &DistinctMatch| nonnegative(game.gpm).map(|value| value as f64)) as Measure,
         ),
         (
             "deaths",
-            "Deaths",
+            ("More deaths", "Fewer deaths"),
             1.0,
             true,
             (|game: &DistinctMatch| nonnegative(game.deaths).map(|value| value as f64)) as Measure,
         ),
         (
             "win_rate",
-            "Win rate",
+            ("More wins", "Fewer wins"),
             15.0,
             false,
             (|game: &DistinctMatch| game.won.map(|won| if won { 100.0 } else { 0.0 })) as Measure,
         ),
         (
             "wards",
-            "Wards placed",
+            ("More wards", "Fewer wards"),
             3.0,
             false,
             (|game: &DistinctMatch| nonnegative(game.wards).map(|value| value as f64)) as Measure,
         ),
         (
             "stuns",
-            "Stun duration",
+            ("More stuns", "Fewer stuns"),
             10.0,
             false,
             (|game: &DistinctMatch| finite(game.stuns)) as Measure,
         ),
         (
             "kills",
-            "Kills",
+            ("More kills", "Fewer kills"),
             2.0,
             false,
             (|game: &DistinctMatch| nonnegative(game.kills).map(|value| value as f64)) as Measure,
         ),
         (
             "assists",
-            "Assists",
+            ("More assists", "Fewer assists"),
             3.0,
             false,
             (|game: &DistinctMatch| nonnegative(game.assists).map(|value| value as f64)) as Measure,
         ),
         (
             "last_hits_at_10",
-            "Lane last hits",
+            ("More last hits early", "Fewer last hits early"),
             8.0,
             false,
             (|game: &DistinctMatch| nonnegative(game.last_hits_at_10).map(|value| value as f64))
@@ -704,7 +627,7 @@ fn balance_changes(games: &[&DistinctMatch]) -> Vec<BalanceChange> {
         ),
         (
             "teamfight",
-            "Team fights",
+            ("More team fights", "Fewer team fights"),
             8.0,
             false,
             // Percent of the team's fights joined.
@@ -716,7 +639,7 @@ fn balance_changes(games: &[&DistinctMatch]) -> Vec<BalanceChange> {
         ),
         (
             "hero_damage",
-            "Hero damage",
+            ("More damage", "Less damage"),
             4_000.0,
             false,
             (|game: &DistinctMatch| nonnegative(game.hero_damage).map(|value| value as f64))
@@ -724,7 +647,7 @@ fn balance_changes(games: &[&DistinctMatch]) -> Vec<BalanceChange> {
         ),
         (
             "game_length",
-            "Game length",
+            ("Longer games", "Shorter games"),
             4.0,
             // Longer games are filed as the nerf.
             true,
@@ -732,7 +655,7 @@ fn balance_changes(games: &[&DistinctMatch]) -> Vec<BalanceChange> {
         ),
         (
             "tower_damage",
-            "Building damage",
+            ("More tower damage", "Less tower damage"),
             1_500.0,
             false,
             (|game: &DistinctMatch| nonnegative(game.tower_damage).map(|value| value as f64))
@@ -759,32 +682,37 @@ fn balance_changes(games: &[&DistinctMatch]) -> Vec<BalanceChange> {
             continue;
         }
         let value = match key {
-            "gpm" => format!("{before:.0} to {after:.0} GPM"),
-            "win_rate" => format!("{before:.0}% to {after:.0}%"),
-            "stuns" => format!("{before:.1} to {after:.1} stun seconds/game"),
-            "deaths" => format!("{before:.1} to {after:.1} deaths/game"),
-            "wards" => format!("{before:.1} to {after:.1} wards/game"),
-            "kills" => format!("{before:.1} to {after:.1} kills/game"),
-            "assists" => format!("{before:.1} to {after:.1} assists/game"),
-            "last_hits_at_10" => format!("{before:.0} to {after:.0} last hits at 10:00"),
-            "teamfight" => format!("{before:.0}% to {after:.0}% of team fights"),
-            "hero_damage" => format!("{} to {} hero damage", grouped(before), grouped(after)),
-            "game_length" => format!("{before:.1} to {after:.1} minutes/game"),
-            _ => format!("{} to {} building damage", grouped(before), grouped(after)),
+            "gpm" => format!("{before:.0} to {after:.0} gold a minute"),
+            "win_rate" => format!("{before:.0}% to {after:.0}% of games"),
+            "stuns" => format!("{before:.0} to {after:.0} seconds a game"),
+            "last_hits_at_10" => format!("{before:.0} to {after:.0} at 10 minutes"),
+            "teamfight" => format!("{before:.0}% to {after:.0}% of fights"),
+            "hero_damage" | "tower_damage" => {
+                format!("{} to {} a game", grouped(before), grouped(after))
+            }
+            "game_length" => format!("{before:.0} to {after:.0} minutes"),
+            // Deaths, wards, kills and assists: one decimal under 100 a game.
+            _ => {
+                let places = usize::from(before.max(after) < 100.0);
+                format!("{before:.places$} to {after:.places$} a game")
+            }
         };
-        changes.push((delta.abs() / threshold, BalanceChange {
-            key,
-            title: title.to_owned(),
-            value,
-            evidence: if early_games == group_size && late_games == group_size {
-                format!("First {group_size} vs last {group_size} dated games.")
-            } else {
-                format!("First {group_size} vs last {group_size} dated games ({early_games}/{group_size} vs {late_games}/{group_size} with stats).")
+        changes.push((
+            delta.abs() / threshold,
+            BalanceChange {
+                key,
+                title: if delta > 0.0 { more } else { less }.to_owned(),
+                value,
+                direction: if (delta < 0.0) == lower_is_better {
+                    BalanceDirection::Buff
+                } else {
+                    BalanceDirection::Nerf
+                },
+                compared_games: split.early.len(),
+                early_games,
+                late_games,
             },
-            direction: if (delta < 0.0) == lower_is_better { BalanceDirection::Buff } else { BalanceDirection::Nerf },
-            early_games,
-            late_games,
-        }));
+        ));
     }
     changes.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.key.cmp(b.1.key)));
     changes
@@ -810,7 +738,7 @@ mod tests {
     }
 
     fn patch(rows: &[DistinctMatch]) -> PersonalPatch {
-        personal_patch(rows, 7, None, 0)
+        personal_patch(rows, 7, None)
     }
 
     #[test]
@@ -828,8 +756,14 @@ mod tests {
         assert_eq!(report.awards.len(), 1);
         assert_eq!(report.awards[0].key, "buyback_wins");
         assert_eq!(report.awards[0].value, "2 wins");
-        assert!(report.awards[0].evidence.contains("2 of 3"));
-        assert!(report.awards[0].evidence.contains("with a buyback"));
+        assert_eq!(
+            (report.awards[0].title.as_str(), report.awards[0].icon),
+            ("Buybacks that paid off", "refresher")
+        );
+        assert_eq!(
+            report.awards[0].evidence,
+            "Won 2 of 3 games with a buyback."
+        );
     }
 
     #[test]
@@ -940,7 +874,8 @@ mod tests {
         let report = patch(&rows);
         assert_eq!(report.changes.len(), 1);
         assert_eq!(report.changes[0].key, "win_rate");
-        assert_eq!(report.changes[0].value, "100% to 0%");
+        assert_eq!(report.changes[0].title, "Fewer wins");
+        assert_eq!(report.changes[0].value, "100% to 0% of games");
         assert_eq!(report.changes[0].direction, BalanceDirection::Nerf);
     }
 
@@ -975,7 +910,10 @@ mod tests {
             .iter()
             .find(|change| change.key == "gpm")
             .unwrap();
-        assert_eq!(gpm.value, "400 to 500 GPM");
+        assert_eq!(
+            (gpm.title.as_str(), gpm.value.as_str()),
+            ("More gold", "400 to 500 gold a minute")
+        );
         assert_eq!((gpm.early_games, gpm.late_games), (5, 5));
         assert_eq!(gpm.direction, BalanceDirection::Buff);
         let deaths = report
@@ -983,13 +921,16 @@ mod tests {
             .iter()
             .find(|change| change.key == "deaths")
             .unwrap();
-        assert_eq!(deaths.value, "8.0 to 4.0 deaths/game");
+        assert_eq!(
+            (deaths.title.as_str(), deaths.value.as_str()),
+            ("Fewer deaths", "8.0 to 4.0 a game")
+        );
         assert_eq!(deaths.direction, BalanceDirection::Buff);
-        assert!(deaths.evidence.contains("First 5 vs last 5"));
+        assert_eq!(deaths.compared_games, 5);
     }
 
     #[test]
-    fn changes_keep_one_timeline_and_report_incomplete_metric_samples() {
+    fn changes_keep_one_timeline_and_count_incomplete_metric_samples() {
         let mut rows = games(12);
         for (index, row) in rows.iter_mut().enumerate() {
             row.gpm = Some(if index < 6 { 400 } else { 500 });
@@ -998,13 +939,12 @@ mod tests {
         rows[11].gpm = Some(-1);
         let report = patch(&rows);
         assert_eq!(report.changes.len(), 1);
-        assert_eq!(report.changes[0].value, "400 to 500 GPM");
+        assert_eq!(report.changes[0].value, "400 to 500 gold a minute");
         assert_eq!(
             (report.changes[0].early_games, report.changes[0].late_games),
             (5, 5)
         );
-        assert!(report.changes[0].evidence.contains("First 6 vs last 6"));
-        assert!(report.changes[0].evidence.contains("5/6"));
+        assert_eq!(report.changes[0].compared_games, 6);
         rows[1].gpm = None;
         assert!(patch(&rows).changes.is_empty());
     }
@@ -1084,14 +1024,14 @@ mod tests {
     }
 
     #[test]
-    fn every_award_has_an_item_icon_and_two_short_titles() {
+    fn every_award_has_an_item_icon_and_one_short_title() {
         assert!(AWARDS.len() >= 20);
         let keys = AWARDS
             .iter()
             .map(|(key, _, _)| *key)
             .collect::<BTreeSet<_>>();
         assert_eq!(keys.len(), AWARDS.len());
-        for (key, icon, titles) in AWARDS {
+        for (key, icon, title) in AWARDS {
             assert!(
                 !icon.is_empty()
                     && icon
@@ -1101,39 +1041,10 @@ mod tests {
             );
             // Not purchasable, so they have no shop icon.
             assert!(!["aegis", "cheese"].contains(&icon), "{key}");
-            assert_ne!(titles[0], titles[1], "{key}");
-            for title in titles {
-                let widest = title.replace("{day}", "Wednesday");
-                assert!(widest.chars().count() <= 26, "{widest}");
-                assert!(!widest.contains('{'), "{title}");
-            }
+            let widest = title.replace("{day}", "Wednesday");
+            assert!(widest.chars().count() <= 26, "{widest}");
+            assert!(!widest.contains('{'), "{title}");
         }
-    }
-
-    #[test]
-    fn award_titles_follow_the_seed_and_evidence_does_not() {
-        let mut rows = games(6);
-        for row in &mut rows {
-            row.buybacks = Some(1);
-            row.won = Some(true);
-        }
-        let reports = (0..16)
-            .map(|seed| personal_patch(&rows, 7, None, seed))
-            .collect::<Vec<_>>();
-        let titles = reports
-            .iter()
-            .map(|report| report.awards[0].title.as_str())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            titles,
-            BTreeSet::from(["Buyback approved", "Money well spent"])
-        );
-        for report in &reports {
-            assert_eq!(report.awards[0].icon, "refresher");
-            assert_eq!(report.awards[0].evidence, reports[0].awards[0].evidence);
-            assert_eq!(report.awards[0].value, reports[0].awards[0].value);
-        }
-        assert_eq!(personal_patch(&rows, 7, None, 3), reports[3]);
     }
 
     #[test]
@@ -1146,13 +1057,10 @@ mod tests {
         let report = patch(&rows);
         assert_eq!(
             award(&report, "late_game").unwrap().evidence,
-            "Won 4 of 5 recorded games lasting 45+ minutes."
+            "Won 4 of 5 games over 45 minutes."
         );
         let closer = award(&report, "closer").unwrap();
-        assert_eq!(
-            closer.evidence,
-            "Won 4 of 5 recorded games under 30 minutes."
-        );
+        assert_eq!(closer.evidence, "Won 4 of 5 games under 30 minutes.");
         assert_eq!(
             (closer.value.as_str(), closer.icon),
             ("4 wins", "phase_boots")
@@ -1183,7 +1091,7 @@ mod tests {
         assert_eq!(report.awards.len(), 1);
         assert_eq!(
             report.awards[0].evidence,
-            "Won 3 of 6 recorded games at 40% odds or worse."
+            "Won 3 of 6 games at 40% odds or worse."
         );
         rows[0].expected_win = Some(f64::NAN);
         assert!(patch(&rows).awards.is_empty());
@@ -1198,7 +1106,7 @@ mod tests {
         let cases: [(&str, &str, Set); 6] = [
             (
                 "lane_dominance",
-                "50+ last hits by 10:00 in 3 of 5 core games with stats.",
+                "50+ last hits at 10 minutes in 3 of 5 core games.",
                 |row, hit| {
                     row.position = Some(1);
                     row.last_hits_at_10 = Some(if hit { 50 } else { 49 });
@@ -1206,27 +1114,23 @@ mod tests {
             ),
             (
                 "always_fighting",
-                "Joined 80%+ of team fights in 3 of 5 games with stats.",
+                "Joined 80%+ of team fights in 3 of 5 games.",
                 |row, hit| row.teamfight_participation = Some(if hit { 0.8 } else { 0.79 }),
             ),
             (
                 "building_damage",
-                "8,000+ building damage in 3 of 5 games with stats.",
+                "8,000+ tower damage in 3 of 5 games.",
                 |row, hit| row.tower_damage = Some(if hit { 8_000 } else { 7_999 }),
             ),
-            (
-                "denies",
-                "10+ denies in 3 of 5 games with stats.",
-                |row, hit| row.denies = Some(if hit { 10 } else { 9 }),
-            ),
-            (
-                "healer",
-                "5,000+ hero healing in 3 of 5 games with stats.",
-                |row, hit| row.hero_healing = Some(if hit { 5_000 } else { 4_999 }),
-            ),
+            ("denies", "10+ denies in 3 of 5 games.", |row, hit| {
+                row.denies = Some(if hit { 10 } else { 9 })
+            }),
+            ("healer", "5,000+ healing in 3 of 5 games.", |row, hit| {
+                row.hero_healing = Some(if hit { 5_000 } else { 4_999 })
+            }),
             (
                 "clean_hands",
-                "3 or fewer deaths in 3 of 5 games with stats.",
+                "3 or fewer deaths in 3 of 5 games.",
                 |row, hit| row.deaths = Some(if hit { 3 } else { 4 }),
             ),
         ];
@@ -1284,7 +1188,7 @@ mod tests {
         assert_eq!(report.awards.len(), 1);
         assert_eq!(
             report.awards[0].evidence,
-            "Won without dying in 3 of 8 games with stats."
+            "Won without dying in 3 of 8 games."
         );
         assert_eq!(report.awards[0].icon, "aeon_disk");
         // A deathless loss is not a deathless win, and an unknown result is
@@ -1310,7 +1214,7 @@ mod tests {
         assert_eq!(report.awards.len(), 1);
         assert_eq!(
             report.awards[0].evidence,
-            "Won from 5,000+ gold behind in 3 of 6 games with stats."
+            "Won from 5,000+ gold behind in 3 of 6 games."
         );
         rows[0].comeback = Some(f64::INFINITY);
         assert!(patch(&rows).awards.is_empty());
@@ -1344,10 +1248,7 @@ mod tests {
             (earned.key, earned.icon),
             ("top_net_worth", "hand_of_midas")
         );
-        assert_eq!(
-            earned.evidence,
-            "Top net worth among tracked players in 3 of 5 games."
-        );
+        assert_eq!(earned.evidence, "Highest net worth in 3 of 5 games.");
         assert!(patch(&lobby(2)).awards.is_empty());
 
         // Sharing the top spot is not holding it.
@@ -1403,17 +1304,14 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let home = personal_patch(&rows(4), 7, None, 0);
+        let home = personal_patch(&rows(4), 7, None);
         assert_eq!(home.awards.len(), 1);
         assert_eq!(home.awards[0].key, "weekday_specialist");
-        assert!(home.awards[0].title.contains("Friday"));
-        assert_eq!(
-            home.awards[0].evidence,
-            "Won 4 of 5 recorded games that ended on a Friday."
-        );
-        let away = personal_patch(&rows(4), 7, Some("Europe/Berlin"), 0);
-        assert!(away.awards[0].title.contains("Saturday"));
-        assert!(away.awards[0].evidence.ends_with("on a Saturday."));
+        assert_eq!(home.awards[0].title, "Friday winner");
+        assert_eq!(home.awards[0].evidence, "Won 4 of 5 games on Fridays.");
+        let away = personal_patch(&rows(4), 7, Some("Europe/Berlin"));
+        assert_eq!(away.awards[0].title, "Saturday winner");
+        assert!(away.awards[0].evidence.ends_with("on Saturdays."));
         // 60% is a good day, not a specialty; four games are not a sample.
         assert!(patch(&rows(3)).awards.is_empty());
         assert!(patch(&rows(4)[..4]).awards.is_empty());
@@ -1425,58 +1323,65 @@ mod tests {
     #[test]
     fn new_metrics_report_real_changes_and_ignore_small_ones() {
         type Set = fn(&mut DistinctMatch, bool);
-        let cases: [(&str, &str, BalanceDirection, Set, Set); 7] = [
+        let cases: [(&str, &str, &str, BalanceDirection, Set, Set); 7] = [
             (
                 "kills",
-                "4.0 to 6.0 kills/game",
+                "More kills",
+                "4.0 to 6.0 a game",
                 BalanceDirection::Buff,
                 |row, late| row.kills = Some(if late { 6 } else { 4 }),
                 |row, late| row.kills = Some(if late { 5 } else { 4 }),
             ),
             (
                 "assists",
-                "10.0 to 13.0 assists/game",
+                "More assists",
+                "10.0 to 13.0 a game",
                 BalanceDirection::Buff,
                 |row, late| row.assists = Some(if late { 13 } else { 10 }),
                 |row, late| row.assists = Some(if late { 12 } else { 10 }),
             ),
             (
                 "last_hits_at_10",
-                "40 to 48 last hits at 10:00",
+                "More last hits early",
+                "40 to 48 at 10 minutes",
                 BalanceDirection::Buff,
                 |row, late| row.last_hits_at_10 = Some(if late { 48 } else { 40 }),
                 |row, late| row.last_hits_at_10 = Some(if late { 47 } else { 40 }),
             ),
             (
                 "teamfight",
-                "50% to 60% of team fights",
+                "More team fights",
+                "50% to 60% of fights",
                 BalanceDirection::Buff,
                 |row, late| row.teamfight_participation = Some(if late { 0.6 } else { 0.5 }),
                 |row, late| row.teamfight_participation = Some(if late { 0.55 } else { 0.5 }),
             ),
             (
                 "hero_damage",
-                "23,000 to 18,000 hero damage",
+                "Less damage",
+                "23,000 to 18,000 a game",
                 BalanceDirection::Nerf,
                 |row, late| row.hero_damage = Some(if late { 18_000 } else { 23_000 }),
                 |row, late| row.hero_damage = Some(if late { 20_000 } else { 23_000 }),
             ),
             (
                 "game_length",
-                "40.0 to 45.0 minutes/game",
+                "Longer games",
+                "40 to 45 minutes",
                 BalanceDirection::Nerf,
                 |row, late| row.duration_seconds = Some(if late { 2_700 } else { 2_400 }),
                 |row, late| row.duration_seconds = Some(if late { 2_600 } else { 2_400 }),
             ),
             (
                 "tower_damage",
-                "2,000 to 4,000 building damage",
+                "More tower damage",
+                "2,000 to 4,000 a game",
                 BalanceDirection::Buff,
                 |row, late| row.tower_damage = Some(if late { 4_000 } else { 2_000 }),
                 |row, late| row.tower_damage = Some(if late { 3_000 } else { 2_000 }),
             ),
         ];
-        for (key, value, direction, real, small) in cases {
+        for (key, title, value, direction, real, small) in cases {
             let mut rows = games(10);
             for (index, row) in rows.iter_mut().enumerate() {
                 real(row, index >= 5);
@@ -1488,7 +1393,7 @@ mod tests {
                 (change.key, change.value.as_str(), change.direction),
                 (key, value, direction)
             );
-            assert!(!change.title.is_empty() && change.title.len() <= 15);
+            assert_eq!(change.title, title);
             for (index, row) in rows.iter_mut().enumerate() {
                 small(row, index >= 5);
             }

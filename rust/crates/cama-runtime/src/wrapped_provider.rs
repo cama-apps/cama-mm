@@ -1392,23 +1392,18 @@ fn build_slides(
         .iter()
         .find(|player| player.discord_id == target_id)
         .and_then(|player| player.timezone.as_deref());
-    let patch = personal_patch(&raw.year_rows, target_id, timezone, seed);
+    let patch = personal_patch(&raw.year_rows, target_id, timezone);
     let mut patch_cards = patch::patch_slides(&patch, &raw.art, target_display_name, &year_label);
     // The rest of the notes wait for a year worth measuring.
     if raw.matches.len() >= minimum_games {
         patch_cards.extend(patch::hero_patch_slide(
-            &hero_updates(&raw.year_rows, target_id, &raw.bans, seed),
+            &hero_updates(&raw.year_rows, target_id, &raw.bans),
             &raw.art,
             target_display_name,
             &year_label,
         ));
         patch_cards.extend(patch::item_slide(
-            &item_updates(
-                &raw.year_rows,
-                target_id,
-                &patch::item_catalog(&raw.art),
-                seed,
-            ),
+            &item_updates(&raw.year_rows, target_id, &patch::item_catalog(&raw.art)),
             &raw.art,
             target_display_name,
             &year_label,
@@ -1421,7 +1416,6 @@ fn build_slides(
         patch_cards.extend(patch::bug_fix_slide(
             &bug_fixes(&raw.year_rows, target_id, timezone, seed),
             &raw.art,
-            year,
             target_display_name,
             &year_label,
         ));

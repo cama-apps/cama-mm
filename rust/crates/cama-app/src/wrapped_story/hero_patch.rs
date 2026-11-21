@@ -2,14 +2,14 @@
 //! or lost to opposing bans.
 //!
 //! Buffs and nerfs compare the same early and late halves of the year the
-//! balance changes use. Lines never name the hero; the card header does.
+//! balance changes use. Each hero gets one line, which never names the hero;
+//! the card header does.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use cama_domain::wrapped_distinct::DistinctMatch;
 
-use super::format_flavor;
-use super::patch_support::{counted, hero_of, nonnegative, own_games, percent, timeline, variant};
+use super::patch_support::{counted, hero_of, nonnegative, own_games, percent, timeline};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HeroChangeTag {
@@ -24,8 +24,7 @@ pub enum HeroChangeTag {
 pub struct HeroUpdate {
     pub hero_id: i64,
     pub tag: HeroChangeTag,
-    /// One or two short lines.
-    pub lines: Vec<String>,
+    pub line: String,
 }
 
 pub const MAX_HERO_UPDATES: usize = 3;
@@ -37,120 +36,46 @@ const WIN_RATE_SWING: usize = 20;
 const KDA_SWING: f64 = 1.5;
 const DEATHS_SWING: f64 = 2.0;
 
-const NEW_LINES: &[&str] = &[
-    "Added to the hero pool.",
-    "Added to the rotation.",
-    "Now enabled in drafts.",
-];
-const REMOVED_LINES: &[&str] = &[
-    "Removed from the pool after {n} games.",
-    "Rotated out after {n} games.",
-    "Disabled after {n} games.",
-];
-const REMOVED_LOSING: &[&str] = &[
-    "Win rate was {p}%. Working as intended.",
-    "Win rate was {p}%. Removal was overdue.",
-    "Win rate was {p}%. No further comment.",
-];
-const REMOVED_WINNING: &[&str] = &[
-    "Win rate was {p}%. Reason not given.",
-    "Win rate was {p}%. Removed anyway.",
-];
-const BANNED_LINES: &[&str] = &[
-    "Banned against you in {n} games.",
-    "Opponents spent {n} bans on it.",
-];
-const BANNED_WINNING: &[&str] = &[
-    "Got through {n} times. {p}% wins.",
-    "{p}% wins unbanned. They had a point.",
-];
-const BANNED_LOSING: &[&str] = &[
-    "{p}% wins in {n} games when left open.",
-    "{p}% wins unbanned. Generous of them.",
-];
-
-/// A new hero's record: its games and, when every result is known, its wins.
-fn new_record(count: usize, rate: Option<usize>) -> String {
+/// A hero's games and, when every result is known, the share of them won.
+fn record(count: usize, rate: Option<usize>) -> String {
     rate.map_or_else(
-        || format!("{count} games."),
-        |rate| format!("{count} games, {rate}% wins."),
+        || format!("{count} games"),
+        |rate| format!("{count} games, {rate}% won"),
     )
 }
 
-fn win_rate_line(up: bool, before: usize, after: usize) -> String {
-    format!("Win rate {} from {before}% to {after}%.", moved(up))
+fn win_rate_line(before: usize, after: usize) -> String {
+    format!("Win rate {before}% to {after}%")
 }
 
 fn kda_line(before: f64, after: f64) -> String {
-    format!(
-        "KDA {} from {before:.1} to {after:.1}.",
-        moved(after > before)
-    )
+    format!("KDA {before:.1} to {after:.1}")
 }
 
 fn deaths_line(before: f64, after: f64) -> String {
-    format!(
-        "Avg deaths {} from {before:.1} to {after:.1}.",
-        moved(after > before)
-    )
+    format!("Deaths {before:.1} to {after:.1} a game")
 }
 
-/// Every set of lines one hero can carry, each at its widest: three-digit
-/// game counts, two-digit averages, and the highest rate its pool allows.
-/// For fit checks.
+fn removed_line(count: usize, rate: Option<usize>) -> String {
+    format!("Dropped after {}", record(count, rate))
+}
+
+fn banned_line(count: usize) -> String {
+    format!("Banned against you {count} times")
+}
+
+/// Every line a hero can carry, each at its widest: three-digit game counts,
+/// two-digit averages and a 100% rate. For fit checks.
 #[must_use]
-pub fn widest_lines() -> Vec<Vec<String>> {
-    const GAMES: usize = 888;
-    let fill = |template: &str, rate: usize| {
-        format_flavor(
-            template,
-            &[("n", &GAMES.to_string()), ("p", &rate.to_string())],
-        )
-    };
-    let filled = |pool: &[&str], rate: usize| {
-        pool.iter()
-            .map(|template| fill(template, rate))
-            .collect::<Vec<_>>()
-    };
-    // A removed hero's losing rate stops at 49%, and bans stop looking
-    // generous at 55%.
-    let pools = [
-        (NEW_LINES, vec![new_record(GAMES, Some(100))]),
-        (
-            REMOVED_LINES,
-            [filled(REMOVED_LOSING, 49), filled(REMOVED_WINNING, 100)].concat(),
-        ),
-        (
-            BANNED_LINES,
-            [filled(BANNED_WINNING, 100), filled(BANNED_LOSING, 54)].concat(),
-        ),
-    ];
-    let mut sets = Vec::new();
-    for (openings, closings) in pools {
-        for opening in openings {
-            for closing in &closings {
-                sets.push(vec![fill(opening, 0), closing.clone()]);
-            }
-        }
-    }
-    // A buff or a nerf carries the two stats that moved furthest.
-    for stats in [
-        [
-            win_rate_line(true, 80, 100),
-            kda_line(10.5, 26.0),
-            deaths_line(12.5, 10.0),
-        ],
-        [
-            win_rate_line(false, 100, 80),
-            kda_line(26.0, 10.5),
-            deaths_line(10.0, 12.5),
-        ],
-    ] {
-        for (first, second) in [(0, 1), (0, 2), (1, 2)] {
-            sets.push(vec![stats[first].clone(), stats[second].clone()]);
-        }
-    }
-    sets
+pub fn widest_lines() -> Vec<String> {
+    vec![
+        win_rate_line(100, 100),
+        kda_line(10.5, 26.0),
+        deaths_line(12.5, 10.5),
+        record(888, Some(100)),
+        removed_line(888, Some(100)),
+        banned_line(888),
+    ]
 }
 
 /// Up to three hero updates for `player_id`: different tags first, the most
@@ -161,7 +86,6 @@ pub fn hero_updates(
     matches: &[DistinctMatch],
     player_id: i64,
     bans: &[(i64, i64)],
-    seed: u64,
 ) -> Vec<HeroUpdate> {
     let games = own_games(matches, player_id);
     let mut by_hero: BTreeMap<i64, Vec<&DistinctMatch>> = BTreeMap::new();
@@ -170,13 +94,6 @@ pub fn hero_updates(
             by_hero.entry(hero).or_default().push(game);
         }
     }
-    let line = |pool: &[&str], hero: i64, count: usize, rate: usize| {
-        let template = variant(seed, &format!("{}:{hero}", pool[0]), pool);
-        format_flavor(
-            template,
-            &[("n", &count.to_string()), ("p", &rate.to_string())],
-        )
-    };
     let mut candidates: Vec<(f64, HeroUpdate)> = Vec::new();
 
     if let Some(split) = timeline(&games) {
@@ -205,23 +122,18 @@ pub fn hero_updates(
             };
             let (first, last) = (within(&early), within(&late));
             if first.len() >= MIN_GAMES && last.len() >= MIN_GAMES {
-                let stats = shifts(&first, &last);
-                if let Some((strength, buff, _)) = stats.first() {
+                // The stat that moved furthest is the verdict and the line.
+                if let Some((strength, buff, line)) = shifts(&first, &last).into_iter().next() {
                     candidates.push((
                         strength.min(3.0),
                         HeroUpdate {
                             hero_id: hero,
-                            tag: if *buff {
+                            tag: if buff {
                                 HeroChangeTag::Buffed
                             } else {
                                 HeroChangeTag::Nerfed
                             },
-                            lines: stats
-                                .iter()
-                                .filter(|(_, direction, _)| direction == buff)
-                                .take(2)
-                                .map(|(_, _, line)| line.clone())
-                                .collect(),
+                            line,
                         },
                     ));
                 }
@@ -241,19 +153,10 @@ pub fn hero_updates(
             }
             let (wins, known) = counted(only, |game| game.won);
             let rate = (known == count).then(|| percent(wins, known));
-            let lines = if tag == HeroChangeTag::New {
-                vec![line(NEW_LINES, hero, count, 0), new_record(count, rate)]
+            let line = if tag == HeroChangeTag::New {
+                record(count, rate)
             } else {
-                let mut lines = vec![line(REMOVED_LINES, hero, count, 0)];
-                lines.extend(rate.map(|rate| {
-                    let pool = if rate < 50 {
-                        REMOVED_LOSING
-                    } else {
-                        REMOVED_WINNING
-                    };
-                    line(pool, hero, count, rate)
-                }));
-                lines
+                removed_line(count, rate)
             };
             let lopsided = rate.map_or(0.0, |rate| rate.abs_diff(50) as f64 / 100.0);
             candidates.push((
@@ -261,7 +164,7 @@ pub fn hero_updates(
                 HeroUpdate {
                     hero_id: hero,
                     tag,
-                    lines,
+                    line,
                 },
             ));
         }
@@ -280,23 +183,12 @@ pub fn hero_updates(
         if count < MIN_GAMES || count > games.len() || played.len() < MIN_GAMES {
             continue;
         }
-        let mut lines = vec![line(BANNED_LINES, hero, count, 0)];
-        let (wins, known) = counted(played, |game| game.won);
-        if known == played.len() {
-            let rate = percent(wins, known);
-            let pool = if rate >= 55 {
-                BANNED_WINNING
-            } else {
-                BANNED_LOSING
-            };
-            lines.push(line(pool, hero, known, rate));
-        }
         candidates.push((
             1.0 + (count as f64 / 5.0).min(2.0),
             HeroUpdate {
                 hero_id: hero,
                 tag: HeroChangeTag::Banned,
-                lines,
+                line: banned_line(count),
             },
         ));
     }
@@ -320,10 +212,6 @@ pub fn hero_updates(
     chosen
 }
 
-fn moved(up: bool) -> &'static str {
-    if up { "increased" } else { "reduced" }
-}
-
 /// Every stat that moved far enough between the halves, strongest first:
 /// how far past its threshold, whether the move helps, and the line.
 fn shifts(early: &[&DistinctMatch], late: &[&DistinctMatch]) -> Vec<(f64, bool, String)> {
@@ -343,7 +231,6 @@ fn shifts(early: &[&DistinctMatch], late: &[&DistinctMatch]) -> Vec<(f64, bool, 
                 swing as f64 / needed as f64,
                 after > before,
                 win_rate_line(
-                    after > before,
                     percent(early_wins, early_known),
                     percent(late_wins, late_known),
                 ),
@@ -436,16 +323,16 @@ mod tests {
         let mut rows = year(SPLIT);
         rows[0].won = Some(false);
         rows[1].won = Some(false);
-        let updates = hero_updates(&rows, 7, &[], 0);
+        let updates = hero_updates(&rows, 7, &[]);
         assert_eq!(tags(&updates), [(1, HeroChangeTag::Buffed)]);
-        assert_eq!(updates[0].lines, ["Win rate increased from 33% to 100%."]);
+        assert_eq!(updates[0].line, "Win rate 33% to 100%");
 
         let mut rows = year(SPLIT);
         rows[6].won = Some(false);
         rows[7].won = Some(false);
-        let updates = hero_updates(&rows, 7, &[], 0);
+        let updates = hero_updates(&rows, 7, &[]);
         assert_eq!(tags(&updates), [(1, HeroChangeTag::Nerfed)]);
-        assert_eq!(updates[0].lines, ["Win rate reduced from 100% to 33%."]);
+        assert_eq!(updates[0].line, "Win rate 100% to 33%");
     }
 
     #[test]
@@ -454,14 +341,14 @@ mod tests {
         let mut rows = year([1, 1, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2]);
         rows[0].won = Some(false);
         rows[1].won = Some(false);
-        assert!(hero_updates(&rows, 7, &[], 0).is_empty());
+        assert!(hero_updates(&rows, 7, &[]).is_empty());
 
         // Three games, but one result unknown.
         let mut rows = year(SPLIT);
         rows[0].won = Some(false);
         rows[1].won = Some(false);
         rows[2].won = None;
-        assert!(hero_updates(&rows, 7, &[], 0).is_empty());
+        assert!(hero_updates(&rows, 7, &[]).is_empty());
 
         // Exactly twenty points counts; ten does not.
         let twenty = |early_wins: usize, late_wins: usize| {
@@ -481,46 +368,41 @@ mod tests {
             for row in rows.iter_mut().skip(10).take(late_wins) {
                 row.won = Some(true);
             }
-            hero_updates(&rows, 7, &[], 0)
+            hero_updates(&rows, 7, &[])
         };
         assert!(twenty(4, 5).is_empty());
         let updates = twenty(4, 6);
-        assert_eq!(updates[0].lines, ["Win rate increased from 40% to 60%."]);
+        assert_eq!(updates[0].line, "Win rate 40% to 60%");
     }
 
     #[test]
-    fn deaths_and_kda_swings_read_as_patch_lines_and_ignore_unknown_values() {
+    fn deaths_and_kda_swings_show_the_bigger_one_and_ignore_unknown_values() {
         let mut rows = year(SPLIT);
         for (index, row) in rows.iter_mut().enumerate() {
             row.kills = Some(4);
             row.assists = Some(8);
             row.deaths = Some(if index < 6 { 8 } else { 5 });
         }
-        let updates = hero_updates(&rows, 7, &[], 0);
+        let updates = hero_updates(&rows, 7, &[]);
         // Both heroes died less; the lower hero id wins the tie and the tag
         // is not repeated before every tag has had its turn.
         assert_eq!(
             tags(&updates),
             [(1, HeroChangeTag::Buffed), (2, HeroChangeTag::Buffed)]
         );
-        assert_eq!(updates[0].lines, ["Avg deaths reduced from 8.0 to 5.0."]);
+        assert_eq!(updates[0].line, "Deaths 8.0 to 5.0 a game");
 
+        // KDA and deaths both moved; only one line is shown.
         for row in rows.iter_mut().skip(6) {
             row.deaths = Some(2);
         }
-        let updates = hero_updates(&rows, 7, &[], 0);
-        assert_eq!(
-            updates[0].lines,
-            [
-                "KDA increased from 1.5 to 6.0.",
-                "Avg deaths reduced from 8.0 to 2.0."
-            ]
-        );
+        let updates = hero_updates(&rows, 7, &[]);
+        assert_eq!(updates[0].line, "KDA 1.5 to 6.0");
 
         // Unknown or negative deaths leave too few games to compare.
         rows[0].deaths = None;
         rows[3].deaths = Some(-1);
-        assert!(hero_updates(&rows, 7, &[], 0).is_empty());
+        assert!(hero_updates(&rows, 7, &[]).is_empty());
     }
 
     #[test]
@@ -532,10 +414,10 @@ mod tests {
         for row in rows.iter_mut().skip(6).take(3) {
             row.won = Some(false);
         }
-        let updates = hero_updates(&rows, 7, &[], 0);
+        let updates = hero_updates(&rows, 7, &[]);
         let hero = updates.iter().find(|update| update.hero_id == 1).unwrap();
         assert_eq!(hero.tag, HeroChangeTag::Nerfed);
-        assert_eq!(hero.lines, ["Win rate reduced from 100% to 0%."]);
+        assert_eq!(hero.line, "Win rate 100% to 0%");
     }
 
     #[test]
@@ -544,44 +426,40 @@ mod tests {
         rows[6].won = Some(false);
         rows[0].won = Some(false);
         rows[1].won = Some(false);
-        let updates = hero_updates(&rows, 7, &[], 0);
+        let updates = hero_updates(&rows, 7, &[]);
         assert_eq!(
             tags(&updates),
             [(1, HeroChangeTag::Removed), (3, HeroChangeTag::New)]
         );
-        let removed = &updates[0];
-        assert!(removed.lines[0].contains("after 3 games"));
-        assert!(removed.lines[1].starts_with("Win rate was 33%."));
-        let new = &updates[1];
-        assert!(NEW_LINES.contains(&new.lines[0].as_str()));
-        assert_eq!(new.lines[1], "3 games, 67% wins.");
+        assert_eq!(updates[0].line, "Dropped after 3 games, 33% won");
+        assert_eq!(updates[1].line, "3 games, 67% won");
 
         // An unknown result keeps the count but drops the win rate.
         rows[7].won = None;
-        let updates = hero_updates(&rows, 7, &[], 0);
+        let updates = hero_updates(&rows, 7, &[]);
         let new = updates
             .iter()
             .find(|update| update.tag == HeroChangeTag::New)
             .unwrap();
-        assert_eq!(new.lines[1], "3 games.");
+        assert_eq!(new.line, "3 games");
 
         // An early game on an unknown hero could have been hero 3.
         rows[3].hero_id = None;
         assert_eq!(
-            tags(&hero_updates(&rows, 7, &[], 0)),
+            tags(&hero_updates(&rows, 7, &[])),
             [(1, HeroChangeTag::Removed)]
         );
         // A late one could have been hero 1.
         rows[3].hero_id = Some(2);
         rows[11].hero_id = Some(0);
         assert_eq!(
-            tags(&hero_updates(&rows, 7, &[], 0)),
+            tags(&hero_updates(&rows, 7, &[])),
             [(3, HeroChangeTag::New)]
         );
 
         // Two games are not a pool change.
         let rows = year([1, 1, 2, 2, 2, 2, 3, 3, 2, 2, 2, 2]);
-        assert!(hero_updates(&rows, 7, &[], 0).is_empty());
+        assert!(hero_updates(&rows, 7, &[]).is_empty());
     }
 
     #[test]
@@ -594,12 +472,12 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            tags(&hero_updates(&rows, 7, &[], 0)),
+            tags(&hero_updates(&rows, 7, &[])),
             [(1, HeroChangeTag::Removed)]
         );
         rows[12].hero_id = Some(1);
         assert_eq!(
-            tags(&hero_updates(&rows, 7, &[], 0)),
+            tags(&hero_updates(&rows, 7, &[])),
             [(3, HeroChangeTag::New)]
         );
     }
@@ -607,7 +485,7 @@ mod tests {
     #[test]
     fn bans_need_three_games_banned_and_three_games_played() {
         let rows = year([2; 12]);
-        let banned = |bans: &[(i64, i64)]| hero_updates(&rows, 7, bans, 0);
+        let banned = |bans: &[(i64, i64)]| hero_updates(&rows, 7, bans);
         assert!(banned(&[(2, 2)]).is_empty());
         assert!(banned(&[(5, 9)]).is_empty());
         assert!(banned(&[(2, -4)]).is_empty());
@@ -615,14 +493,7 @@ mod tests {
         assert!(banned(&[(2, 13)]).is_empty());
         let updates = banned(&[(2, 9)]);
         assert_eq!(tags(&updates), [(2, HeroChangeTag::Banned)]);
-        assert!(
-            BANNED_LINES
-                .iter()
-                .any(|template| format_flavor(template, &[("n", "9")]) == updates[0].lines[0])
-        );
-        assert!(BANNED_WINNING.iter().any(|template| {
-            format_flavor(template, &[("n", "12"), ("p", "100")]) == updates[0].lines[1]
-        }));
+        assert_eq!(updates[0].line, "Banned against you 9 times");
 
         // Without dates there is no timeline, but bans still tell a story.
         let undated = rows
@@ -633,9 +504,9 @@ mod tests {
                 ..row.clone()
             })
             .collect::<Vec<_>>();
-        let updates = hero_updates(&undated, 7, &[(2, 3)], 0);
+        let updates = hero_updates(&undated, 7, &[(2, 3)]);
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].lines.len(), 1);
+        assert_eq!(updates[0].line, "Banned against you 3 times");
     }
 
     #[test]
@@ -660,7 +531,7 @@ mod tests {
         for row in rows.iter_mut().skip(19) {
             row.won = Some(false);
         }
-        let updates = hero_updates(&rows, 7, &[(2, 4)], 0);
+        let updates = hero_updates(&rows, 7, &[(2, 4)]);
         assert_eq!(updates.len(), MAX_HERO_UPDATES);
         let heroes = updates
             .iter()
@@ -672,14 +543,10 @@ mod tests {
             .map(|update| update.tag)
             .collect::<BTreeSet<_>>();
         assert_eq!(distinct_tags.len(), 3);
-        assert!(
-            updates
-                .iter()
-                .all(|update| (1..=2).contains(&update.lines.len()))
-        );
+        assert!(updates.iter().all(|update| !update.line.is_empty()));
 
         // With only pool changes on offer, a tag may repeat but a hero may not.
-        let updates = hero_updates(&rows, 7, &[], 0);
+        let updates = hero_updates(&rows, 7, &[]);
         assert_eq!(updates.len(), MAX_HERO_UPDATES);
         assert_eq!(
             updates
@@ -692,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn updates_ignore_other_players_and_row_order_and_vary_by_seed() {
+    fn updates_ignore_other_players_and_row_order() {
         let mut rows = year([1, 1, 1, 2, 2, 2, 3, 3, 3, 2, 2, 2]);
         rows[0].won = Some(false);
         rows.extend(year([9; 12]).into_iter().map(|row| DistinctMatch {
@@ -700,50 +567,25 @@ mod tests {
             ..row
         }));
         let bans = [(2, 5), (3, 1)];
-        let updates = hero_updates(&rows, 7, &bans, 11);
+        let updates = hero_updates(&rows, 7, &bans);
         assert_eq!(updates.len(), 3);
         assert!(updates.iter().all(|update| update.hero_id != 9));
         rows.reverse();
-        assert_eq!(hero_updates(&rows, 7, &[(3, 1), (2, 5)], 11), updates);
-        assert_eq!(hero_updates(&rows, 7, &bans, 11), updates);
-        let wordings = (0..32)
-            .map(|seed| format!("{:?}", hero_updates(&rows, 7, &bans, seed)))
-            .collect::<BTreeSet<_>>()
-            .len();
-        assert!(wordings > 1);
-        assert!(hero_updates(&rows, 6, &bans, 11).is_empty());
+        assert_eq!(hero_updates(&rows, 7, &[(3, 1), (2, 5)]), updates);
+        assert_eq!(hero_updates(&rows, 7, &bans), updates);
+        assert!(hero_updates(&rows, 6, &bans).is_empty());
     }
 
     #[test]
-    fn every_line_is_short_and_never_names_a_hero() {
+    fn every_line_is_short_and_plain() {
         // The longest a line may run and still sit on one row of its card.
-        const MAX_LINE: usize = 40;
-        for pool in [
-            NEW_LINES,
-            REMOVED_LINES,
-            REMOVED_LOSING,
-            REMOVED_WINNING,
-            BANNED_LINES,
-            BANNED_WINNING,
-            BANNED_LOSING,
-        ] {
-            assert!(pool.len() >= 2);
-            for template in pool {
-                let line = format_flavor(template, &[("n", "888"), ("p", "100")]);
-                assert!(!line.contains('{'), "{template}");
-                assert!(line.chars().count() <= MAX_LINE, "{line}");
-                assert!(line.ends_with('.'), "{line}");
-            }
-        }
-        // Every pairing of those pools and of the stat lines, at its widest.
-        let sets = widest_lines();
-        assert_eq!(sets.len(), 3 + 3 * 5 + 2 * 4 + 6);
-        for lines in &sets {
-            assert_eq!(lines.len(), 2);
-            for line in lines {
-                assert!(!line.contains('{'), "{line}");
-                assert!(line.chars().count() <= MAX_LINE, "{line}");
-            }
+        const MAX_LINE: usize = 34;
+        let lines = widest_lines();
+        assert_eq!(lines.len(), 6);
+        for line in &lines {
+            assert!(line.chars().count() <= MAX_LINE, "{line}");
+            assert!(!line.contains(['{', '!', '\n']), "{line}");
+            assert!(!line.ends_with('.'), "{line}");
         }
         let wide = |value: i64| {
             (0..6)

@@ -6,11 +6,10 @@
 
 use std::collections::BTreeMap;
 
-use cama_domain::formatting::{count_noun, format_grouped};
+use cama_domain::formatting::format_grouped;
 use cama_domain::wrapped_distinct::DistinctMatch;
 
-use super::format_flavor;
-use super::patch_support::{core, counted, own_games, percent, variant};
+use super::patch_support::{core, counted, own_games, percent};
 use super::personal_patch::BalanceDirection;
 
 /// One purchasable item, supplied by the runtime from the game database.
@@ -30,8 +29,10 @@ pub enum ItemNote {
     WinRate,
     /// The consumable bought furthest beyond the guild's habit.
     Consumable,
-    /// A Rapier, a Midas habit, Gems, or a conspicuous absence.
+    /// A Rapier, a Midas habit, or Gems.
     Oddity,
+    /// Black King Bar never built as a core; it takes the oddity's place.
+    NeverBuilt,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,191 +76,52 @@ const COMPONENTS: &[&str] = &[
     "ultimate_orb",
 ];
 
-/// Consumables that can carry a note: key, fallback name, lines.
-const CONSUMABLES: &[(&str, &str, &[&str])] = &[
-    (
-        "tango",
-        "Tango",
-        &[
-            "{n} bought. The trees complained.",
-            "{n} bought. The forest noticed.",
-        ],
-    ),
-    (
-        "tpscroll",
-        "Town Portal Scroll",
-        &[
-            "{n} bought. Arrival times varied.",
-            "{n} bought. Still arrived late.",
-        ],
-    ),
-    (
-        "clarity",
-        "Clarity",
-        &[
-            "{n} bought. Mana problems persist.",
-            "{n} bought. Still out of mana.",
-        ],
-    ),
-    (
-        "flask",
-        "Healing Salve",
-        &[
-            "{n} bought. Laning remains unsafe.",
-            "{n} bought. HP remained a concern.",
-        ],
-    ),
-    (
-        "enchanted_mango",
-        "Enchanted Mango",
-        &[
-            "{n} bought. A balanced diet.",
-            "{n} bought. Fruit quota exceeded.",
-        ],
-    ),
-    (
-        "faerie_fire",
-        "Faerie Fire",
-        &[
-            "{n} bought. Each bought some time.",
-            "{n} bought. Emergency snacks only.",
-        ],
-    ),
-    (
-        "smoke_of_deceit",
-        "Smoke of Deceit",
-        &[
-            "{n} bought. Ganks were attempted.",
-            "{n} bought. Somebody had a plan.",
-        ],
-    ),
-    (
-        "dust",
-        "Dust of Appearance",
-        &[
-            "{n} bought. Invisibility revoked.",
-            "{n} bought. Nowhere left to hide.",
-        ],
-    ),
-    (
-        "ward_observer",
-        "Observer Ward",
-        &[
-            "{n} bought. The map has been seen.",
-            "{n} bought. Vision budget spent.",
-        ],
-    ),
-    (
-        "ward_sentry",
-        "Sentry Ward",
-        &[
-            "{n} bought. Enemy wards objected.",
-            "{n} bought. A dewarding lifestyle.",
-        ],
-    ),
-    (
-        "tome_of_knowledge",
-        "Tome of Knowledge",
-        &[
-            "{n} bought. Studying continues.",
-            "{n} bought. XP was for sale.",
-        ],
-    ),
-    (
-        "bottle",
-        "Bottle",
-        &[
-            "{n} bought. Runes sold separately.",
-            "{n} bought. Refills not included.",
-        ],
-    ),
+/// Consumables that can carry a note: key and fallback name.
+const CONSUMABLES: &[(&str, &str)] = &[
+    ("tango", "Tango"),
+    ("tpscroll", "Town Portal Scroll"),
+    ("clarity", "Clarity"),
+    ("flask", "Healing Salve"),
+    ("enchanted_mango", "Enchanted Mango"),
+    ("faerie_fire", "Faerie Fire"),
+    ("smoke_of_deceit", "Smoke of Deceit"),
+    ("dust", "Dust of Appearance"),
+    ("ward_observer", "Observer Ward"),
+    ("ward_sentry", "Sentry Ward"),
+    ("tome_of_knowledge", "Tome of Knowledge"),
+    ("bottle", "Bottle"),
 ];
 
-const SIGNATURE: &[&str] = &[
-    "{g} of {n} {sample}.",
-    "{g} of {n} {sample}. As usual.",
-    "{g} of {n} {sample}. Core.",
-];
-const WIN_RATE_BUFF: &[&str] = &[
-    "{p}% wins in {g} games with it.",
-    "{p}% wins in {g} games. Buy again.",
-];
-const WIN_RATE_NERF: &[&str] = &[
-    "{p}% wins in {g} games with it.",
-    "{p}% wins in {g} games. Reconsider.",
-];
-const RAPIER_ONE_WON: &[&str] = &[
-    "{n} in one game. The game was won.",
-    "{n} in one game. It worked.",
-];
-const RAPIER_ONE_LOST: &[&str] = &[
-    "{n} in one game. Lost anyway.",
-    "{n} in one game. It did not help.",
-];
-const RAPIER_MANY: &[&str] = &[
-    "{n} bought in {g} games. {w} won.",
-    "{n} across {g} games. Won {w}.",
-];
-const ABSENT: &[&str] = &[
-    "0 of {n} core games. Bold.",
-    "0 of {n} core games. By design.",
-    "0 of {n} core games. Optional.",
-];
-const MIDAS: &[&str] = &[
-    "{g} of {n} {sample}. Won {w}.",
-    "{g} of {n} {sample}. {w} won.",
-];
-const GEM: &[&str] = &[
-    "{n} bought. Owner not recorded.",
-    "{n} bought. Custody not tracked.",
-];
+/// How many of the player's games an item was built in.
+fn of_games(built: usize, games: usize) -> String {
+    format!("{built} of {games} games")
+}
 
-/// Rapiers bought across games whose results are not all known.
-fn rapier_undecided(count: &str, played: usize) -> String {
-    format!(
-        "{count} bought in {}.",
-        count_noun(played as i64, "game", "games")
+fn won_in(rate: usize, games: usize) -> String {
+    format!("{rate}% won in {games} games")
+}
+
+/// How many were bought and, when every result is known, the games won.
+fn bought(count: i64, wins: Option<usize>) -> String {
+    let count = format_grouped(count);
+    wins.map_or_else(
+        || format!("{count} bought"),
+        |wins| format!("{count} bought, {wins} won"),
     )
 }
 
-/// A Midas habit across games whose results are not all known.
-fn midas_undecided(bought: &str, logged: &str, sample: &str) -> String {
-    format!("{bought} of {logged} {sample}.")
-}
-
 /// Every line an item can carry, each at its widest: a four-digit pile,
-/// three-digit game counts, a 100% rate, and partial purchase logs. Each
-/// opens with the figure its card sets large. For fit checks.
+/// three-digit game counts and a 100% rate. Each opens with the figure its
+/// card sets large. For fit checks.
 #[must_use]
 pub fn widest_lines() -> Vec<String> {
-    const SAMPLE: &str = "parsed games";
-    let fill = |pools: &[&[&str]], count: &str| {
-        let wide = [
-            ("n", count),
-            ("g", "888"),
-            ("w", "888"),
-            ("p", "100"),
-            ("sample", SAMPLE),
-        ];
-        pools
-            .iter()
-            .flat_map(|pool| pool.iter())
-            .map(|template| format_flavor(template, &wide))
-            .collect::<Vec<_>>()
-    };
-    let piles = CONSUMABLES
-        .iter()
-        .map(|(_, _, lines)| *lines)
-        .chain([RAPIER_ONE_WON, RAPIER_ONE_LOST, RAPIER_MANY, GEM])
-        .collect::<Vec<_>>();
-    let mut lines = fill(&piles, "1,204");
-    lines.extend(fill(
-        &[SIGNATURE, WIN_RATE_BUFF, WIN_RATE_NERF, ABSENT, MIDAS],
-        "888",
-    ));
-    lines.push(rapier_undecided("1,204", 888));
-    lines.push(midas_undecided("888", "888", SAMPLE));
-    lines
+    vec![
+        of_games(888, 888),
+        of_games(0, 888),
+        won_in(100, 888),
+        bought(1_204, None),
+        bought(1_204, Some(888)),
+    ]
 }
 
 struct Log<'a> {
@@ -290,13 +152,13 @@ fn results(logs: &[&Log<'_>]) -> (usize, usize) {
 }
 
 /// Up to four item notes for `player_id`, one of each kind and never the
-/// same item twice: signature, win rate, consumable, oddity.
+/// same item twice: signature, win rate, consumable, then an oddity or a
+/// never-built item.
 #[must_use]
 pub fn item_updates(
     matches: &[DistinctMatch],
     player_id: i64,
     catalog: &[ItemInfo],
-    seed: u64,
 ) -> Vec<ItemUpdate> {
     let games = own_games(matches, player_id);
     let logs = games
@@ -306,13 +168,6 @@ pub fn item_updates(
     if logs.len() < MIN_LOGGED_GAMES {
         return Vec::new();
     }
-    let logged = logs.len().to_string();
-    // "48 games" would claim the whole year when some games have no log.
-    let sample = if logs.len() == games.len() {
-        "games"
-    } else {
-        "parsed games"
-    };
     let mut known: BTreeMap<&str, &ItemInfo> = BTreeMap::new();
     for item in catalog {
         known.entry(item.key.as_str()).or_insert(item);
@@ -322,7 +177,7 @@ pub fn item_updates(
             item.cost >= REAL_ITEM_COST
                 && !key.starts_with("recipe")
                 && !COMPONENTS.contains(&key)
-                && !CONSUMABLES.iter().any(|(held, _, _)| *held == key)
+                && !CONSUMABLES.iter().any(|(held, _)| *held == key)
         })
     };
     let mut owners: BTreeMap<&str, Vec<&Log<'_>>> = BTreeMap::new();
@@ -334,12 +189,6 @@ pub fn item_updates(
         }
     }
     let total = |key: &str| logs.iter().map(|log| log.bought(key)).sum::<i64>();
-    let write = |pool: &[&str], key: &str, variables: &[(&str, &str)]| {
-        format_flavor(
-            variant(seed, &format!("{}:{key}", pool[0]), pool),
-            variables,
-        )
-    };
     let mut updates: Vec<ItemUpdate> = Vec::new();
 
     let signature = owners
@@ -352,15 +201,7 @@ pub fn item_updates(
             key: item.key.clone(),
             name: item.name.clone(),
             note: ItemNote::Signature,
-            line: write(
-                SIGNATURE,
-                &item.key,
-                &[
-                    ("g", &built.to_string()),
-                    ("n", &logged),
-                    ("sample", sample),
-                ],
-            ),
+            line: of_games(built, logs.len()),
             direction: None,
         });
     }
@@ -393,14 +234,7 @@ pub fn item_updates(
             key: item.key.clone(),
             name: item.name.clone(),
             note: ItemNote::WinRate,
-            line: write(
-                if buff { WIN_RATE_BUFF } else { WIN_RATE_NERF },
-                &item.key,
-                &[
-                    ("p", &percent(wins, played).to_string()),
-                    ("g", &played.to_string()),
-                ],
-            ),
+            line: won_in(percent(wins, played), played),
             direction: Some(if buff {
                 BalanceDirection::Buff
             } else {
@@ -416,7 +250,7 @@ pub fn item_updates(
         .collect::<Vec<_>>();
     let consumable = CONSUMABLES
         .iter()
-        .filter_map(|&(key, fallback, lines)| {
+        .filter_map(|&(key, fallback)| {
             let bought = total(key);
             if bought < MIN_CONSUMABLES {
                 return None;
@@ -430,11 +264,11 @@ pub fn item_updates(
             } else {
                 bought as f64
             };
-            Some((standout, key, fallback, lines, bought))
+            Some((standout, key, fallback, bought))
         })
         // The first listed consumable wins a tie.
         .reduce(|best, next| if next.0 > best.0 { next } else { best });
-    if let Some((_, key, fallback, lines, bought)) = consumable {
+    if let Some((_, key, fallback, count)) = consumable {
         updates.push(ItemUpdate {
             key: key.to_owned(),
             name: known
@@ -442,7 +276,7 @@ pub fn item_updates(
                 .map_or(fallback, |item| item.name.as_str())
                 .to_owned(),
             note: ItemNote::Consumable,
-            line: write(lines, key, &[("n", &format_grouped(bought))]),
+            line: bought(count, None),
             direction: None,
         });
     }
@@ -456,32 +290,13 @@ pub fn item_updates(
     let with = |key: &str| owners.get(key).map_or(&[][..], Vec::as_slice);
     let oddity = None
         .or_else(|| {
-            let (item, bought, games) = (fresh("rapier")?, total("rapier"), with("rapier"));
+            let (item, games) = (fresh("rapier")?, with("rapier"));
+            if games.is_empty() {
+                return None;
+            }
             let (wins, decided) = results(games);
-            let count = format_grouped(bought);
-            let line = match (games.len(), decided == games.len()) {
-                (0, _) => return None,
-                (played, false) => rapier_undecided(&count, played),
-                (1, true) => write(
-                    if wins == 1 {
-                        RAPIER_ONE_WON
-                    } else {
-                        RAPIER_ONE_LOST
-                    },
-                    "rapier",
-                    &[("n", &count)],
-                ),
-                (played, true) => write(
-                    RAPIER_MANY,
-                    "rapier",
-                    &[
-                        ("n", &count),
-                        ("g", &played.to_string()),
-                        ("w", &wins.to_string()),
-                    ],
-                ),
-            };
-            Some((item, line))
+            let wins = (decided == games.len()).then_some(wins);
+            Some((item, ItemNote::Oddity, bought(total("rapier"), wins)))
         })
         .or_else(|| {
             let item = fresh("black_king_bar")?;
@@ -490,44 +305,23 @@ pub fn item_updates(
                 .filter(|log| core(log.game) == Some(true))
                 .collect::<Vec<_>>();
             let never = cores.iter().all(|log| log.bought("black_king_bar") == 0);
-            (cores.len() >= MIN_ABSENT_GAMES && never).then(|| {
-                let line = write(ABSENT, "black_king_bar", &[("n", &cores.len().to_string())]);
-                (item, line)
-            })
+            (cores.len() >= MIN_ABSENT_GAMES && never)
+                .then(|| (item, ItemNote::NeverBuilt, of_games(0, cores.len())))
         })
         .or_else(|| {
             let (item, games) = (fresh("hand_of_midas")?, with("hand_of_midas"));
-            if games.len() < MIN_HABIT_GAMES {
-                return None;
-            }
-            let (wins, decided) = results(games);
-            let bought = games.len().to_string();
-            let line = if decided == games.len() {
-                write(
-                    MIDAS,
-                    "hand_of_midas",
-                    &[
-                        ("g", &bought),
-                        ("n", &logged),
-                        ("sample", sample),
-                        ("w", &wins.to_string()),
-                    ],
-                )
-            } else {
-                midas_undecided(&bought, &logged, sample)
-            };
-            Some((item, line))
+            (games.len() >= MIN_HABIT_GAMES)
+                .then(|| (item, ItemNote::Oddity, of_games(games.len(), logs.len())))
         })
         .or_else(|| {
-            let (item, bought) = (fresh("gem")?, total("gem"));
-            (bought >= MIN_HABIT_GAMES as i64)
-                .then(|| (item, write(GEM, "gem", &[("n", &format_grouped(bought))])))
+            let (item, count) = (fresh("gem")?, total("gem"));
+            (count >= MIN_HABIT_GAMES as i64).then(|| (item, ItemNote::Oddity, bought(count, None)))
         });
-    if let Some((item, line)) = oddity {
+    if let Some((item, note, line)) = oddity {
         updates.push(ItemUpdate {
             key: item.key.clone(),
             name: item.name.clone(),
-            note: ItemNote::Oddity,
+            note,
             line,
             direction: None,
         });
@@ -537,8 +331,6 @@ pub fn item_updates(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
 
     fn catalog() -> Vec<ItemInfo> {
@@ -588,16 +380,16 @@ mod tests {
         let mut rows = (1..=5)
             .map(|id| game(id, &[("blink", 1), ("tango", 9)], true))
             .collect::<Vec<_>>();
-        assert!(!item_updates(&rows, 7, &catalog(), 0).is_empty());
+        assert!(!item_updates(&rows, 7, &catalog()).is_empty());
         // No log is unknown, not an empty shopping list.
         rows[0].items = None;
-        assert!(item_updates(&rows, 7, &catalog(), 0).is_empty());
+        assert!(item_updates(&rows, 7, &catalog()).is_empty());
         // A negative count spoils the whole log.
         rows[0].items = Some(vec![("blink".to_owned(), 1), ("tango".to_owned(), -1)]);
-        assert!(item_updates(&rows, 7, &catalog(), 0).is_empty());
+        assert!(item_updates(&rows, 7, &catalog()).is_empty());
         rows[0].items = Some(Vec::new());
-        assert!(!item_updates(&rows, 7, &catalog(), 0).is_empty());
-        assert!(item_updates(&rows, 8, &catalog(), 0).is_empty());
+        assert!(!item_updates(&rows, 7, &catalog()).is_empty());
+        assert!(item_updates(&rows, 8, &catalog()).is_empty());
     }
 
     #[test]
@@ -623,34 +415,32 @@ mod tests {
                 game(id, &items, id % 2 == 0)
             })
             .collect::<Vec<_>>();
-        let updates = item_updates(&rows, 7, &catalog(), 0);
+        let updates = item_updates(&rows, 7, &catalog());
         let signature = note(&updates, ItemNote::Signature).expect("signature");
         assert_eq!(
             (signature.key.as_str(), signature.name.as_str()),
             ("blink", "Blink Dagger")
         );
-        assert!(signature.line.starts_with("4 of 6 games."));
+        assert_eq!(signature.line, "4 of 6 games");
         assert_eq!(signature.direction, None);
 
-        // Games without a log shrink the sample, and the line says so.
+        // A game without a log is not one of the games counted.
         rows.push(DistinctMatch {
             match_id: 7,
             discord_id: 7,
             ..Default::default()
         });
-        let updates = item_updates(&rows, 7, &catalog(), 0);
-        assert!(
-            note(&updates, ItemNote::Signature)
-                .unwrap()
-                .line
-                .starts_with("4 of 6 parsed games.")
+        let updates = item_updates(&rows, 7, &catalog());
+        assert_eq!(
+            note(&updates, ItemNote::Signature).unwrap().line,
+            "4 of 6 games"
         );
 
         // Two games is a purchase, not a signature.
         let rows = (1..=6)
             .map(|id| game(id, &[("blink", i64::from(id <= 2))], true))
             .collect::<Vec<_>>();
-        assert!(item_updates(&rows, 7, &catalog(), 0).is_empty());
+        assert!(item_updates(&rows, 7, &catalog()).is_empty());
     }
 
     #[test]
@@ -667,38 +457,26 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let updates = item_updates(&rows(4, 1), 7, &catalog(), 0);
+        let updates = item_updates(&rows(4, 1), 7, &catalog());
         let rate = note(&updates, ItemNote::WinRate).expect("win rate");
         assert_eq!(rate.key, "bfury");
-        assert!(rate.line.starts_with("80% wins in 5 games"));
+        assert_eq!(rate.line, "80% won in 5 games");
         assert_eq!(rate.direction, Some(BalanceDirection::Buff));
         assert_eq!(note(&updates, ItemNote::Signature).unwrap().key, "blink");
 
-        let updates = item_updates(&rows(1, 4), 7, &catalog(), 0);
+        let updates = item_updates(&rows(1, 4), 7, &catalog());
         let rate = note(&updates, ItemNote::WinRate).expect("win rate");
-        assert!(rate.line.starts_with("20% wins in 5 games"));
+        assert_eq!(rate.line, "20% won in 5 games");
         assert_eq!(rate.direction, Some(BalanceDirection::Nerf));
 
         // 60% is not lopsided.
-        assert!(
-            note(
-                &item_updates(&rows(3, 1), 7, &catalog(), 0),
-                ItemNote::WinRate
-            )
-            .is_none()
-        );
+        assert!(note(&item_updates(&rows(3, 1), 7, &catalog()), ItemNote::WinRate).is_none());
         // 80% with the item means little when 80% is the player's norm.
-        assert!(
-            note(
-                &item_updates(&rows(4, 4), 7, &catalog(), 0),
-                ItemNote::WinRate
-            )
-            .is_none()
-        );
+        assert!(note(&item_updates(&rows(4, 4), 7, &catalog()), ItemNote::WinRate).is_none());
         // Four known results are not a sample.
         let mut thin = rows(4, 1);
         thin[4].won = None;
-        assert!(note(&item_updates(&thin, 7, &catalog(), 0), ItemNote::WinRate).is_none());
+        assert!(note(&item_updates(&thin, 7, &catalog()), ItemNote::WinRate).is_none());
     }
 
     #[test]
@@ -706,30 +484,30 @@ mod tests {
         let mut rows = (1..=5)
             .map(|id| game(id, &[("tpscroll", 6), ("dust", 2), ("tango", 1)], true))
             .collect::<Vec<_>>();
-        let updates = item_updates(&rows, 7, &catalog(), 0);
+        let updates = item_updates(&rows, 7, &catalog());
         let consumable = note(&updates, ItemNote::Consumable).expect("consumable");
         assert_eq!(consumable.key, "tpscroll");
-        assert!(consumable.line.starts_with("30 bought."));
+        assert_eq!(consumable.line, "30 bought");
 
         // Everyone buys scrolls; nobody else buys ten Dust.
         rows.extend((1..=10).map(|id| DistinctMatch {
             discord_id: 8,
             ..game(id, &[("tpscroll", 6)], true)
         }));
-        let updates = item_updates(&rows, 7, &catalog(), 0);
+        let updates = item_updates(&rows, 7, &catalog());
         let consumable = note(&updates, ItemNote::Consumable).expect("consumable");
         // Dust is not in the catalog, so the built-in name stands in.
         assert_eq!(
             (consumable.key.as_str(), consumable.name.as_str()),
             ("dust", "Dust of Appearance")
         );
-        assert!(consumable.line.starts_with("10 bought."));
+        assert_eq!(consumable.line, "10 bought");
 
         // Nine of anything is not a habit.
         let rows = (1..=9)
             .map(|id| game(id, &[("tango", 1)], true))
             .collect::<Vec<_>>();
-        assert!(item_updates(&rows, 7, &catalog(), 0).is_empty());
+        assert!(item_updates(&rows, 7, &catalog()).is_empty());
     }
 
     #[test]
@@ -745,31 +523,17 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let line = |rows: &[DistinctMatch], seed| {
-            let updates = item_updates(rows, 7, &catalog(), seed);
+        let line = |rows: &[DistinctMatch]| {
+            let updates = item_updates(rows, 7, &catalog());
             let oddity = note(&updates, ItemNote::Oddity).expect("oddity");
             assert_eq!(oddity.name, "Divine Rapier");
             oddity.line.clone()
         };
-        let both = (0..16)
-            .map(|seed| line(&rows([Some(true), Some(false)]), seed))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            both,
-            BTreeSet::from([
-                "4 bought in 2 games. 1 won.".to_owned(),
-                "4 across 2 games. Won 1.".to_owned(),
-            ])
-        );
-        assert_eq!(line(&rows([Some(true), None]), 0), "4 bought in 2 games.");
+        assert_eq!(line(&rows([Some(true), Some(false)])), "4 bought, 1 won");
+        assert_eq!(line(&rows([Some(true), None])), "4 bought");
         let mut single = rows([Some(false), Some(true)]);
         single[1].items = Some(Vec::new());
-        assert!(line(&single, 0).starts_with("2 in one game."));
-        assert!(
-            RAPIER_ONE_LOST
-                .iter()
-                .any(|template| { format_flavor(template, &[("n", "2")]) == line(&single, 0) })
-        );
+        assert_eq!(line(&single), "2 bought, 0 won");
     }
 
     #[test]
@@ -782,25 +546,26 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let updates = item_updates(&rows(15), 7, &catalog(), 0);
-        let oddity = note(&updates, ItemNote::Oddity).expect("oddity");
-        assert_eq!(oddity.key, "black_king_bar");
-        assert!(oddity.line.starts_with("0 of 15 core games."));
-        assert!(item_updates(&rows(14), 7, &catalog(), 0).is_empty());
+        let updates = item_updates(&rows(15), 7, &catalog());
+        let never = note(&updates, ItemNote::NeverBuilt).expect("never built");
+        assert_eq!(never.key, "black_king_bar");
+        assert_eq!(never.line, "0 of 15 games");
+        assert!(note(&updates, ItemNote::Oddity).is_none());
+        assert!(item_updates(&rows(14), 7, &catalog()).is_empty());
         // One purchase as a core and the absence is gone.
         let mut bought = rows(15);
         bought[0].items = Some(vec![("black_king_bar".to_owned(), 1)]);
-        assert!(note(&item_updates(&bought, 7, &catalog(), 0), ItemNote::Oddity).is_none());
+        assert!(note(&item_updates(&bought, 7, &catalog()), ItemNote::NeverBuilt).is_none());
         // Unknown positions are not core games.
         let mut unknown = rows(15);
         unknown[0].position = None;
-        assert!(item_updates(&unknown, 7, &catalog(), 0).is_empty());
+        assert!(item_updates(&unknown, 7, &catalog()).is_empty());
         // Without a name there is no line.
         let nameless = catalog()
             .into_iter()
             .filter(|item| item.key != "black_king_bar")
             .collect::<Vec<_>>();
-        assert!(item_updates(&rows(15), 7, &nameless, 0).is_empty());
+        assert!(item_updates(&rows(15), 7, &nameless).is_empty());
     }
 
     #[test]
@@ -818,15 +583,14 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let oddity = |rows: &[DistinctMatch]| {
-            note(&item_updates(rows, 7, &catalog(), 0), ItemNote::Oddity).cloned()
+            note(&item_updates(rows, 7, &catalog()), ItemNote::Oddity).cloned()
         };
         let midas = oddity(&rows(&[("hand_of_midas", 1)])).expect("midas");
         assert_eq!(midas.key, "hand_of_midas");
-        assert!(midas.line.starts_with("3 of 6 games."));
-        assert!(midas.line.contains('2'));
+        assert_eq!(midas.line, "3 of 6 games");
         let gem = oddity(&rows(&[("gem", 1)])).expect("gem");
         assert_eq!(gem.name, "Gem of True Sight");
-        assert!(gem.line.starts_with("3 bought."));
+        assert_eq!(gem.line, "3 bought");
         assert!(oddity(&rows(&[("gem", 1)])[1..]).is_none());
         let both = oddity(&rows(&[("gem", 1), ("hand_of_midas", 1), ("rapier", 1)])).unwrap();
         assert_eq!(both.key, "rapier");
@@ -834,7 +598,7 @@ mod tests {
             .into_iter()
             .map(|row| DistinctMatch { won: None, ..row })
             .collect::<Vec<_>>();
-        assert_eq!(oddity(&unknown).unwrap().line, "3 of 6 games.");
+        assert_eq!(oddity(&unknown).unwrap().line, "3 of 6 games");
     }
 
     fn busy_year() -> Vec<DistinctMatch> {
@@ -855,7 +619,7 @@ mod tests {
     #[test]
     fn notes_are_capped_distinct_ordered_and_stable_under_reordering() {
         let mut rows = busy_year();
-        let updates = item_updates(&rows, 7, &catalog(), 3);
+        let updates = item_updates(&rows, 7, &catalog());
         assert_eq!(
             updates
                 .iter()
@@ -871,62 +635,33 @@ mod tests {
         rows.reverse();
         let mut shuffled = catalog();
         shuffled.reverse();
-        assert_eq!(item_updates(&rows, 7, &shuffled, 3), updates);
+        assert_eq!(item_updates(&rows, 7, &shuffled), updates);
 
         // A Rapier in most games is the signature and is not repeated.
         let rapiers = (1..=6)
             .map(|id| game(id, &[("rapier", 1)], true))
             .collect::<Vec<_>>();
-        let updates = item_updates(&rapiers, 7, &catalog(), 3);
+        let updates = item_updates(&rapiers, 7, &catalog());
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].note, ItemNote::Signature);
     }
 
     #[test]
-    fn wording_varies_by_seed_and_every_variant_stays_short() {
-        let rows = busy_year();
-        let wordings = (0..32)
-            .map(|seed| format!("{:?}", item_updates(&rows, 7, &catalog(), seed)))
-            .collect::<BTreeSet<_>>();
-        assert!(wordings.len() > 1);
-        assert_eq!(
-            item_updates(&rows, 7, &catalog(), 5),
-            item_updates(&rows, 7, &catalog(), 5)
-        );
-
-        let pools = CONSUMABLES.iter().map(|(_, _, lines)| *lines).chain([
-            SIGNATURE,
-            WIN_RATE_BUFF,
-            WIN_RATE_NERF,
-            RAPIER_ONE_WON,
-            RAPIER_ONE_LOST,
-            RAPIER_MANY,
-            ABSENT,
-            MIDAS,
-            GEM,
-        ]);
-        let mut templates = 0;
-        for pool in pools {
-            assert!(pool.len() >= 2);
-            templates += pool.len();
-        }
+    fn every_line_opens_with_its_figure_and_stays_a_few_words() {
         assert_eq!(CONSUMABLES.len(), 12);
-
         // The card sets a line's leading figure large and the words after it
         // small beside it, so the figure leads and the words stay few.
-        const MAX_WORDS: usize = 30;
         let lines = widest_lines();
-        assert_eq!(lines.len(), templates + 2);
+        assert_eq!(lines.len(), 5);
         for line in lines {
-            assert!(!line.contains('{'), "{line}");
-            assert!(line.ends_with('.'), "{line}");
+            assert!(!line.contains(['{', '.', '!']), "{line}");
             let (figure, words) = line.split_once(' ').expect("a figure, then words");
             assert!(
                 figure.starts_with(|character: char| character.is_ascii_digit())
                     && figure.chars().count() <= 5,
                 "{line}"
             );
-            assert!(words.chars().count() <= MAX_WORDS, "{line}");
+            assert!(words.split(' ').count() <= 4, "{line}");
         }
     }
 }

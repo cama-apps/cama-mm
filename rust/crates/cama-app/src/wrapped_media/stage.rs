@@ -932,6 +932,16 @@ mod tests {
     }
 
     #[test]
+    fn poppins_draws_the_en_dash_but_no_arrow() {
+        // Month ranges on the talent card use an en dash. Before-and-after
+        // values say "to": the reading faces have no arrow to draw.
+        for face in [Face::Medium, Face::Bold] {
+            assert_ne!(face.font().lookup_glyph_index('\u{2013}'), 0, "{face:?}");
+            assert_eq!(face.font().lookup_glyph_index('\u{2192}'), 0, "{face:?}");
+        }
+    }
+
+    #[test]
     fn a_wrapped_block_never_overflows_its_box() {
         for value in [
             "Alexandria the Unreasonably Determined",
