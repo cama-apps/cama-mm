@@ -1,7 +1,7 @@
 use super::*;
 use crate::discord_transport::{
-    DiscordAllowedMentions, DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessageReceipt,
-    DiscordMessageSnapshot,
+    DiscordAllowedMentions, DiscordChannelName, DiscordEmoji, DiscordGuildMemberSnapshot,
+    DiscordMessageReceipt, DiscordMessageSnapshot,
 };
 use cama_app::service_container::{ServiceContainer, ServiceContainerOptions};
 use std::sync::{
@@ -107,13 +107,13 @@ impl DiscordTransport for Transport {
         guild: u64,
         configured: Option<u64>,
         _: Option<u64>,
-        name: &str,
+        name: DiscordChannelName<'_>,
     ) -> Result<u64, String> {
         self.events.lock().unwrap().push("resolve channel".into());
         if self.fail_channel.load(Ordering::SeqCst) {
             return Err("wrong guild or missing channel permission".into());
         }
-        assert_eq!(name, "deadlock-mm");
+        assert_eq!(name, DiscordChannelName::Exact("deadlock-mm"));
         if let Some(channel) = configured {
             return Ok(channel);
         }

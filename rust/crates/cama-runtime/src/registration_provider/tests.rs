@@ -78,6 +78,7 @@ struct MockDiscordState {
     channel_messages: Vec<(u64, DiscordMessage)>,
     message_edits: Vec<(u64, u64, DiscordMessage)>,
     channels: BTreeSet<(u64, u64)>,
+    named_channels: BTreeMap<(u64, String), u64>,
     members: BTreeMap<(u64, u64), DiscordGuildMemberSnapshot>,
     server_nicknames: BTreeMap<(u64, u64), Option<String>>,
     users: BTreeMap<u64, DiscordUserSnapshot>,
@@ -156,6 +157,26 @@ impl MockDiscord {
 
 #[async_trait]
 impl DiscordTransport for MockDiscord {
+    async fn resolve_named_text_channel(
+        &self,
+        guild_id: u64,
+        configured: Option<u64>,
+        _known: Option<u64>,
+        name: DiscordChannelName<'_>,
+    ) -> Result<u64, String> {
+        assert!(configured.is_none());
+        let DiscordChannelName::Decorated(name) = name else {
+            panic!("Dota MM lookup should allow decorated names");
+        };
+        self.state
+            .lock()
+            .expect("Discord state")
+            .named_channels
+            .get(&(guild_id, name.to_owned()))
+            .copied()
+            .ok_or_else(|| format!("No existing #{name} text channel was found."))
+    }
+
     async fn fetch_message(
         &self,
         _channel_id: u64,
@@ -1804,10 +1825,112 @@ async fn lobby_reset_clears_both_ready_and_rally_generation_cooldowns() {
 }
 
 #[tokio::test]
-async fn lobby_neon_routes_only_explicit_join_and_gamba_to_the_python_channels() {
+async fn lobby_neon_resolves_mm_independently_of_origin_and_lobby_channel() {
     let database = database();
     let server = RouteServer::start(Vec::new());
     let discord = Arc::new(MockDiscord::default());
+    discord
+        .state
+        .lock()
+        .expect("Discord state")
+        .named_channels
+        .insert((42, "dota-mm".to_owned()), 74);
+    let mut runtime_config = config();
+    runtime_config.neon_degen_enabled = true;
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        discord.clone(),
+        runtime_config,
+    );
+    for (index, (origin, lobby_channel)) in [
+        (Some(70), Some(70)),
+        (Some(72), Some(70)),
+        (None, Some(70)),
+        (None, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        provider
+            .handler
+            .neon
+            .lock()
+            .expect("Neon service")
+            .queue_rolls([0.0, 0.0]);
+        let mut event = confirmed_join(100 + index as u64, 7, 10);
+        event.lobby_kind = cama_app::embeds::LobbyKind::LowSkill;
+        event.origin_channel_id = origin;
+        event.lobby_channel_id = lobby_channel;
+        provider
+            .lobby_join_observer()
+            .explicit_lobby_join_neon(event)
+            .await
+            .expect("MM announcement");
+    }
+    let state = discord.state.lock().expect("Discord state");
+    assert_eq!(state.channel_messages.len(), 4);
+    assert!(
+        state
+            .channel_messages
+            .iter()
+            .all(|(channel, _)| *channel == 74)
+    );
+}
+
+#[tokio::test]
+async fn lobby_neon_missing_mm_never_falls_back_to_lobby_or_another_guild() {
+    let database = database();
+    let server = RouteServer::start(Vec::new());
+    let discord = Arc::new(MockDiscord::default());
+    discord
+        .state
+        .lock()
+        .expect("Discord state")
+        .named_channels
+        .insert((99, "dota-mm".to_owned()), 74);
+    let mut runtime_config = config();
+    runtime_config.neon_degen_enabled = true;
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        discord.clone(),
+        runtime_config,
+    );
+    provider
+        .handler
+        .neon
+        .lock()
+        .expect("Neon service")
+        .queue_rolls([0.0, 0.0]);
+    assert!(
+        provider
+            .lobby_join_observer()
+            .explicit_lobby_join_neon(confirmed_join(100, 7, 10))
+            .await
+            .is_err()
+    );
+    assert!(
+        discord
+            .state
+            .lock()
+            .expect("Discord state")
+            .channel_messages
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn lobby_neon_routes_explicit_join_to_mm_and_spectators_to_gamba() {
+    let database = database();
+    let server = RouteServer::start(Vec::new());
+    let discord = Arc::new(MockDiscord::default());
+    discord
+        .state
+        .lock()
+        .expect("Discord state")
+        .named_channels
+        .insert((42, "dota-mm".to_owned()), 74);
     let mut runtime_config = config();
     runtime_config.neon_degen_enabled = true;
     let provider = PlayerRegistrationProvider::with_config(
@@ -1848,7 +1971,7 @@ async fn lobby_neon_routes_only_explicit_join_and_gamba_to_the_python_channels()
 
     let state = discord.state.lock().expect("Discord state");
     assert_eq!(state.channel_messages.len(), 2);
-    assert_eq!(state.channel_messages[0].0, 70);
+    assert_eq!(state.channel_messages[0].0, 74);
     assert!(
         state.channel_messages[0]
             .1

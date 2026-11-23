@@ -41,10 +41,10 @@ use crate::dig_provider::{
     DigPublicSendFailure, DigPublicSendFailureKind,
 };
 use crate::discord_transport::{
-    DiscordDestinationStatus, DiscordDirectMessageError, DiscordDirectMessageErrorKind,
-    DiscordEmoji, DiscordGuildMemberRenderNames, DiscordGuildMemberSnapshot, DiscordMessage,
-    DiscordMessageReceipt, DiscordMessageSnapshot, DiscordPresence, DiscordTransport,
-    DiscordUserSnapshot, ScoutChannelPort,
+    DiscordChannelName, DiscordDestinationStatus, DiscordDirectMessageError,
+    DiscordDirectMessageErrorKind, DiscordEmoji, DiscordGuildMemberRenderNames,
+    DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt, DiscordMessageSnapshot,
+    DiscordPresence, DiscordTransport, DiscordUserSnapshot, ScoutChannelPort,
 };
 use crate::duel_challenges_worker::{
     DuelChannelKind, DuelChannelSnapshot, DuelDiscordPort, DuelGuildSnapshot,
@@ -92,9 +92,13 @@ fn named_text_channel(
     guild: GuildId,
     configured: Option<u64>,
     known: Option<u64>,
-    name: &str,
+    name: DiscordChannelName<'_>,
     channels: &HashMap<ChannelId, GuildChannel>,
 ) -> Result<u64, String> {
+    let (name, allow_decorated) = match name {
+        DiscordChannelName::Exact(name) => (name, false),
+        DiscordChannelName::Decorated(name) => (name, true),
+    };
     let belongs =
         |channel: &&GuildChannel| channel.guild_id == guild && channel.kind == ChannelType::Text;
     if let Some(id) = configured {
@@ -103,11 +107,11 @@ fn named_text_channel(
             .filter(belongs)
             .map(|channel| channel.id.get())
             .ok_or_else(|| {
-                "DEADLOCK_CHANNEL_ID must identify a text channel in this server.".into()
+                format!("Configured #{name} channel must identify a text channel in this server.")
             });
     }
     let suitable = |channel: &&GuildChannel| belongs(channel) && channel.name == name;
-    known
+    if let Some(channel) = known
         .and_then(|id| channels.get(&ChannelId::new(id)))
         .filter(suitable)
         .or_else(|| {
@@ -116,8 +120,26 @@ fn named_text_channel(
                 .filter(suitable)
                 .min_by_key(|channel| channel.id)
         })
-        .map(|channel| channel.id.get())
-        .ok_or_else(|| format!("No existing #{name} text channel was found. Set DEADLOCK_CHANNEL_ID to an existing channel."))
+    {
+        return Ok(channel.id.get());
+    }
+    // Servers often decorate MM channel names with emoji. Only use that
+    // fallback when it identifies one guild text channel unambiguously.
+    if !allow_decorated {
+        return Err(format!("No existing #{name} text channel was found."));
+    }
+    let mut decorated = channels.values().filter(|channel| {
+        belongs(channel)
+            && channel
+                .name
+                .trim_matches(|character: char| !character.is_alphanumeric())
+                .eq_ignore_ascii_case(name)
+    });
+    match (decorated.next(), decorated.next()) {
+        (Some(channel), None) => Ok(channel.id.get()),
+        (None, _) => Err(format!("No existing #{name} text channel was found.")),
+        _ => Err(format!("More than one text channel matches #{name}.")),
+    }
 }
 
 fn is_deadlock_queue_panel(message: &serenity::all::Message, bot: UserId) -> bool {
@@ -4358,7 +4380,7 @@ impl DiscordTransport for SerenityDiscordTransport {
         guild_id: u64,
         configured: Option<u64>,
         known: Option<u64>,
-        name: &str,
+        name: DiscordChannelName<'_>,
     ) -> Result<u64, String> {
         let context = self.context()?;
         let guild = GuildId::new(guild_id);

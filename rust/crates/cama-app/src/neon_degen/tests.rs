@@ -194,7 +194,7 @@ fn test_all_renders_produce_ansi_block_under_45_lines() {
         render_don_loss_box("User", 100),
         render_coinflip("Winner", "Loser"),
         render_registration("NewUser"),
-        render_lobby_join("QueueUser", 7),
+        render_lobby_join("QueueUser", 7, &mut RollSource::seeded(41)),
         render_gamba_spectator("Watcher"),
     ];
     for render in renders {
@@ -653,6 +653,28 @@ fn test_on_registration_one_time() {
                 .is_none()
         );
     }
+}
+
+#[test]
+fn lobby_join_varies_copy_for_the_same_name_and_position() {
+    let mut messages = HashSet::new();
+    for sample in [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0] {
+        let mut lobby = service();
+        lobby.queue_rolls([0.0, sample]);
+        let result = lobby
+            .on_lobby_join(500, Some(456), "QueueUser", 7)
+            .expect("forced lobby join trigger");
+        let message = text(&result);
+        assert!(message.starts_with("```ansi\nQUEUE JOIN\n"));
+        assert!(message.contains("Client: QueueUser\nPosition: 7\n"));
+        assert!(message.ends_with("\n```"));
+        assert_eq!(lobby.rolls.observed_chances(), &[0.03]);
+        messages.insert(message.to_owned());
+    }
+    assert!(
+        messages.len() >= 8,
+        "queue joins should have a range of closing lines"
+    );
 }
 
 #[test]
