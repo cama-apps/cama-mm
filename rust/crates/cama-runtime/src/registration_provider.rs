@@ -46,8 +46,8 @@ use tracing::{debug, error, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordDirectMessageErrorKind, DiscordMessage, DiscordMessageReceipt, DiscordTransport,
-    cached_guild_player_names, resolve_guild_player_names,
+    DiscordChannelName, DiscordDirectMessageErrorKind, DiscordMessage, DiscordMessageReceipt,
+    DiscordTransport, cached_guild_player_names, resolve_guild_player_names,
 };
 use crate::ids::signed_id;
 use crate::neon_llm::NeonLlm;
@@ -624,12 +624,18 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
                 &event.player_display_name,
                 event.player_ids.len(),
             );
-        let (Some(channel_id), Some(text)) = (
-            event.lobby_channel_id,
-            result.and_then(|result| result.text_block),
-        ) else {
+        let Some(text) = result.and_then(|result| result.text_block) else {
             return Ok(());
         };
+        let channel_id = self
+            .discord
+            .resolve_named_text_channel(
+                event.guild_id,
+                None,
+                event.origin_channel_id,
+                DiscordChannelName::Decorated("dota-mm"),
+            )
+            .await?;
         self.deliver_neon_text(channel_id, event.guild_id, event.player_id, text, false)
             .await
     }

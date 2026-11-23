@@ -501,6 +501,13 @@ pub enum DiscordDestinationStatus {
     Unknown,
 }
 
+/// Whether a named destination permits surrounding emoji or punctuation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiscordChannelName<'a> {
+    Exact(&'a str),
+    Decorated(&'a str),
+}
+
 #[async_trait]
 pub trait DiscordTransport: Send + Sync {
     /// Resolve an existing guild text channel by configured ID or fallback name.
@@ -509,7 +516,7 @@ pub trait DiscordTransport: Send + Sync {
         _guild_id: u64,
         _configured: Option<u64>,
         _known: Option<u64>,
-        _name: &str,
+        _name: DiscordChannelName<'_>,
     ) -> Result<u64, String> {
         Err("Text channel lookup is unavailable on this transport.".into())
     }

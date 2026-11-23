@@ -121,6 +121,7 @@ fn deadlock_channel_override_is_guild_text_only_and_fallback_is_named() {
         (421, 42, ChannelType::Text, "deadlock-mm"),
         (422, 43, ChannelType::Text, "deadlock-mm"),
         (423, 42, ChannelType::Voice, "deadlock-mm"),
+        (425, 42, ChannelType::Text, "deadlock-mm-archive"),
     ] {
         let mut channel = GuildChannel::default();
         channel.id = ChannelId::new(id);
@@ -130,21 +131,123 @@ fn deadlock_channel_override_is_guild_text_only_and_fallback_is_named() {
         channels.insert(channel.id, channel);
     }
     assert_eq!(
-        named_text_channel(guild, Some(420), None, "deadlock-mm", &channels).unwrap(),
+        named_text_channel(
+            guild,
+            Some(420),
+            None,
+            DiscordChannelName::Exact("deadlock-mm"),
+            &channels
+        )
+        .unwrap(),
         420
     );
     assert_eq!(
-        named_text_channel(guild, None, Some(420), "deadlock-mm", &channels).unwrap(),
+        named_text_channel(
+            guild,
+            None,
+            Some(420),
+            DiscordChannelName::Exact("deadlock-mm"),
+            &channels
+        )
+        .unwrap(),
         421
     );
     for invalid in [422, 423, 424] {
-        assert!(named_text_channel(guild, Some(invalid), None, "deadlock-mm", &channels).is_err());
+        assert!(
+            named_text_channel(
+                guild,
+                Some(invalid),
+                None,
+                DiscordChannelName::Exact("deadlock-mm"),
+                &channels
+            )
+            .is_err()
+        );
     }
     channels.remove(&ChannelId::new(421));
-    assert!(
-        named_text_channel(guild, None, Some(421), "deadlock-mm", &channels)
+    for fallback_name in ["deadlock-mm-archive", "⚔️deadlock-mm⚔️"] {
+        channels.get_mut(&ChannelId::new(425)).unwrap().name = fallback_name.into();
+        assert!(
+            named_text_channel(
+                guild,
+                None,
+                Some(425),
+                DiscordChannelName::Exact("deadlock-mm"),
+                &channels
+            )
             .unwrap_err()
             .contains("No existing #deadlock-mm")
+        );
+    }
+}
+
+#[test]
+fn named_mm_channel_prefers_exact_then_unique_decorated_guild_text_channel() {
+    let guild = GuildId::new(42);
+    let mut channels = HashMap::new();
+    for (id, guild_id, kind, name) in [
+        (70, 42, ChannelType::Text, "dota-lobby"),
+        (71, 42, ChannelType::Text, "⚔️DOTA-MM⚔️"),
+        (72, 99, ChannelType::Text, "dota-mm"),
+        (73, 42, ChannelType::Category, "dota-mm"),
+        (74, 42, ChannelType::PublicThread, "dota-mm"),
+        (75, 42, ChannelType::Text, "dota-mm"),
+        (77, 42, ChannelType::Text, "dota-mm-archive"),
+    ] {
+        let mut channel = GuildChannel::default();
+        channel.id = ChannelId::new(id);
+        channel.guild_id = GuildId::new(guild_id);
+        channel.kind = kind;
+        channel.name = name.into();
+        channels.insert(channel.id, channel);
+    }
+    assert_eq!(
+        named_text_channel(
+            guild,
+            None,
+            Some(70),
+            DiscordChannelName::Decorated("dota-mm"),
+            &channels
+        )
+        .unwrap(),
+        75
+    );
+    channels.remove(&ChannelId::new(75));
+    assert_eq!(
+        named_text_channel(
+            guild,
+            None,
+            Some(70),
+            DiscordChannelName::Decorated("dota-mm"),
+            &channels
+        )
+        .unwrap(),
+        71
+    );
+    let mut duplicate = channels[&ChannelId::new(71)].clone();
+    duplicate.id = ChannelId::new(76);
+    channels.insert(duplicate.id, duplicate);
+    assert!(
+        named_text_channel(
+            guild,
+            None,
+            Some(70),
+            DiscordChannelName::Decorated("dota-mm"),
+            &channels
+        )
+        .is_err()
+    );
+    channels.remove(&ChannelId::new(76));
+    channels.remove(&ChannelId::new(71));
+    assert!(
+        named_text_channel(
+            guild,
+            None,
+            Some(70),
+            DiscordChannelName::Decorated("dota-mm"),
+            &channels
+        )
+        .is_err()
     );
 }
 

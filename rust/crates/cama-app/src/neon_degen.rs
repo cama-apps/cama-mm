@@ -380,12 +380,23 @@ pub fn render_registration(name: &str) -> String {
 }
 
 #[must_use]
-pub fn render_lobby_join(name: &str, queue_position: usize) -> String {
+pub fn render_lobby_join(name: &str, queue_position: usize, random: &mut RollSource) -> String {
+    const CLOSING_LINES: &[&str] = &[
+        "The countdown begins.",
+        "Seat reserved. Excuses loading.",
+        "Confidence accepted. Results may vary.",
+        "One more volunteer for the incident report.",
+        "Your evening has entered matchmaking.",
+        "Optimism detected. Logging for review.",
+        "Queue secured. Judgment pending.",
+        "The queue grows. So do expectations.",
+    ];
+    let index = (random.sample() * CLOSING_LINES.len() as f64) as usize;
     terminal_lines(&[
         "QUEUE JOIN".into(),
         format!("Client: {name}"),
         format!("Position: {queue_position}"),
-        "The countdown begins.".into(),
+        CLOSING_LINES[index.min(CLOSING_LINES.len() - 1)].into(),
     ])
 }
 
@@ -2438,7 +2449,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             1,
-            render_lobby_join(player_name, queue_position),
+            render_lobby_join(player_name, queue_position, &mut self.rolls),
         ))
     }
 

@@ -1,6 +1,6 @@
 //! One durable queue panel per enabled guild, independent of match threads.
 use super::*;
-use crate::discord_transport::DiscordMessageReceipt;
+use crate::discord_transport::{DiscordChannelName, DiscordMessageReceipt};
 use crate::gateway_events::{
     GatewayMember, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
@@ -13,7 +13,7 @@ impl DeadlockHandler {
                 guild as u64,
                 self.config.channels.get(&guild).copied(),
                 known,
-                "deadlock-mm",
+                DiscordChannelName::Exact("deadlock-mm"),
             )
             .await?;
         positive_id(channel)?;
