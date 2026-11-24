@@ -50,7 +50,7 @@ fn dig_event_payload_projection_carries_ascii_art() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(events_with_art.len(), 71);
+    assert_eq!(events_with_art.len(), 73);
     let stream = events_with_art
         .iter()
         .find(|event| event.id == "underground_stream")
