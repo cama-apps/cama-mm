@@ -868,64 +868,75 @@ impl DigInteractionHandler {
             let mut retained = 0;
             let mut failed = None;
 
+            if let Err(error) = self
+                .recover_pending_event_effects(guild_id_signed, None, PENDING_RECOVERY_PAGE)
+                .await
+            {
+                failed = Some(error);
+            }
+
             // Event settlement has a two-phase application boundary. READY
             // first freezes any actor-committed Pending projection, then the
             // normal scan admits only Ready rows to the nonce/history sender.
-            match self
-                .pending_event_delivery_recoveries(DigEventPendingDeliveryQuery {
-                    guild_id: Some(guild_id_signed),
-                    discord_id: None,
-                    limit: PENDING_RECOVERY_PAGE,
-                })
-                .await
-            {
-                Ok(recoveries) => {
-                    for delivery in recoveries {
-                        match self.recover_event_delivery(delivery.action_id).await {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                retained += 1;
-                                warn!(
-                                    action_id = delivery.action_id,
-                                    "Dig event recovery did not freeze the action; retained for retry"
-                                );
-                            }
-                            Err(error) => {
-                                retained += 1;
-                                warn!(
-                                    action_id = delivery.action_id,
-                                    %error,
-                                    "Dig event recovery failed; retained for retry"
-                                );
-                            }
+            let event_query = DigEventPendingDeliveryQuery {
+                guild_id: Some(guild_id_signed),
+                discord_id: None,
+                limit: PENDING_RECOVERY_PAGE,
+            };
+            loop {
+                let recoveries = match self.pending_event_delivery_recoveries(event_query).await {
+                    Ok(page) => page,
+                    Err(error) => {
+                        failed.get_or_insert(error);
+                        break;
+                    }
+                };
+                let page_len = recoveries.len();
+                let retained_before = retained;
+                for delivery in recoveries {
+                    match self.recover_event_delivery(delivery.action_id).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            retained += 1;
+                            warn!(
+                                action_id = delivery.action_id,
+                                "Dig event recovery did not freeze the action; retained for retry"
+                            );
+                        }
+                        Err(error) => {
+                            retained += 1;
+                            warn!(
+                                action_id = delivery.action_id,
+                                %error,
+                                "Dig event recovery failed; retained for retry"
+                            );
                         }
                     }
                 }
-                Err(message) => failed = Some(message),
+                if page_len < event_query.limit || retained > retained_before {
+                    break;
+                }
             }
 
-            match self
-                .pending_event_deliveries(DigEventPendingDeliveryQuery {
-                    guild_id: Some(guild_id_signed),
-                    discord_id: None,
-                    limit: PENDING_RECOVERY_PAGE,
-                })
-                .await
-            {
-                Ok(deliveries) => {
-                    for delivery in deliveries {
-                        match self.recover_event_row(&delivery, floor, now).await {
-                            PendingRowDisposition::Delivered => recovered += 1,
-                            PendingRowDisposition::Retained => retained += 1,
-                            PendingRowDisposition::Retired
-                            | PendingRowDisposition::AlreadyClosed => {}
-                        }
+            loop {
+                let deliveries = match self.pending_event_deliveries(event_query).await {
+                    Ok(page) => page,
+                    Err(error) => {
+                        failed.get_or_insert(error);
+                        break;
+                    }
+                };
+                let page_len = deliveries.len();
+                let retained_before = retained;
+                for delivery in deliveries {
+                    match self.recover_event_row(&delivery, floor, now).await {
+                        PendingRowDisposition::Delivered => recovered += 1,
+                        PendingRowDisposition::Retained => retained += 1,
+                        PendingRowDisposition::Retired | PendingRowDisposition::AlreadyClosed => {}
                     }
                 }
-                Err(message) => {
-                    if failed.is_none() {
-                        failed = Some(message);
-                    }
+                if page_len < event_query.limit || retained > retained_before {
+                    break;
                 }
             }
 
@@ -5740,6 +5751,22 @@ impl DigInteractionHandler {
         .await
     }
 
+    async fn recover_pending_event_effects(
+        &self,
+        guild_id: i64,
+        discord_id: Option<i64>,
+        limit: usize,
+    ) -> Result<(), String> {
+        let path = self.state.database_path.clone();
+        let config = self.state.dig_config.clone();
+        blocking(move || {
+            cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(&path, config)
+                .recover_pending_event_effects(guild_id, discord_id, limit)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
     async fn recover_event_delivery(&self, action_id: i64) -> Result<bool, String> {
         let path = self.state.database_path.clone();
         let config = self.state.dig_config.clone();
@@ -5996,6 +6023,8 @@ impl DigInteractionHandler {
             discord_id: Some(user_id),
             limit: 10,
         };
+        self.recover_pending_event_effects(guild_id, Some(user_id), query.limit)
+            .await?;
         for pending in self.pending_event_delivery_recoveries(query).await? {
             self.recover_event_delivery(pending.action_id).await?;
         }

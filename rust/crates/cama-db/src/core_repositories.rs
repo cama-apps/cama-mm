@@ -871,6 +871,21 @@ impl PlayerRepository {
                 "This account has pending Deadlock economic activity. Wait for settlement or refunds to finish before resetting it.".to_owned(),
             ));
         }
+        let pending_dig_event: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM app_kv
+             WHERE guild_id=?2 AND key GLOB 'dig:event-effects:*'
+               AND (key GLOB ('dig:event-effects:' || ?1 || ':*')
+                    OR EXISTS(SELECT 1 FROM json_each(app_kv.value,'$.effect_plan.recipients') AS recipient
+                              WHERE recipient.value=?1)))",
+            params![discord_id, guild_id],
+            |row| row.get(0),
+        )?;
+        if pending_dig_event {
+            return Err(CoreRepositoryError::InvalidInput(
+                "This account has a pending Dig event. Wait for settlement before resetting it."
+                    .to_owned(),
+            ));
+        }
         transaction.execute(
             "DELETE FROM deadlock_betting_investments
              WHERE guild_id=?2 AND (investor_id=?1 OR target_id=?1)",
@@ -5376,6 +5391,55 @@ mod tests {
     }
 
     #[test]
+    fn delete_player_waits_for_accepted_dig_event_in_its_guild() {
+        let fixture = Fixture::new();
+        for id in [123, 456] {
+            fixture.add_player(id, TEST_GUILD_ID);
+            fixture.add_player(id, TEST_GUILD_ID_SECONDARY);
+        }
+        let conn = fixture.connection();
+        let claim_key = "dig:event-effects:123:event-789";
+        conn.execute(
+            "INSERT INTO app_kv(guild_id,key,value) VALUES(?1,?2,?3)",
+            params![
+                TEST_GUILD_ID,
+                claim_key,
+                r#"{"effect_plan":{"recipients":[456]}}"#
+            ],
+        )
+        .unwrap();
+
+        for id in [123, 456] {
+            let result = fixture.players.delete(id, Some(TEST_GUILD_ID));
+            assert!(
+                matches!(result, Err(CoreRepositoryError::InvalidInput(ref reason)) if reason.contains("Dig"))
+            );
+            assert!(
+                fixture
+                    .players
+                    .get_by_id(id, Some(TEST_GUILD_ID))
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                fixture
+                    .players
+                    .delete(id, Some(TEST_GUILD_ID_SECONDARY))
+                    .unwrap()
+            );
+        }
+        // Committing the actor's settlement consumes the temporary claim.
+        conn.execute(
+            "DELETE FROM app_kv WHERE guild_id=?1 AND key=?2",
+            params![TEST_GUILD_ID, claim_key],
+        )
+        .unwrap();
+        for id in [123, 456] {
+            assert!(fixture.players.delete(id, Some(TEST_GUILD_ID)).unwrap());
+        }
+    }
+
+    #[test]
     fn test_delete_player() {
         let fixture = Fixture::new();
         fixture.add_player(12_345, TEST_GUILD_ID);
@@ -9356,6 +9420,7 @@ mod tests {
     const TEST_SCHEMA: &str = r#"
         PRAGMA journal_mode=WAL;
         PRAGMA busy_timeout=5000;
+        CREATE TABLE app_kv(guild_id INTEGER NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(guild_id,key));
         CREATE TABLE deadlock_betting_markets(market_id TEXT PRIMARY KEY,guild_id INTEGER NOT NULL,status TEXT NOT NULL);
         CREATE TABLE deadlock_wagers(market_id TEXT NOT NULL,guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL);
         CREATE TABLE deadlock_economic_receipts(market_id TEXT NOT NULL,guild_id INTEGER NOT NULL,discord_id INTEGER,kind TEXT NOT NULL);

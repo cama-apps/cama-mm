@@ -711,7 +711,7 @@ where
         if count == 0 {
             return Ok(Vec::new());
         }
-        let snapshot = self.snapshot_for_generation(guild_id)?;
+        let snapshot = self.raw_snapshot(guild_id)?;
         let labels = eligible_players(&snapshot, current_member_ids)
             .filter_map(|player| {
                 let name = readable_player_name(names.get(&player.discord_id)?)?;

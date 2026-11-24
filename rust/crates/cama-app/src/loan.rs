@@ -256,6 +256,7 @@ pub trait LoanPort {
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
+        match_id: Option<i64>,
     ) -> Result<RepaymentResult, LoanPortError>;
 
     fn get_outstanding_borrower_ids(
@@ -320,8 +321,9 @@ impl LoanPort for LoanRepository {
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
+        match_id: Option<i64>,
     ) -> Result<RepaymentResult, LoanPortError> {
-        LoanRepository::execute_repayment_atomic(self, discord_id, guild_id)
+        LoanRepository::execute_repayment_for_match_atomic(self, discord_id, guild_id, match_id)
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -544,16 +546,18 @@ where
         guild_id: Option<i64>,
     ) -> Result<RepaymentResult, LoanServiceError> {
         self.port
-            .execute_repayment_atomic(discord_id, guild_id)
+            .execute_repayment_atomic(discord_id, guild_id, None)
             .map_err(map_port_error)
     }
 
     /// Match-finalization hook: one bulk discovery, stable participant order,
-    /// at most one repayment attempt per borrower, and only successes returned.
+    /// and one eligible repayment per borrower. Surface storage errors so
+    /// recording recovery can resume after a partially completed batch.
     pub fn repay_outstanding_match_loans(
         &self,
         participant_ids: &[i64],
         guild_id: Option<i64>,
+        match_id: i64,
     ) -> Result<Vec<MatchLoanRepayment>, LoanServiceError> {
         let borrower_ids = self.get_outstanding_borrower_ids(participant_ids, guild_id)?;
         let mut attempted_ids = HashSet::new();
@@ -562,9 +566,15 @@ where
             if !borrower_ids.contains(&player_id) || !attempted_ids.insert(player_id) {
                 continue;
             }
-            let Ok(repayment) = self.execute_repayment(player_id, guild_id) else {
-                continue;
-            };
+            let repayment =
+                match self
+                    .port
+                    .execute_repayment_atomic(player_id, guild_id, Some(match_id))
+                {
+                    Ok(repayment) => repayment,
+                    Err(LoanPortError::NoOutstandingLoan) => continue,
+                    Err(error) => return Err(map_port_error(error)),
+                };
             repayments.push(MatchLoanRepayment {
                 player_id,
                 principal: repayment.principal,

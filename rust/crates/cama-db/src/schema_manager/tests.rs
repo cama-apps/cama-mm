@@ -14,6 +14,54 @@ fn empty_database() -> NamedTempFile {
 }
 
 #[test]
+fn loan_match_watermark_migrates_outstanding_loans_and_preserves_it_on_retry() {
+    let db = empty_database();
+    initialize_or_migrate(db.path()).unwrap();
+    let conn = open_runtime_connection(db.path()).unwrap();
+    if table_columns(&conn, "loan_state")
+        .unwrap()
+        .iter()
+        .any(|c| c.name == "last_loan_match_id")
+    {
+        conn.execute_batch("ALTER TABLE loan_state DROP COLUMN last_loan_match_id")
+            .unwrap();
+    }
+    conn.execute_batch("DELETE FROM schema_migrations WHERE name='add_loan_match_watermark';
+        INSERT INTO matches(match_id,guild_id,team1_players,team2_players,match_date) VALUES
+        (1,10,'[]','[]',datetime(1700000000,'unixepoch')), (2,20,'[]','[]',datetime(1700000000,'unixepoch')),
+        (3,10,'[]','[]',datetime(1700000010,'unixepoch'));
+        INSERT INTO loan_state(discord_id,guild_id,last_loan_at,outstanding_principal) VALUES
+        (11,10,1699999999,10),(12,10,1700000000,20),(13,10,0,30),(14,10,NULL,40);
+        INSERT INTO economy_ledger_entries(guild_id,account_type,account_id,delta,balance_before,balance_after,source,created_at)
+        VALUES (10,'player',13,30,0,30,'loan',1700000005);").unwrap();
+    let report = initialize_or_migrate(db.path()).unwrap();
+    assert!(
+        report
+            .newly_applied
+            .iter()
+            .any(|name| name == "add_loan_match_watermark")
+    );
+    let marks = || {
+        conn.prepare("SELECT last_loan_match_id FROM loan_state ORDER BY discord_id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(marks(), [0, 1, 1, 3]);
+    conn.execute_batch("UPDATE loan_state SET last_loan_at=1800000000")
+        .unwrap();
+    assert!(
+        initialize_or_migrate(db.path())
+            .unwrap()
+            .newly_applied
+            .is_empty()
+    );
+    assert_eq!(marks(), [0, 1, 1, 3]);
+}
+
+#[test]
 fn pet_keepsakes_support_fresh_upgrade_and_retry() {
     for upgrade in [false, true] {
         let database = empty_database();

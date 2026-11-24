@@ -1021,7 +1021,7 @@ fn test_steam_id_reassignment_moves_historical_attribution() {
 }
 
 #[test]
-fn test_bulk_link_parses_a_shared_historical_match_once() {
+fn test_bulk_link_parses_each_historical_match_once() {
     let fixture = Fixture::new();
     fixture.player(100, GUILD, "bulk-100", None);
     fixture.player(200, GUILD, "bulk-200", None);
@@ -1032,6 +1032,11 @@ fn test_bulk_link_parses_a_shared_historical_match_once() {
             {"account_id":22222,"actions_per_min":222}
         ]}"#,
     );
+    let unreadable = fixture.enriched_match(&[100, 200], "not json");
+    let later = fixture.enriched_match(
+        &[200],
+        r#"{"players":[{"account_id":22222,"actions_per_min":333}]}"#,
+    );
 
     let results = fixture
         .repository
@@ -1040,14 +1045,16 @@ fn test_bulk_link_parses_a_shared_historical_match_once() {
     assert!(results.iter().all(|result| result.success));
     assert_eq!(fixture.wrapped_facts(match_id)[0].1, Some(111));
     assert_eq!(fixture.wrapped_facts(match_id)[1].1, Some(222));
+    assert!(fixture.wrapped_facts(unreadable).is_empty());
+    assert_eq!(fixture.wrapped_facts(later)[0].1, Some(333));
 
     let mut connection = fixture.connection();
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .expect("begin parse-count proof");
     assert_eq!(
-        refresh_wrapped_enrichment_facts(&transaction, &[100, 200]).expect("refresh shared match"),
-        1
+        refresh_wrapped_enrichment_facts(&transaction, &[100, 200, 100]).expect("refresh matches"),
+        3
     );
     transaction.rollback().expect("rollback parse-count proof");
 }

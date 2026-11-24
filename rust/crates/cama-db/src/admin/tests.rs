@@ -329,6 +329,33 @@ fn recovery_distinguishes_active_wagers_from_passive_tax_eligibility() {
 }
 
 #[test]
+fn transfer_waits_for_pending_dig_effects_bound_to_either_account() {
+    let f = Fixture::new();
+    let (old, new) = (101, 102);
+    f.player(old, GUILD, Some(1_500.0), 50.0, 0.06);
+    let db = f.connection();
+    for (actor, recipient) in [(old, 199), (103, new)] {
+        let key = format!("dig:event-effects:{actor}:dig-action:7");
+        let detail = serde_json::json!({"effect_plan": {"recipients": [recipient]}});
+        db.execute(
+            "INSERT INTO app_kv(guild_id,key,value) VALUES(?1,?2,?3)",
+            params![GUILD + 1, key, detail.to_string()],
+        )
+        .unwrap();
+        let error = f
+            .repository
+            .transfer_account(GUILD, old, new, "Replacement")
+            .unwrap_err();
+        assert!(error.to_string().contains("Dig event"), "{error}");
+        db.execute("DELETE FROM app_kv WHERE key=?1", [key])
+            .unwrap();
+    }
+    f.repository
+        .transfer_account(GUILD, old, new, "Replacement")
+        .unwrap();
+}
+
+#[test]
 fn transfer_account_keeps_match_history_wallet_dig_progress_and_pet_ownership() {
     let f = Fixture::new();
     let (old, new) = (123456789012345678_i64, 223456789012345678_i64);

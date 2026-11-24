@@ -107,7 +107,7 @@ impl ManaClock for FixedClock {
 
 #[derive(Default)]
 struct FakeDiscord {
-    gamba: bool,
+    gamba: Option<bool>,
     members: Vec<ManaGuildMember>,
 }
 
@@ -118,7 +118,8 @@ impl ManaDiscordPort for FakeDiscord {
         _guild_id: i64,
         _channel_id: i64,
     ) -> Result<bool, String> {
-        Ok(self.gamba)
+        self.gamba
+            .ok_or_else(|| "channel lookup unavailable".to_owned())
     }
 
     fn mana_guild_members(&self, _guild_id: i64) -> Result<Vec<ManaGuildMember>, String> {
@@ -251,7 +252,7 @@ fn command_and_component_registration_match_python_surface() {
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: true,
+            gamba: Some(true),
             members: members(1),
         },
     );
@@ -303,13 +304,33 @@ async fn member_rendering_preserves_fetched_discord_name_when_directory_is_empty
 }
 
 #[tokio::test]
+async fn gamba_lookup_failure_preserves_the_wallet() {
+    let fixture = Fixture::new(1);
+    let before = fixture.balance(USER);
+    let provider = provider(&fixture, FakeDiscord::default());
+    let result = registry(&provider)
+        .command_handler("mana")
+        .unwrap()
+        .handle(command(Vec::new()), Arc::new(CapturingResponder::default()))
+        .await;
+
+    assert_eq!(fixture.balance(USER), before);
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("channel lookup unavailable")
+    );
+}
+
+#[tokio::test]
 async fn wrong_channel_charges_one_before_defer_and_uses_exact_ephemeral_copy() {
     let fixture = Fixture::new(1);
     let before = fixture.balance(USER);
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: false,
+            gamba: Some(false),
             members: members(1),
         },
     );
@@ -344,7 +365,7 @@ async fn existing_single_assignment_preserves_embed_thumbnail_and_wheel_unlock_b
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: true,
+            gamba: Some(true),
             members: members(1),
         },
     );
@@ -384,7 +405,7 @@ async fn selected_unassigned_player_is_read_only_and_uses_no_mana_embed() {
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: true,
+            gamba: Some(true),
             members: members(2),
         },
     );
@@ -425,7 +446,7 @@ async fn stale_assignment_renders_pending_copy_instead_of_yesterdays_land() {
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: true,
+            gamba: Some(true),
             members: members(1),
         },
     );
@@ -460,7 +481,7 @@ async fn board_skips_unknown_land_rows_and_renders_the_rest() {
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: true,
+            gamba: Some(true),
             members: members(2),
         },
     );
@@ -495,7 +516,7 @@ async fn board_names_departed_players_without_ids_or_mentions() {
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: true,
+            gamba: Some(true),
             members: members(1),
         },
     );
@@ -541,7 +562,7 @@ async fn board_displays_all_players_already_assigned_and_paginates_twelve_per_pa
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: true,
+            gamba: Some(true),
             members: members(13),
         },
     );
@@ -602,7 +623,7 @@ async fn board_components_reject_other_users_and_page_for_owner() {
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: true,
+            gamba: Some(true),
             members: members(13),
         },
     );
@@ -677,7 +698,7 @@ fn cooldown_matches_discord_three_claims_per_ten_seconds_and_is_user_global() {
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: true,
+            gamba: Some(true),
             members: members(1),
         },
     );
@@ -784,7 +805,7 @@ async fn test_selected_player_countdown_uses_atomic_unlock_boundary() {
     let provider = provider(
         &fixture,
         FakeDiscord {
-            gamba: true,
+            gamba: Some(true),
             members: members(2),
         },
     );

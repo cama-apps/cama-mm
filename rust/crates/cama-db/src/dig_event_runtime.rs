@@ -100,6 +100,8 @@ pub struct DigResolvedEventIdentity {
     pub chained: bool,
     pub prestige_level: Option<i64>,
     pub reward_row_id: Option<i64>,
+    pub jc_delta: i64,
+    pub balance_after: Option<i64>,
 }
 
 /// Immutable public-delivery projection for one resolved event.
@@ -518,7 +520,8 @@ impl DigEventRuntimeRepository {
                         COALESCE(json_extract(detail, '$.requested_choice'), json_extract(detail, '$.choice')), created_at,
                         COALESCE(json_extract(detail, '$.chained'), 0),
                         json_extract(detail, '$.prestige_level'),
-                        json_extract(detail, '$.reward_row_id')
+                        json_extract(detail, '$.reward_row_id'),
+                        jc_delta, json_extract(detail, '$.balance_after')
                    FROM dig_actions
                   WHERE id=?1 AND actor_id=?2 AND guild_id=?3
                     AND action_type='event' AND json_valid(detail)
@@ -538,6 +541,8 @@ impl DigEventRuntimeRepository {
                         chained: row.get(7)?,
                         prestige_level: row.get(8)?,
                         reward_row_id: row.get(9)?,
+                        jc_delta: row.get(10)?,
+                        balance_after: row.get(11)?,
                     })
                 },
             )
@@ -573,19 +578,150 @@ impl DigEventRuntimeRepository {
             return Ok(None);
         };
         let detail: JsonValue = serde_json::from_str(&raw)?;
-        if detail.get("event_id").and_then(JsonValue::as_str) != Some(event_id)
-            || detail
-                .get("requested_choice")
-                .or_else(|| detail.get("choice"))
-                .and_then(JsonValue::as_str)
-                != Some(choice)
-        {
-            return Err(DigEventRuntimeRepositoryError::IdempotencyConflict);
-        }
+        check_event_choice(&detail, event_id, choice)?;
         detail
             .get("event_delivery")
             .map(|value| event_delivery_from_value(action_id, value))
             .transpose()
+    }
+
+    /// Freeze the selected branch and every recipient before any independent
+    /// wallet or guild mutation. The actor's receipt replaces the temporary
+    /// claim in one transaction. A settled outbox can then be replayed directly.
+    pub fn claim_event_effects(
+        &self,
+        key: DigEventActorKey,
+        event_key: &str,
+        event_id: &str,
+        requested_choice: &str,
+        proposed: JsonValue,
+    ) -> Result<Option<JsonValue>, DigEventRuntimeRepositoryError> {
+        let guild_id = Self::normalize_guild_id(key.guild_id);
+        let claim_key = event_effect_claim_key(key.discord_id, event_key);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT value FROM app_kv WHERE guild_id=?1 AND key=?2
+             UNION ALL
+             SELECT detail FROM dig_actions WHERE guild_id=?1 AND actor_id=?3
+               AND action_type='event' AND json_valid(detail)
+               AND json_extract(detail,'$.event_key')=?4 LIMIT 1",
+                params![guild_id, claim_key, key.discord_id, event_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let mut detail: JsonValue = serde_json::from_str(&existing)?;
+            check_event_choice(&detail, event_id, requested_choice)?;
+            return Ok(detail.get_mut("effect_plan").map(JsonValue::take));
+        }
+        // Before claims existed, a crash could leave only the modifier, a
+        // victim's audit, or the hostile transfer that preceded its audit.
+        // Accept a branch only when it explains every recorded effect.
+        let modifier = proposed
+            .pointer("/resolution/guild_modifier_on_success/id")
+            .and_then(JsonValue::as_str);
+        let mode = proposed
+            .pointer("/resolution/splash/mode")
+            .and_then(JsonValue::as_str);
+        let conflict: bool = transaction.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM dig_actions WHERE guild_id=?1 AND actor_id=?2
+                  AND action_type='event_modifier' AND json_valid(detail)
+                  AND json_extract(detail,'$.event_key')=?3 || ':modifier'
+                  AND (?4 IS NULL OR json_extract(detail,'$.modifier_id') IS NOT ?4)
+             ) OR EXISTS (
+                SELECT 1 FROM dig_actions WHERE guild_id=?1 AND action_type='splash_victim'
+                  AND json_valid(detail) AND json_extract(detail,'$.event_key')=?3 || ':splash:' || actor_id
+                  AND (?5 IS NULL OR coalesce(json_extract(detail,'$.mode'),?5) IS NOT ?5
+                       OR (jc_delta > 0) != (?5='grant')
+                       OR coalesce(json_extract(detail,'$.event_id'),?6) IS NOT ?6
+                       OR coalesce(json_extract(detail,'$.digger_id'),?2) IS NOT ?2)
+             ) OR EXISTS (
+                SELECT 1 FROM hostile_loss_events WHERE guild_id=?1
+                  AND event_key=?3 || ':splash:' || victim_id
+                  AND (kind IS NOT 'dig_splash_' || ?5 OR actor_id IS NOT ?2
+                       OR destination IS NOT CASE ?5 WHEN 'steal' THEN 'player' WHEN 'burn' THEN 'burn' END
+                       OR recipient_id IS NOT CASE WHEN ?5='steal' THEN ?2 END
+                       OR shieldable != (victim_id != ?2))
+             )",
+            params![guild_id, key.discord_id, event_key, modifier, mode, event_id],
+            |row| row.get(0),
+        )?;
+        if conflict {
+            return Err(DigEventRuntimeRepositoryError::IdempotencyConflict);
+        }
+        let detail = json!({"event_key": event_key, "event_id": event_id, "requested_choice": requested_choice, "effect_plan": &proposed});
+        transaction.execute(
+            "INSERT INTO app_kv(guild_id,key,value) VALUES(?1,?2,?3)",
+            params![guild_id, claim_key, detail.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(Some(proposed))
+    }
+
+    pub fn has_event_modifier_receipt(
+        &self,
+        key: DigEventActorKey,
+        event_key: &str,
+    ) -> Result<bool, DigEventRuntimeRepositoryError> {
+        let connection = self.connection()?;
+        Ok(find_splash_action(
+            &connection,
+            Self::normalize_guild_id(key.guild_id),
+            key.discord_id,
+            "event_modifier",
+            &format!("{event_key}:modifier"),
+        )?
+        .is_some())
+    }
+
+    pub fn retire_event_effects_if_actor_missing(
+        &self,
+        key: DigEventActorKey,
+        event_key: &str,
+    ) -> Result<bool, DigEventRuntimeRepositoryError> {
+        Ok(self.connection()?.execute(
+            "DELETE FROM app_kv WHERE guild_id=?1 AND key=?2
+               AND NOT EXISTS(SELECT 1 FROM players p JOIN tunnels t USING(guild_id,discord_id)
+                              WHERE p.guild_id=?1 AND p.discord_id=?3)",
+            params![
+                Self::normalize_guild_id(key.guild_id),
+                event_effect_claim_key(key.discord_id, event_key),
+                key.discord_id
+            ],
+        )? != 0)
+    }
+
+    pub fn pending_event_effects(
+        &self,
+        guild_id: i64,
+        discord_id: Option<i64>,
+        after_key: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, DigEventRuntimeRepositoryError> {
+        let key_pattern = discord_id.map_or_else(
+            || "dig:event-effects:*".to_owned(),
+            |id| event_effect_claim_key(id, "*"),
+        );
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT key,value FROM app_kv WHERE guild_id=?1 AND key GLOB ?2 AND key>?3
+               AND json_type(value,'$.effect_plan.delivery')='object'
+             ORDER BY key LIMIT ?4",
+        )?;
+        Ok(statement
+            .query_map(
+                params![
+                    guild_id,
+                    key_pattern,
+                    after_key,
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Attach the immutable event-result delivery projection to an already
@@ -750,6 +886,25 @@ impl DigEventRuntimeRepository {
             pending.push(event_delivery_from_value(action_id, delivery)?);
         }
         Ok(pending)
+    }
+
+    pub fn pending_event_delivery_for_action(
+        &self,
+        action_id: i64,
+    ) -> Result<Option<DigEventDeliverySnapshot>, DigEventRuntimeRepositoryError> {
+        let raw: Option<String> = self
+            .connection()?
+            .query_row(
+                "SELECT json_extract(detail,'$.event_delivery') FROM dig_actions
+             WHERE id=?1 AND action_type='event' AND json_valid(detail)
+               AND json_extract(detail,'$.event_delivery.state')='pending'
+               AND json_extract(detail,'$.event_delivery.delivered_at') IS NULL",
+                [action_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.map(|value| event_delivery_from_value(action_id, &serde_json::from_str(&value)?))
+            .transpose()
     }
 
     /// Mark an event result delivered using the immutable source key.  The
@@ -1249,7 +1404,7 @@ impl DigEventRuntimeRepository {
         &self,
         request: AtomicDigEventSettlement<'_>,
     ) -> Result<DigEventSettlementOutcome, DigEventRuntimeRepositoryError> {
-        validate_request(request)?;
+        let detail = validate_request(request)?;
         let buff_after = apply_json_mutation(
             request.expected.temp_buff_json.as_deref(),
             request.buff_mutation,
@@ -1313,7 +1468,14 @@ impl DigEventRuntimeRepository {
         }
 
         let reward_row_id = insert_reward(&transaction, request)?;
-        let detail = settlement_detail(request, &fingerprint, balance_after, reward_row_id)?;
+        let mut detail =
+            settlement_detail(detail, request, &fingerprint, balance_after, reward_row_id)?;
+        let claimed_effects = detail.contains_key("effect_plan");
+        if request.delivery.is_some() {
+            // The frozen outbox already contains the complete public outcome.
+            detail.remove("effect_plan");
+        }
+        let detail = JsonValue::Object(detail).to_string();
 
         if request.balance_delta != 0 {
             set_ledger_context(&transaction, request, &detail)?;
@@ -1371,6 +1533,15 @@ impl DigEventRuntimeRepository {
             ],
         )?;
         let action_id = transaction.last_insert_rowid();
+        if claimed_effects {
+            transaction.execute(
+                "DELETE FROM app_kv WHERE guild_id=?1 AND key=?2",
+                params![
+                    guild_id,
+                    event_effect_claim_key(request.expected.key.discord_id, request.event_key)
+                ],
+            )?;
+        }
         transaction.commit()?;
         Ok(DigEventSettlementOutcome::Applied(
             DigEventSettlementReceipt {
@@ -1405,17 +1576,20 @@ impl DigEventRuntimeRepository {
         )?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(action_id) = find_splash_action(
-            &transaction,
-            guild_id,
-            request.victim_id,
-            "splash_victim",
-            request.event_key,
-        )? {
+        if let Some((action_id, amount)) = transaction
+            .query_row(
+                "SELECT id,jc_delta FROM dig_actions WHERE guild_id=?1 AND actor_id=?2
+             AND action_type='splash_victim' AND json_valid(detail)
+             AND json_extract(detail,'$.event_key')=?3 ORDER BY id LIMIT 1",
+                params![guild_id, request.victim_id, request.event_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+        {
             let balance = query_balance(&transaction, request.victim_id, guild_id)?;
             transaction.commit()?;
             return Ok(DigSplashVictimReceipt {
-                amount: request.amount,
+                amount,
                 victim_balance_after: balance,
                 victim_action_id: action_id,
                 digger_action_id: None,
@@ -1487,14 +1661,14 @@ impl DigEventRuntimeRepository {
         let mut statement = connection.prepare(
             "SELECT victim_id AS actor_id, event_id AS ordinal
                FROM hostile_loss_events
-              WHERE guild_id = ?1 AND event_key LIKE ?2 || '%'
+              WHERE guild_id = ?1 AND event_key = ?2 || victim_id
              UNION ALL
              SELECT actor_id, id AS ordinal
                FROM dig_actions
               WHERE guild_id = ?1
                 AND action_type = 'splash_victim'
                 AND json_valid(detail)
-                AND json_extract(detail, '$.event_key') LIKE ?2 || '%'
+                AND json_extract(detail, '$.event_key') = ?2 || actor_id
              ORDER BY ordinal",
         )?;
         let mut victims = Vec::new();
@@ -1590,6 +1764,28 @@ impl DigEventRuntimeRepository {
             digger_action_id,
             applied_now: true,
         })
+    }
+}
+
+fn event_effect_claim_key(actor_id: i64, event_key: &str) -> String {
+    format!("dig:event-effects:{actor_id}:{event_key}")
+}
+
+fn check_event_choice(
+    detail: &JsonValue,
+    event_id: &str,
+    choice: &str,
+) -> Result<(), DigEventRuntimeRepositoryError> {
+    if detail.get("event_id").and_then(JsonValue::as_str) == Some(event_id)
+        && detail
+            .get("requested_choice")
+            .or_else(|| detail.get("choice"))
+            .and_then(JsonValue::as_str)
+            == Some(choice)
+    {
+        Ok(())
+    } else {
+        Err(DigEventRuntimeRepositoryError::IdempotencyConflict)
     }
 }
 
@@ -1994,21 +2190,16 @@ fn set_splash_ledger_context(
 
 fn validate_request(
     request: AtomicDigEventSettlement<'_>,
-) -> Result<(), DigEventRuntimeRepositoryError> {
+) -> Result<JsonMap<String, JsonValue>, DigEventRuntimeRepositoryError> {
     if request.event_key.trim().is_empty() {
         return Err(DigEventRuntimeRepositoryError::EmptyEventKey);
     }
     if request.event_id.trim().is_empty() {
         return Err(DigEventRuntimeRepositoryError::EmptyEventId);
     }
-    if request
-        .detail_json
-        .parse::<JsonValue>()?
-        .as_object()
-        .is_none()
-    {
+    let JsonValue::Object(detail) = serde_json::from_str(request.detail_json)? else {
         return Err(DigEventRuntimeRepositoryError::InvalidDetail);
-    }
+    };
     if let Some(delivery) = request.delivery {
         validate_event_delivery_draft(delivery, request.expected.key, request.created_at)?;
     }
@@ -2040,7 +2231,7 @@ fn validate_request(
             }
         }
     }
-    Ok(())
+    Ok(detail)
 }
 
 fn apply_json_mutation(
@@ -2114,14 +2305,12 @@ fn reward_json(reward: Option<DigEventReward<'_>>) -> JsonValue {
 }
 
 fn settlement_detail(
+    mut detail: JsonMap<String, JsonValue>,
     request: AtomicDigEventSettlement<'_>,
     fingerprint: &str,
     balance_after: i64,
     reward_row_id: Option<i64>,
-) -> Result<String, DigEventRuntimeRepositoryError> {
-    let JsonValue::Object(mut detail) = serde_json::from_str(request.detail_json)? else {
-        return Err(DigEventRuntimeRepositoryError::InvalidDetail);
-    };
+) -> Result<JsonMap<String, JsonValue>, DigEventRuntimeRepositoryError> {
     insert_detail(&mut detail, "event_key", request.event_key);
     insert_detail(&mut detail, "event_id", request.event_id);
     insert_detail(&mut detail, "choice", request.choice);
@@ -2142,7 +2331,7 @@ fn settlement_detail(
     if let Some(delivery) = request.delivery {
         detail.insert("event_delivery".to_owned(), event_delivery_json(delivery)?);
     }
-    Ok(JsonValue::Object(detail).to_string())
+    Ok(detail)
 }
 
 fn insert_detail(detail: &mut JsonMap<String, JsonValue>, key: &str, value: &str) {

@@ -420,10 +420,7 @@ fn test_positive_event_reward_is_scaled_once_and_audited() {
     assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
 }
 
-#[test]
-fn test_economy_event_reward_is_scaled_once_and_audited() {
-    let fixture = Fixture::new();
-    fixture.seed_actor(ACTOR, 100, 50, 0);
+fn activate_double_reward(fixture: &Fixture) {
     let event_date =
         cama_domain::game_date::game_date_for_timestamp(NOW as f64).expect("event date");
     EconomyEventRepository::new(fixture.database.path())
@@ -450,6 +447,13 @@ fn test_economy_event_reward_is_scaled_once_and_audited() {
             },
         )
         .expect("persist doubling economy event");
+}
+
+#[test]
+fn test_economy_event_reward_is_scaled_once_and_audited() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    activate_double_reward(&fixture);
     let mut config = DigRuntimeConfig::default();
     config.economy_event.enabled = true;
     let service = DigEventRuntimeService::sqlite_with_config(fixture.database.path(), config);
@@ -942,7 +946,10 @@ fn steal_recovery_does_not_double_credit_after_actor_commit_failure() {
         .execute("DROP TRIGGER reject_event_actor", [])
         .expect("remove actor failure");
 
-    let recovered = service
+    let mut config = service.config().clone();
+    config.minigame_jc_delta_scale = 2.0;
+    let restarted = DigEventRuntimeService::sqlite_with_config(fixture.database.path(), config);
+    let recovered = restarted
         .resolve_event(event_request)
         .expect("restart recovery");
     assert!(recovered.success);
@@ -955,6 +962,400 @@ fn steal_recovery_does_not_double_credit_after_actor_commit_failure() {
     );
     assert_eq!(fixture.count_actions(ACTOR, "splash_thief"), 1);
     assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+}
+
+#[test]
+fn concurrent_event_choices_only_apply_the_winning_branch() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let key = key_for_outcome(&fixture.snapshot(), "helltide_bell", "risky", true);
+    let database = tempfile::NamedTempFile::new().unwrap();
+    fixture
+        .connection()
+        .backup(rusqlite::MAIN_DB, database.path(), None)
+        .unwrap();
+    let service = DigEventRuntimeService::sqlite_with_config(
+        database.path(),
+        fixture.service().config().clone(),
+    );
+    let start = std::sync::Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        let handles = ["safe", "risky"].map(|choice| {
+            scope.spawn({
+                let service = &service;
+                let start = &start;
+                let key = &key;
+                move || {
+                    start.wait();
+                    service.resolve_event_with_delivery(
+                        request("helltide_bell", choice, key),
+                        DigEventDeliveryContext::new(ACTOR, GUILD, 98, 77),
+                    )
+                }
+            })
+        });
+        handles.map(|handle| handle.join().unwrap())
+    });
+    let mut winners = results.iter().filter_map(|result| result.as_ref().ok());
+    let winning_choice = &winners.next().unwrap().resolution.as_ref().unwrap().choice;
+    assert!(winners.next().is_none());
+    assert!(results.iter().any(|result| matches!(
+        result,
+        Err(DigEventRuntimeError::EventRepository(
+            DigEventRuntimeRepositoryError::IdempotencyConflict
+        ))
+    )));
+    let connection = Connection::open(database.path()).unwrap();
+    let taxes: i64 = connection
+        .query_row("SELECT COUNT(*) FROM dig_guild_modifiers", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(taxes, i64::from(winning_choice == "risky"));
+}
+
+#[test]
+fn interrupted_event_keeps_its_choice_before_actor_settlement() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let key = key_for_outcome(&fixture.snapshot(), "helltide_bell", "risky", true);
+    let service = fixture.service();
+    let risky = request("helltide_bell", "risky", &key);
+    let connection = fixture.connection();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER stop_actor BEFORE INSERT ON dig_actions WHEN NEW.action_type='event'
+         BEGIN SELECT RAISE(ABORT,'interrupted actor'); END;",
+        )
+        .unwrap();
+    assert!(service.resolve_event(risky).is_err());
+    assert_eq!(fixture.count_actions(ACTOR, "event_modifier"), 1);
+    connection.execute("DROP TRIGGER stop_actor", []).unwrap();
+    assert!(matches!(
+        service.resolve_event(request("helltide_bell", "safe", &key)),
+        Err(DigEventRuntimeError::EventRepository(
+            DigEventRuntimeRepositoryError::IdempotencyConflict
+        ))
+    ));
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 0);
+    assert!(service.resolve_event(risky).unwrap().success);
+    assert_eq!(fixture.count_actions(ACTOR, "event_modifier"), 1);
+}
+
+#[test]
+fn legacy_modifier_requires_a_compatible_choice_before_actor_settlement() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let key = key_for_outcome(&fixture.snapshot(), "helltide_bell", "risky", true);
+    let connection = fixture.connection();
+    connection.execute(
+        "INSERT INTO dig_actions(guild_id,actor_id,action_type,depth_before,depth_after,detail,created_at)
+         VALUES(?1,?2,'event_modifier',0,0,json_object('event_key',?3,'modifier_id','helltide_active','expires_at',?4),?4)",
+        params![GUILD, ACTOR, format!("{key}:modifier"), NOW],
+    ).unwrap();
+    let service = fixture.service();
+    assert!(matches!(
+        service.resolve_event(request("helltide_bell", "safe", &key)),
+        Err(DigEventRuntimeError::EventRepository(
+            DigEventRuntimeRepositoryError::IdempotencyConflict
+        ))
+    ));
+    assert!(
+        service
+            .resolve_event(request("helltide_bell", "risky", &key))
+            .unwrap()
+            .success
+    );
+    assert_eq!(fixture.count_actions(ACTOR, "event_modifier"), 1);
+}
+
+#[test]
+fn interrupted_event_finishes_the_original_two_grants() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    for target in [ACTOR + 1, ACTOR + 2] {
+        fixture.seed_actor(target, 80, 40, 0);
+    }
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "UPDATE players SET last_match_date=datetime(?1,'unixepoch')",
+            [NOW],
+        )
+        .unwrap();
+    connection.execute_batch(
+        "CREATE TRIGGER stop_second_grant BEFORE INSERT ON dig_actions
+         WHEN NEW.action_type='splash_victim' AND EXISTS(SELECT 1 FROM dig_actions WHERE action_type='splash_victim')
+         BEGIN SELECT RAISE(ABORT,'interrupted second grant'); END;",
+    ).unwrap();
+    let key = key_for_outcome(&fixture.snapshot(), "mapworks_drift", "risky", true);
+    let event = request("mapworks_drift", "risky", &key);
+    activate_double_reward(&fixture);
+    let mut config = fixture.service().config().clone();
+    config.economy_event.enabled = true;
+    let service =
+        DigEventRuntimeService::sqlite_with_config(fixture.database.path(), config.clone());
+    assert!(service.resolve_event(event).is_err());
+    assert_eq!(
+        fixture.count_actions(ACTOR + 1, "splash_victim")
+            + fixture.count_actions(ACTOR + 2, "splash_victim"),
+        1
+    );
+    connection
+        .execute("DROP TRIGGER stop_second_grant", [])
+        .unwrap();
+    connection
+        .execute("UPDATE players SET last_match_date=NULL", [])
+        .unwrap();
+    config.economy_event.enabled = false;
+    config.minigame_jc_delta_scale = 3.0;
+    let restarted = DigEventRuntimeService::sqlite_with_config(fixture.database.path(), config);
+    let recovered = restarted.resolve_event(event).unwrap();
+    let resolution = recovered.resolution.unwrap();
+    assert!(resolution.economy_gross_jc > 0);
+    assert_eq!(
+        resolution.jc,
+        scale_positive_dig_jc(2 * resolution.economy_gross_jc)
+    );
+    let victims = recovered.splash.unwrap().victims;
+    assert_eq!(victims.len(), 2);
+    assert!(victims.iter().all(|(_, amount)| *amount == 10));
+    for target in [ACTOR + 1, ACTOR + 2] {
+        assert_eq!(fixture.count_actions(target, "splash_victim"), 1);
+        assert_eq!(fixture.balance(target), 90);
+    }
+    assert!(!fixture.service().resolve_event(event).unwrap().applied_now);
+}
+
+#[test]
+fn partial_legacy_splash_only_replays_the_recorded_recipient() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    fixture.seed_actor(ACTOR + 1, 80, 40, 0);
+    fixture.seed_actor(ACTOR + 2, 80, 40, 0);
+    let key = key_for_outcome(&fixture.snapshot(), "mapworks_drift", "risky", true);
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "UPDATE players SET last_match_date=datetime(?1,'unixepoch')",
+            [NOW],
+        )
+        .unwrap();
+    connection.execute(
+        "INSERT INTO dig_actions(guild_id, actor_id, action_type, depth_before, depth_after, jc_delta, detail, created_at)
+         VALUES(?1,?2,'splash_victim',0,0,8,json_object('event_key',?3),?4)",
+        params![GUILD, ACTOR+1, format!("{key}:splash:{}", ACTOR+1), NOW],
+    ).unwrap();
+    assert!(matches!(
+        fixture
+            .service()
+            .resolve_event(request("mapworks_drift", "safe", &key)),
+        Err(DigEventRuntimeError::EventRepository(
+            DigEventRuntimeRepositoryError::IdempotencyConflict
+        ))
+    ));
+    let replay = fixture
+        .service()
+        .resolve_event(request("mapworks_drift", "risky", &key))
+        .unwrap();
+    assert_eq!(replay.splash.unwrap().victims, [(ACTOR + 1, 8)]);
+    assert_eq!(fixture.count_actions(ACTOR + 2, "splash_victim"), 0);
+    assert_eq!(fixture.balance(ACTOR + 1), 80);
+    assert_eq!(fixture.balance(ACTOR + 2), 80);
+}
+
+#[test]
+fn completed_legacy_splash_cannot_acquire_a_new_recipient() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let service = fixture.service();
+    let key = key_for_outcome(&fixture.snapshot(), "io_tether_pact", "risky", true);
+    let event = request("io_tether_pact", "risky", &key);
+    let first = service.resolve_event(event).unwrap();
+    assert!(first.splash.unwrap().victims.is_empty());
+    fixture
+        .connection()
+        .execute(
+            "UPDATE dig_actions SET detail=json_remove(detail,'$.effect_plan') WHERE id=?1",
+            [first.action_id.unwrap()],
+        )
+        .unwrap();
+    fixture.seed_actor(ACTOR + 1, 80, 40, 0);
+    fixture.mark_active_digger(ACTOR + 1);
+    let replay = service.resolve_event(event).unwrap();
+    assert!(!replay.applied_now);
+    assert!(replay.splash.unwrap().victims.is_empty());
+    assert_eq!(fixture.balance(ACTOR + 1), 80);
+}
+
+#[test]
+fn discord_event_recovery_finishes_an_accepted_choice_after_its_prompt_expires() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let service = fixture.service();
+    let action_id = fixture.seed_event_dig_action("helltide_bell");
+    let context = DigEventDeliveryContext::new(ACTOR, GUILD, 42, 77);
+    let action = DigEventActionRequest {
+        discord_id: ACTOR,
+        guild_id: GUILD,
+        dig_action_id: action_id,
+        choice: "safe",
+        now: NOW,
+    };
+    let connection = fixture.connection();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER stop_actor BEFORE INSERT ON dig_actions WHEN NEW.action_type='event'
+         BEGIN SELECT RAISE(ABORT,'interrupted actor'); END;",
+        )
+        .unwrap();
+    assert!(
+        service
+            .resolve_action_event_with_delivery(action, context.clone())
+            .is_err()
+    );
+    connection.execute("DROP TRIGGER stop_actor", []).unwrap();
+    assert!(
+        service
+            .action_presentation(
+                ACTOR,
+                GUILD,
+                action_id,
+                NOW + DIG_EVENT_VIEW_TIMEOUT_SECONDS
+            )
+            .unwrap()
+            .is_none()
+    );
+    let restarted = DigEventRuntimeService::sqlite_with_config(
+        fixture.database.path(),
+        service.config().clone().with_entropy_secret(82),
+    );
+    restarted
+        .recover_pending_event_effects(GUILD, Some(ACTOR + 1), 10)
+        .unwrap();
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 0);
+    restarted
+        .recover_pending_event_effects(GUILD, None, 10)
+        .unwrap();
+    restarted
+        .recover_pending_event_effects(GUILD, None, 10)
+        .unwrap();
+    let deliveries = restarted
+        .pending_event_deliveries(DigEventPendingDeliveryQuery {
+            guild_id: Some(GUILD),
+            discord_id: Some(ACTOR),
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].context, context);
+    assert_eq!(
+        deliveries[0].outcome.resolution.as_ref().unwrap().choice,
+        "safe"
+    );
+    assert_eq!(fixture.count_actions(ACTOR, "event_modifier"), 0);
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM app_kv WHERE key GLOB 'dig:event-effects:*'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn event_effect_recovery_walks_past_a_retained_first_page() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let service = fixture.service();
+    let connection = fixture.connection();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER stop_actor BEFORE INSERT ON dig_actions WHEN NEW.action_type='event'
+         BEGIN SELECT RAISE(ABORT,'interrupted actor'); END;",
+        )
+        .unwrap();
+    for (key, interaction_id) in [("a", 100), ("b", 101), ("c", 102)] {
+        assert!(
+            service
+                .resolve_event_with_delivery(
+                    request("helltide_bell", "safe", key),
+                    DigEventDeliveryContext::new(ACTOR, GUILD, interaction_id, 77)
+                )
+                .is_err()
+        );
+    }
+    connection.execute_batch(
+        "DROP TRIGGER stop_actor;
+         CREATE TRIGGER retain_first BEFORE INSERT ON dig_actions WHEN NEW.action_type='event' AND json_extract(NEW.detail,'$.event_key')='a'
+         BEGIN SELECT RAISE(ABORT,'first claim unavailable'); END;",
+    ).unwrap();
+    assert!(
+        service
+            .recover_pending_event_effects(GUILD, None, 1)
+            .is_err()
+    );
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 2);
+    connection.execute("DROP TRIGGER retain_first", []).unwrap();
+    service
+        .recover_pending_event_effects(GUILD, None, 1)
+        .unwrap();
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 3);
+}
+
+#[test]
+fn missing_actor_retires_pending_event_after_wallet_reset() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let service = fixture.service();
+    let repository = DigEventRuntimeRepository::new(fixture.database.path());
+    let connection = fixture.connection();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER stop_actor BEFORE INSERT ON dig_actions WHEN NEW.action_type='event'
+         BEGIN SELECT RAISE(ABORT,'interrupted actor'); END;",
+        )
+        .unwrap();
+    assert!(
+        service
+            .resolve_event_with_delivery(
+                request("helltide_bell", "safe", "reset"),
+                DigEventDeliveryContext::new(ACTOR, GUILD, 42, 77)
+            )
+            .is_err()
+    );
+    assert!(
+        service
+            .recover_pending_event_effects(GUILD, None, 10)
+            .is_err()
+    );
+    assert_eq!(
+        repository
+            .pending_event_effects(GUILD, None, "", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    connection
+        .execute(
+            "DELETE FROM players WHERE guild_id=?1 AND discord_id=?2",
+            params![GUILD, ACTOR],
+        )
+        .unwrap();
+    service
+        .recover_pending_event_effects(GUILD, None, 10)
+        .unwrap();
+    assert!(
+        repository
+            .pending_event_effects(GUILD, None, "", 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 0);
 }
 
 #[test]
@@ -1051,8 +1452,14 @@ fn burn_splash_scales_actor_payout_from_actual_destroyed_jc() {
     assert!(resolution.economy_gross_jc < 59);
     let victim_balance = fixture.balance(ACTOR + 1);
 
-    let retry = service.resolve_event(event_request).expect("burn retry");
+    let mut config = service.config().clone();
+    config.minigame_jc_delta_scale = 2.0;
+    let restarted = DigEventRuntimeService::sqlite_with_config(fixture.database.path(), config);
+    let retry = restarted.resolve_event(event_request).expect("burn retry");
     assert!(!retry.applied_now);
+    let replayed = retry.resolution.unwrap();
+    assert_eq!(replayed.splash_payout_ratio, resolution.splash_payout_ratio);
+    assert_eq!(replayed.jc, resolution.jc);
     assert_eq!(fixture.balance(ACTOR + 1), victim_balance);
 }
 
@@ -1626,24 +2033,30 @@ fn splash_replay_reuses_victims_debited_before_their_audit_row_was_written() {
     let stolen = 200 - fixture.balance(first_richest);
     assert!(stolen > 0);
 
-    // Simulate the crash window: the debit and its hostile_loss_events row are
-    // committed, but the dig_actions audit row is not.
+    // A legacy transfer could commit before the victim and thief audits,
+    // before plans existed to record the selected branch.
     fixture
         .connection()
-        .execute(
-            "DELETE FROM dig_actions WHERE action_type='splash_victim'",
-            [],
+        .execute_batch(
+            "DELETE FROM dig_actions WHERE action_type IN ('splash_victim','splash_thief');
+                        DELETE FROM app_kv WHERE key GLOB 'dig:event-effects:*';
+                        DROP TRIGGER reject_event_actor;",
         )
-        .expect("drop the audit row");
-    fixture
-        .connection()
-        .execute("DROP TRIGGER reject_event_actor", [])
-        .expect("remove actor failure");
-
-    service
+        .unwrap();
+    let mut config = service.config().clone();
+    config.minigame_jc_delta_scale = 2.0;
+    let restarted = DigEventRuntimeService::sqlite_with_config(fixture.database.path(), config);
+    assert!(matches!(
+        restarted.resolve_event(request("crow_snipe", "safe", &key)),
+        Err(DigEventRuntimeError::EventRepository(
+            DigEventRuntimeRepositoryError::IdempotencyConflict
+        ))
+    ));
+    let recovered = restarted
         .resolve_event(event_request)
         .expect("restart recovery");
-
+    assert_eq!(recovered.splash.unwrap().victims, [(first_richest, stolen)]);
+    assert_eq!(fixture.balance(first_richest), 200 - stolen);
     assert_eq!(
         fixture.balance(runner_up),
         195,
@@ -1665,6 +2078,26 @@ fn event_loss_takes_the_balance_but_never_pushes_into_debt() {
         assert!(outcome.success && outcome.applied_now);
         assert_eq!(resolution.jc, expected_jc, "balance {balance}");
         assert_eq!(fixture.balance(ACTOR), balance + expected_jc);
+        let event = request("grenths_tithe", "safe", "event:tithe:debt");
+        let duplicate = fixture.service().resolve_event(event).unwrap();
+        assert_eq!(duplicate.resolution.unwrap().jc, expected_jc);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE players SET jopacoin_balance=100 WHERE discord_id=?1 AND guild_id=?2",
+                params![ACTOR, GUILD],
+            )
+            .unwrap();
+        let delivered = fixture
+            .service()
+            .resolve_event_with_delivery(
+                event,
+                DigEventDeliveryContext::new(ACTOR, GUILD, 512, 801),
+            )
+            .unwrap();
+        assert_eq!(delivered.resolution.unwrap().jc, expected_jc);
+        assert_eq!(delivered.balance_after, balance + expected_jc);
+        assert_eq!(fixture.balance(ACTOR), 100);
     }
 }
 

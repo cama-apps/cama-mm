@@ -425,6 +425,7 @@ CREATE TABLE economy_daily_events (
                 ends_at INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 reminder_announced_at INTEGER, announced_at INTEGER,
+                includes_deadlock_stock INTEGER NOT NULL DEFAULT 1,
                 UNIQUE(guild_id, event_date)
             );
 
@@ -446,6 +447,7 @@ CREATE TABLE economy_daily_snapshots (
                 monetary_stock INTEGER NOT NULL,
                 annualized_30d REAL,
                 annualized_90d REAL,
+                includes_deadlock_stock INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (guild_id, snapshot_date)
             );
 
@@ -573,6 +575,7 @@ CREATE TABLE "loan_state" (
                 discord_id INTEGER NOT NULL,
                 guild_id INTEGER NOT NULL DEFAULT 0,
                 last_loan_at INTEGER,
+                last_loan_match_id INTEGER NOT NULL DEFAULT 0,
                 total_loans_taken INTEGER DEFAULT 0,
                 total_fees_paid INTEGER DEFAULT 0,
                 negative_loans_taken INTEGER DEFAULT 0,

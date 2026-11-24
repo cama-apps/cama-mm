@@ -96,6 +96,11 @@ fn ensure_sessions_finished(
            WHERE p.discord_id IN (?1,?2) AND g.phase != 'RESOLVED'
          UNION ALL SELECT 'duel' FROM duel_challenges WHERE status IN ('pending','accepted')
            AND (challenger_id IN (?1,?2) OR recipient_id IN (?1,?2))
+         UNION ALL SELECT 'Dig event' FROM app_kv WHERE key GLOB 'dig:event-effects:*'
+           AND (key GLOB ('dig:event-effects:' || ?1 || ':*')
+                OR key GLOB ('dig:event-effects:' || ?2 || ':*')
+                OR EXISTS (SELECT 1 FROM json_each(app_kv.value,'$.effect_plan.recipients') AS recipient
+                           WHERE recipient.value IN (?1,?2)))
          UNION ALL SELECT 'pet brawl' FROM pet_brawls WHERE status IN ('pending','active')
            AND (challenger_id IN (?1,?2) OR recipient_id IN (?1,?2))
          LIMIT 1",

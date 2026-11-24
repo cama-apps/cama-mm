@@ -107,7 +107,7 @@ impl Fixture {
 
 #[derive(Default)]
 struct FakeDiscord {
-    gamba: bool,
+    gamba: Option<bool>,
     members: BTreeSet<i64>,
     edits: Mutex<Vec<(InteractionMessageReceipt, InteractionResponse)>>,
 }
@@ -119,7 +119,8 @@ impl PlayerTriviaDiscordPort for FakeDiscord {
         _guild_id: i64,
         _channel_id: i64,
     ) -> Result<bool, String> {
-        Ok(self.gamba)
+        self.gamba
+            .ok_or_else(|| "channel lookup unavailable".to_owned())
     }
 
     fn player_trivia_non_bot_member_ids(
@@ -441,7 +442,7 @@ fn discord() -> Arc<FakeDiscord> {
 
 fn discord_with_gamba(gamba: bool) -> Arc<FakeDiscord> {
     Arc::new(FakeDiscord {
-        gamba,
+        gamba: Some(gamba),
         members: (USER..USER + 4).collect(),
         edits: Mutex::new(Vec::new()),
     })
@@ -656,6 +657,27 @@ async fn guild_guard_matches_python_copy_and_precedes_no_database_work() {
             .get_last_session_started(USER, GUILD)
             .expect("last session")
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn gamba_lookup_failure_preserves_the_wallet() {
+    let fixture = Fixture::migrated();
+    let before = fixture.balance(USER);
+    let config = config(fixture.database.path(), &[]);
+    let provider = provider(&fixture, &config, Arc::new(FakeDiscord::default()));
+    let result = registry(&provider)
+        .command_handler("playertrivia")
+        .unwrap()
+        .handle(command(USER, None), Arc::new(RecordingResponder::default()))
+        .await;
+
+    assert_eq!(fixture.balance(USER), before);
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("channel lookup unavailable")
     );
 }
 
