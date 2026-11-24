@@ -78,6 +78,8 @@ pub enum RegistrationRepositoryError {
     SteamAlreadyOwned { steam_id: i64, owner_id: i64 },
     #[error("invalid Steam32 account ID {0}")]
     InvalidSteamId(i64),
+    #[error("player registration requires a positive Discord ID, got {0}")]
+    InvalidDiscordId(i64),
     #[error("invalid persisted MMR prompt {nonce}: {value}")]
     InvalidMmrPrompt { nonce: u64, value: String },
 }
@@ -154,6 +156,11 @@ impl RegistrationRepository {
         &self,
         request: &RegisterPlayerRequest<'_>,
     ) -> Result<RegisteredPlayer, RegistrationRepositoryError> {
+        if request.discord_id <= 0 {
+            return Err(RegistrationRepositoryError::InvalidDiscordId(
+                request.discord_id,
+            ));
+        }
         validate_steam_id(request.steam_id)?;
         let guild_id = Self::normalize_guild_id(request.guild_id);
         let mut connection = self.connection()?;
@@ -471,8 +478,9 @@ impl RegistrationRepository {
         guild_id: Option<i64>,
     ) -> Result<Vec<PlayHoursWithTimezone>, RegistrationRepositoryError> {
         let connection = self.connection()?;
-        let mut statement = connection
-            .prepare("SELECT timezone, dota_play_hours FROM players WHERE guild_id=?1")?;
+        let mut statement = connection.prepare(
+            "SELECT timezone, dota_play_hours FROM players WHERE guild_id=?1 AND discord_id>0",
+        )?;
         let rows = statement.query_map(params![Self::normalize_guild_id(guild_id)], |row| {
             let timezone: Option<String> = row.get(0)?;
             let hours_text: Option<String> = row.get(1)?;

@@ -1352,6 +1352,7 @@ CREATE TABLE player_trivia_questions (
                 is_correct INTEGER CHECK(is_correct IN (0, 1)),
                 reward INTEGER NOT NULL DEFAULT 0 CHECK(reward >= 0),
                 answered_at INTEGER,
+                answer_deadline_ms INTEGER,
                 PRIMARY KEY (session_id, question_number),
                 FOREIGN KEY (session_id)
                     REFERENCES player_trivia_sessions(session_id) ON DELETE CASCADE
@@ -1909,6 +1910,9 @@ CREATE INDEX idx_disburse_vote_history_voter
 
 -- index: idx_don_discord_id
 CREATE INDEX idx_don_discord_id ON double_or_nothing_spins(discord_id);
+
+-- index: idx_don_guild_player_time
+CREATE INDEX idx_don_guild_player_time ON double_or_nothing_spins(guild_id, discord_id, spin_time);
 
 -- index: idx_duel_challenger_history
 CREATE INDEX idx_duel_challenger_history ON duel_challenges(guild_id, challenger_id, created_at DESC);

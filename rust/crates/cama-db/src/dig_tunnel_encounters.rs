@@ -106,7 +106,7 @@ fn candidate_ids_on(
         EncounterVictimStrategy::RichestN => {
             "SELECT discord_id
                FROM players
-              WHERE guild_id = ?1 AND discord_id != ?2
+              WHERE guild_id = ?1 AND discord_id > 0 AND discord_id != ?2
                 AND COALESCE(jopacoin_balance, 0) >= 1
               ORDER BY COALESCE(jopacoin_balance, 0) DESC, discord_id
               LIMIT ?4"
@@ -117,7 +117,7 @@ fn candidate_ids_on(
                JOIN players
                  ON players.guild_id = actions.guild_id
                 AND players.discord_id = actions.actor_id
-              WHERE actions.guild_id = ?1 AND actions.actor_id != ?2
+              WHERE actions.guild_id = ?1 AND actions.actor_id > 0 AND actions.actor_id != ?2
                 AND actions.action_type = 'dig' AND actions.created_at >= ?3
               GROUP BY actions.actor_id
               ORDER BY MAX(actions.created_at) DESC, actions.actor_id
@@ -126,7 +126,7 @@ fn candidate_ids_on(
         EncounterVictimStrategy::RandomActive => {
             "SELECT discord_id
                FROM players
-              WHERE guild_id = ?1 AND discord_id != ?2
+              WHERE guild_id = ?1 AND discord_id > 0 AND discord_id != ?2
                 AND last_match_date IS NOT NULL
                 AND CAST(strftime('%s', last_match_date) AS INTEGER) >= ?3
               ORDER BY discord_id
@@ -138,7 +138,7 @@ fn candidate_ids_on(
                JOIN players
                  ON players.guild_id = tunnels.guild_id
                 AND players.discord_id = tunnels.discord_id
-              WHERE tunnels.guild_id = ?1 AND tunnels.discord_id != ?2
+              WHERE tunnels.guild_id = ?1 AND tunnels.discord_id > 0 AND tunnels.discord_id != ?2
                 AND COALESCE(tunnels.depth, 0) > 0
               ORDER BY COALESCE(tunnels.depth, 0) DESC, tunnels.discord_id
               LIMIT ?4"

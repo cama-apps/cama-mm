@@ -709,6 +709,45 @@ fn an_unreadable_year_row_leaves_the_rest_of_wrapped_standing() {
 }
 
 #[test]
+fn annual_bets_reuse_lifetime_settlement_without_charging_last_years_tax_again() {
+    let fixture = Fixture::migrated();
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    let (start, end) = year_timestamps(2026);
+    connection
+        .execute("UPDATE bets SET bet_time=?1 WHERE match_id=1", [start])
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO bets(guild_id,match_id,discord_id,team_bet_on,amount,payout,bet_time)
+        VALUES(42,1,100,'radiant',50,100,?1), (42,1,100,'radiant',50,100,?2)",
+            params![start - 1, end],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO bet_settlement_taxes(match_id,guild_id,discord_id,vanity_tax)
+        VALUES(1,42,100,10)",
+            [],
+        )
+        .unwrap();
+    let sources = WrappedSources::new(&fixture.path);
+    let expected = sources
+        .gambling
+        .get_player_stats(100, Some(42))
+        .unwrap()
+        .unwrap()
+        .degen_score;
+    let raw = sources.load(42, 100, 2026).unwrap().unwrap();
+    assert_eq!(raw.lifetime_degen.unwrap(), expected);
+    let events = raw.activity.gamba.events;
+    assert_eq!(events.len(), 3);
+    assert_eq!((events[0].at, events[0].profit), (start, 120));
+}
+
+#[test]
 fn missing_or_unreadable_profiles_never_show_discord_ids() {
     let fixture = Fixture::migrated();
     let raw = WrappedSources::new(&fixture.path)
@@ -1382,7 +1421,7 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         people: PeopleYear::default(),
         bans: Vec::new(),
         rating_history: Vec::new(),
-        gamba_stats: None,
+        lifetime_degen: None,
         activity: ActivityData::default(),
         hero_art: BTreeMap::new(),
         art: ArtSources::for_assets(&repository_assets()),

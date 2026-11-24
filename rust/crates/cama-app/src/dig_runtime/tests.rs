@@ -1381,7 +1381,7 @@ fn admin_tunnel_mutations_report_missing_and_preserve_permanent_depth() {
 fn flex_projection_normalizes_boss_shapes_titles_and_prestige_badge() {
     let database = fast_migrated_database();
     PlayerRepository::new(database.path())
-        .add(&NewPlayer::new(-9_004, "flex-test", Some(42)))
+        .add(&NewPlayer::new(9_004, "flex-test", Some(42)))
         .expect("insert player through the canonical repository");
     let connection = Connection::open(database.path()).expect("open migrated database");
     connection
@@ -1391,7 +1391,7 @@ fn flex_projection_normalizes_boss_shapes_titles_and_prestige_badge() {
                   prestige_level,streak_days,boss_progress)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![
-                    -9_004_i64,
+                    9_004_i64,
                     42_i64,
                     "The Test Shaft",
                     205_i64,
@@ -1406,7 +1406,7 @@ fn flex_projection_normalizes_boss_shapes_titles_and_prestige_badge() {
     drop(connection);
 
     let flex = DigRuntimeService::sqlite(database.path())
-        .flex_data(-9_004, 42)
+        .flex_data(9_004, 42)
         .expect("flex projection")
         .expect("existing tunnel");
     assert_eq!(flex.tunnel_name, "The Test Shaft");
@@ -1424,11 +1424,11 @@ fn flex_projection_normalizes_boss_shapes_titles_and_prestige_badge() {
         .execute(
             "UPDATE tunnels SET boss_progress=?1
                  WHERE discord_id=?2 AND guild_id=?3",
-            params![r#"{"25":"defeated"}"#, -9_004_i64, 42_i64],
+            params![r#"{"25":"defeated"}"#, 9_004_i64, 42_i64],
         )
         .expect("make boss progress partial");
     let partial = DigRuntimeService::sqlite(database.path())
-        .flex_data(-9_004, 42)
+        .flex_data(9_004, 42)
         .expect("partial flex projection")
         .expect("existing tunnel");
     assert!(partial.titles.is_empty());
@@ -4211,10 +4211,10 @@ fn live_route_plain_dig(route_id: Option<&str>, now: i64) -> super::DigRuntimeOu
 
 /// Python's `choose_route`: one guarded claim per junction, audited once with
 /// the route and layer. Repeating the chosen route is a no-op, another route
-/// is refused, and another guild's junction for the same signed ID is untouched.
+/// is refused, and another guild's junction for the same player is untouched.
 #[test]
 fn route_choice_is_claimed_once_audited_and_guild_scoped() {
-    let (actor, guild, other_guild, now) = (-62_395, 62_396, -62_397, 1_900_097_000);
+    let (actor, guild, other_guild, now) = (62_395, 62_396, -62_397, 1_900_097_000);
     let pending = r#"{"end_depth": 50, "layer": "Stone", "offered": ["shored_passage", "old_supports", "fossil_seam"], "selected": null, "start_depth": 25}"#;
     let database = fast_migrated_database();
     for guild_id in [guild, other_guild] {

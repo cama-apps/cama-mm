@@ -305,7 +305,7 @@ impl ShopRuntimeRepository {
                     glicko_rating, glicko_rd, glicko_volatility,
                     os_mu, os_sigma, COALESCE(jopacoin_balance, 0),
                     lowest_balance_ever, last_double_or_nothing
-             FROM players WHERE guild_id=?1",
+             FROM players WHERE guild_id=?1 AND discord_id>0",
         )?;
         statement
             .query_map([guild_id], map_player)?
@@ -329,30 +329,16 @@ impl ShopRuntimeRepository {
         }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        set_ledger_context(
+        let spent = cama_db_core::shop_purchase::try_spend(
             &transaction,
-            Some(source),
-            Some(discord_id),
-            None,
-            None,
-            Some(reason),
-            None,
+            discord_id,
+            guild_id,
+            amount,
+            source,
+            reason,
         )?;
-        let changed = transaction.execute(
-            "UPDATE players
-             SET jopacoin_balance=COALESCE(jopacoin_balance,0)-?1,
-                 updated_at=CURRENT_TIMESTAMP
-             WHERE discord_id=?2 AND guild_id=?3
-               AND COALESCE(jopacoin_balance,0)>=?1",
-            params![amount, discord_id, guild_id],
-        );
-        clear_ledger_context(&transaction)?;
-        let changed = changed?;
-        if changed == 1 {
-            update_lowest_balance(&transaction, discord_id, guild_id)?;
-        }
         transaction.commit()?;
-        Ok(changed == 1)
+        Ok(spent)
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -808,6 +808,7 @@ async fn terminal_battle_timeout_uses_retained_interaction_followup_receipt() {
         !PetInteractionHandler::advance_battle_timeout_once(
             Arc::clone(&provider.handler.state),
             battle_id,
+            0,
         )
         .await
         .expect("first battle timeout delivery")
@@ -816,6 +817,7 @@ async fn terminal_battle_timeout_uses_retained_interaction_followup_receipt() {
         PetInteractionHandler::advance_battle_timeout_once(
             Arc::clone(&provider.handler.state),
             battle_id,
+            1,
         )
         .await
         .expect("terminal battle timeout delivery")
@@ -890,6 +892,7 @@ async fn move_click_after_battle_ends_is_a_private_notice_not_a_failure() {
         !PetInteractionHandler::advance_battle_timeout_once(
             Arc::clone(&provider.handler.state),
             battle_id,
+            0,
         )
         .await
         .expect("first battle timeout")
@@ -898,6 +901,7 @@ async fn move_click_after_battle_ends_is_a_private_notice_not_a_failure() {
         PetInteractionHandler::advance_battle_timeout_once(
             Arc::clone(&provider.handler.state),
             battle_id,
+            1,
         )
         .await
         .expect("terminal battle timeout")
@@ -939,6 +943,37 @@ async fn move_click_after_battle_ends_is_a_private_notice_not_a_failure() {
         .await
         .expect("a click on an unknown battle is not a handler failure");
     assert_private_inactive_notice(&restarted_click);
+}
+
+#[tokio::test]
+async fn stale_brawl_timeout_leaves_the_new_round_open() {
+    let (_database, provider, _, _) = brawl_fixture();
+    let (battle_id, move_id) = start_fixture_battle(&provider).await;
+    for owner in [OWNER, RECIPIENT] {
+        provider
+            .handler
+            .handle(
+                component_as(move_id.clone(), owner),
+                Arc::new(TestResponder::new(false)),
+            )
+            .await
+            .unwrap();
+    }
+    let state = &provider.handler.state;
+    assert_eq!(
+        PetInteractionHandler::battle_round(state, battle_id),
+        Some(1)
+    );
+    // The timer observed round zero before the players resolved it.
+    assert!(
+        !PetInteractionHandler::advance_battle_timeout_once(Arc::clone(state), battle_id, 0)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        PetInteractionHandler::battle_round(state, battle_id),
+        Some(1)
+    );
 }
 
 #[tokio::test]
@@ -2661,7 +2696,7 @@ fn battle_timeout_window_belongs_to_the_round_not_the_battle() {
     // Its own full window having passed does expire it.
     assert_eq!(
         battle_timeout_step(Some(1), Some(1), turn, turn),
-        BattleTimeoutStep::Fire
+        BattleTimeoutStep::Fire(1)
     );
     // When the players resolve a round themselves, the next one restarts the
     // window rather than inheriting the remainder of the previous one.

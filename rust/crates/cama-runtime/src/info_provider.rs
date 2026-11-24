@@ -1076,8 +1076,7 @@ fn help_embed(
     if is_admin {
         embed = embed.field(
             "🔧 Admin Commands",
-            "`/admin addfake` - Add fake users to lobby for testing\n\
-             `/admin sync` - Force sync commands\n\
+            "`/admin sync` - Force sync commands\n\
              `/admin givecoin` - Give jopacoin to a user\n\
              `/admin setrating` - Set initial rating for a player\n\
              `/enrich match` - Enrich match with OpenDota data\n\

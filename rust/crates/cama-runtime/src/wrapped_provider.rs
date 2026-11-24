@@ -29,7 +29,8 @@ use cama_app::wrapped_story::{
     year_timestamps,
 };
 use cama_db::gambling_stats_repository::{
-    GamblingOutcome, GamblingStatsRepository, GamblingStatsService,
+    DegenScoreBreakdown, GamblingOutcome, GamblingStatsPort, GamblingStatsRepository,
+    GamblingStatsService,
 };
 use cama_db::pet_repository::PetRepository;
 use cama_db::wrapped_activity::{WrappedActivityRepository, YearWindow};
@@ -294,10 +295,13 @@ impl WrappedSources {
                 warn!(%error, target_id, guild_id, "failed to fetch Wrapped rating history");
                 Vec::new()
             });
-        let gamba_stats = self
+        let history = self
             .gambling
-            .get_player_stats(target_id, Some(guild_id))
+            .port()
+            .player_bet_history(target_id, Some(guild_id))
             .map_err(|error| error.to_string())?;
+        let start = history.partition_point(|bet| bet.bet_time < start_ts);
+        let end = history.partition_point(|bet| bet.bet_time < end_ts);
         let activity = self.load_activity(
             guild_id,
             target_id,
@@ -305,7 +309,17 @@ impl WrappedSources {
                 start: start_ts,
                 end: end_ts,
             },
+            &history[start..end],
         )?;
+        let lifetime_degen = if history.is_empty() {
+            None
+        } else {
+            Some(
+                self.gambling
+                    .calculate_degen_score_with_data(target_id, Some(guild_id), Some(history), None)
+                    .map_err(|error| error.to_string())?,
+            )
+        };
         // Gold graphs are read only for the story that draws one.
         let repository = self.wrapped.clone();
         let gold: GoldLookup = Box::new(move |match_id| {
@@ -332,7 +346,7 @@ impl WrappedSources {
             people,
             bans,
             rating_history,
-            gamba_stats,
+            lifetime_degen,
             activity,
             hero_art,
             art: self.art.clone(),
@@ -384,7 +398,7 @@ struct WrappedRawData {
     /// Heroes the opposing team banned in the player's games: hero id, games.
     bans: Vec<(i64, i64)>,
     rating_history: Vec<WrappedRatingPoint>,
-    gamba_stats: Option<cama_db::gambling_stats_repository::GambaStats>,
+    lifetime_degen: Option<DegenScoreBreakdown>,
     activity: ActivityData,
     /// Cached Steam portraits for the player's top heroes, by hero id.
     hero_art: BTreeMap<i64, Vec<u8>>,
@@ -1581,9 +1595,9 @@ fn build_slides(
         .find(|row| row.discord_id == target_id)
         .map_or(0, |row| row.bankruptcy_count);
     let degen = raw
-        .gamba_stats
+        .lifetime_degen
         .as_ref()
-        .map(|stats| (stats.degen_score.total, stats.degen_score.title));
+        .map(|stats| (stats.total, stats.title));
     let mut side = activity_cards(
         &raw.activity,
         degen,

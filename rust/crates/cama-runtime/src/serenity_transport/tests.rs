@@ -14,6 +14,22 @@ use std::thread::JoinHandle;
 
 struct WireTestHandler;
 
+#[test]
+fn matchmaking_regression_send_rejections_are_specific_to_the_destination() {
+    for (status, code) in [
+        (403, 50_013),
+        (403, 50_001),
+        (404, 10_003),
+        (400, 50_083),
+        (403, 160_005),
+    ] {
+        assert!(channel_rejects_message(status, code));
+    }
+    for (status, code) in [(400, 50_035), (403, 40_333), (404, -1), (429, 0), (500, 0)] {
+        assert!(!channel_rejects_message(status, code));
+    }
+}
+
 #[tokio::test]
 async fn wrapped_profiles_keep_archived_names_without_gateway_access() {
     let archive = Arc::new(PlayerNameArchive::default());
@@ -2189,8 +2205,10 @@ type CapturedInteractionRequests = Vec<(String, Option<serde_json::Value>)>;
 
 /// Record each request line and JSON body until a `SENTINEL` connection
 /// arrives, so a missing request fails the assertion instead of hanging. A
-/// DELETE gets 204; anything else gets a message object.
-fn capture_interaction_requests() -> (String, JoinHandle<CapturedInteractionRequests>) {
+/// After the scripted errors, DELETE gets 204 and other requests get a message.
+fn capture_interaction_requests(
+    errors: &'static [(&'static str, i64)],
+) -> (String, JoinHandle<CapturedInteractionRequests>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind interaction capture server");
     let proxy = format!("http://{}", listener.local_addr().expect("capture address"));
     let server = std::thread::spawn(move || {
@@ -2232,7 +2250,13 @@ fn capture_interaction_requests() -> (String, JoinHandle<CapturedInteractionRequ
                 serde_json::from_slice(&request[header_end..header_end + length])
                     .expect("JSON interaction body")
             });
-            if line.starts_with("DELETE") {
+            if let Some((status, code)) = errors.get(captured.len()) {
+                let error = serde_json::json!({"code": code, "message": "fixture error"});
+                let body = error.to_string();
+                write!(
+                    stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                ).unwrap();
+            } else if line.starts_with("DELETE") {
                 write!(
                     stream,
                     "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -2283,14 +2307,14 @@ async fn private_followup_after_public_deferral_deletes_the_original_first() {
             vec![("POST", FOLLOWUP), ("POST", FOLLOWUP)],
         ),
     ] {
-        let (proxy, server) = capture_interaction_requests();
+        let (proxy, server) = capture_interaction_requests(&[]);
         let http = HttpBuilder::new("test-token")
             .application_id(ApplicationId::new(42))
             .proxy(proxy.clone())
             .ratelimiter_disabled(true)
             .build();
         let deferral = PublicDeferral::default();
-        deferral.deferred(deferred_ephemeral);
+        deferral.deferred(deferred_ephemeral).await;
         for &ephemeral in &followups {
             let mut response = InteractionResponse::message("reply");
             if ephemeral {
@@ -2320,5 +2344,53 @@ async fn private_followup_after_public_deferral_deletes_the_original_first() {
         for ((_, body), ephemeral) in posts.iter().zip(&followups) {
             assert_eq!(is_ephemeral(body), *ephemeral);
         }
+    }
+}
+
+#[tokio::test]
+async fn private_followup_retries_public_deferral_cleanup_after_failure() {
+    const DENIED: &[(&str, i64)] = &[("403 Forbidden", 50_013)];
+    const MISSING_ORIGINAL: &[(&str, i64)] =
+        &[("408 Request Timeout", 0), ("404 Not Found", 10_008)];
+    const MISSING_WEBHOOK: &[(&str, i64)] =
+        &[("408 Request Timeout", 0), ("404 Not Found", 10_015)];
+    for (first_is_private, errors, can_retry) in [
+        (true, DENIED, true),
+        (false, DENIED, true),
+        (true, MISSING_ORIGINAL, true),
+        (true, MISSING_WEBHOOK, false),
+    ] {
+        let (proxy, server) = capture_interaction_requests(errors);
+        let http = HttpBuilder::new("test-token")
+            .application_id(ApplicationId::new(42))
+            .proxy(proxy.clone())
+            .ratelimiter_disabled(true)
+            .build();
+        let deferral = PublicDeferral::default();
+        deferral.deferred(false).await;
+        let mut first = InteractionResponse::message("first");
+        first.ephemeral = first_is_private;
+        let (first_result, retry) = tokio::join!(
+            biased;
+            create_interaction_followup(&http, "interaction-token", &deferral, first),
+            create_interaction_followup(&http, "interaction-token", &deferral,
+                InteractionResponse::message("private retry").ephemeral()),
+        );
+        std::net::TcpStream::connect(proxy.trim_start_matches("http://"))
+            .unwrap()
+            .write_all(b"SENTINEL\r\n\r\n")
+            .unwrap();
+        let captured = server.join().unwrap();
+        assert!(first_result.is_err());
+        assert_eq!(retry.is_ok(), can_retry);
+        let methods: Vec<_> = captured
+            .iter()
+            .map(|(line, _)| line.split_whitespace().next().unwrap())
+            .collect();
+        let mut expected = vec![if first_is_private { "DELETE" } else { "POST" }, "DELETE"];
+        if can_retry {
+            expected.push("POST");
+        }
+        assert_eq!(methods, expected);
     }
 }

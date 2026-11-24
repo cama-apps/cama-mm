@@ -62,8 +62,6 @@ fn production_admin_tree_preserves_legacy_leaves_and_adds_dota_controls() {
         "moderation list",
         "moderation history",
         "health",
-        "addfake",
-        "filllobbytest",
         "resetuser",
         "registeruser",
         "sync",
@@ -81,9 +79,8 @@ fn production_admin_tree_preserves_legacy_leaves_and_adds_dota_controls() {
         "removesteamid",
         "setprimarysteam",
         "transferaccount",
-        "seedherogrid",
     ];
-    assert_eq!(actual.len(), 42);
+    assert_eq!(actual.len(), expected.len());
     assert_eq!(
         actual.keys().cloned().collect::<BTreeSet<_>>(),
         expected.into_iter().map(str::to_owned).collect()
@@ -887,39 +884,10 @@ impl AdminDiscordControl for RecordingDiscordControl {
 }
 
 #[derive(Default)]
-struct RecordingLobbyControl {
-    add_fake: Mutex<Vec<AdminFakeLobbyRequest>>,
-    fill_fake: Mutex<Vec<AdminFakeLobbyRequest>>,
-}
+struct RecordingLobbyControl;
 
 #[async_trait]
 impl AdminLobbyControl for RecordingLobbyControl {
-    async fn add_fake_users(
-        &self,
-        request: AdminFakeLobbyRequest,
-    ) -> Result<AdminFakeLobbyResult, String> {
-        self.add_fake.lock().expect("add-fake lock").push(request);
-        Ok(AdminFakeLobbyResult {
-            users_added: request.count,
-            user_names: (1..=request.count)
-                .map(|index| format!("FakeUser{index}"))
-                .collect(),
-            already_at_threshold: None,
-        })
-    }
-
-    async fn fill_lobby(
-        &self,
-        request: AdminFakeLobbyRequest,
-    ) -> Result<AdminFakeLobbyResult, String> {
-        self.fill_fake.lock().expect("fill-fake lock").push(request);
-        Ok(AdminFakeLobbyResult {
-            users_added: 4,
-            user_names: Vec::new(),
-            already_at_threshold: None,
-        })
-    }
-
     async fn eject_suspended_player(
         &self,
         _request: AdminLobbyEjectionRequest,
@@ -931,7 +899,6 @@ impl AdminLobbyControl for RecordingLobbyControl {
 #[derive(Default)]
 struct RecordingMatchControl {
     extensions: Mutex<Vec<AdminExtendBettingRequest>>,
-    seeds: Mutex<Vec<AdminSeedHeroGridRequest>>,
     role_backfills: Mutex<Vec<i64>>,
     role_backfill_result: Mutex<AdminRoleBackfillResult>,
 }
@@ -962,17 +929,6 @@ impl AdminMatchControl for RecordingMatchControl {
             jump_url: Some("https://discord.test/match".to_owned()),
             refreshed_routes: 2,
             refresh_failures: Vec::new(),
-        })
-    }
-
-    async fn seed_hero_grid(
-        &self,
-        request: AdminSeedHeroGridRequest,
-    ) -> Result<AdminSeedHeroGridResult, String> {
-        self.seeds.lock().expect("seed lock").push(request);
-        Ok(AdminSeedHeroGridResult {
-            players_seeded: 20,
-            matches_created: 30,
         })
     }
 }
@@ -1007,7 +963,6 @@ struct ProviderFixture {
     provider: AdminRegistrationProvider,
     discord: Arc<RecordingDiscordControl>,
     transport: Arc<RecordingTransport>,
-    lobby: Arc<RecordingLobbyControl>,
     matches: Arc<RecordingMatchControl>,
     corrections: Arc<RecordingCorrectionControl>,
 }
@@ -1043,7 +998,6 @@ impl ProviderFixture {
             health_calls: AtomicUsize::new(0),
             sync_calls: AtomicUsize::new(0),
         });
-        let lobby = Arc::new(RecordingLobbyControl::default());
         let matches = Arc::new(RecordingMatchControl::default());
         let corrections = Arc::new(RecordingCorrectionControl::default());
         let transport = Arc::new(RecordingTransport::default());
@@ -1061,7 +1015,7 @@ impl ProviderFixture {
                 discord: transport.clone(),
                 discord_control: discord.clone(),
                 reminders: reminders.hooks(),
-                lobby: lobby.clone(),
+                lobby: Arc::new(RecordingLobbyControl),
                 matches: matches.clone(),
                 match_corrections: corrections.clone(),
             },
@@ -1073,7 +1027,6 @@ impl ProviderFixture {
             provider,
             discord,
             transport,
-            lobby,
             matches,
             corrections,
         }
@@ -1709,21 +1662,8 @@ fn test_monitoring_service_uses_git_command_when_env_missing() {
 }
 
 #[tokio::test]
-async fn production_admin_routes_share_lobby_match_and_correction_controls() {
+async fn production_admin_routes_share_match_and_correction_controls() {
     let fixture = ProviderFixture::new();
-    let addfake = fixture
-        .dispatch("addfake", vec![integer_option("count", 3)], 10)
-        .await
-        .last();
-    assert_eq!(
-        addfake.content,
-        "✅ Added 3 fake user(s): FakeUser1, FakeUser2, FakeUser3"
-    );
-    assert_eq!(
-        fixture.lobby.add_fake.lock().expect("add-fake lock").len(),
-        1
-    );
-
     let extension = fixture
         .dispatch(
             "extendbetting",
@@ -1771,45 +1711,6 @@ async fn production_admin_routes_share_lobby_match_and_correction_controls() {
             match_id: 99,
             correct_result: AdminCorrectMatchSide::Dire,
         }
-    );
-}
-
-#[tokio::test]
-async fn test_addfake_works_when_defer_fails() {
-    let fixture = ProviderFixture::new();
-    let responder = Arc::new(RecordingResponder {
-        fail_defer: AtomicBool::new(true),
-        ..RecordingResponder::default()
-    });
-
-    fixture
-        .registry()
-        .command_handler("admin")
-        .expect("Admin handler")
-        .handle(
-            admin_command(
-                "addfake",
-                vec![integer_option("count", 3)],
-                77,
-                ADMIN,
-                Some(MANAGE_GUILD),
-            ),
-            responder.clone(),
-        )
-        .await
-        .expect("mutation survives failed defer");
-
-    assert_eq!(
-        fixture.lobby.add_fake.lock().expect("add-fake lock").len(),
-        1
-    );
-    assert!(
-        responder
-            .responses
-            .lock()
-            .expect("response lock")
-            .is_empty(),
-        "an expired interaction cannot receive a followup"
     );
 }
 

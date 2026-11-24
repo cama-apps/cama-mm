@@ -24,7 +24,7 @@ use rusqlite::{Connection, params};
 const CONFIRMATION: &str = "--disposable-copy";
 const GUILD_ID: i64 = -8_888_888_888_888_741;
 const OTHER_GUILD_ID: i64 = -8_888_888_888_888_740;
-const USER_ID: i64 = -8_888_888_888_888_739;
+const USER_ID: i64 = 8_888_888_888_888_739;
 const DIG_ACTION_ID: i64 = -8_888_888_888_888_738;
 const EVENT_NAME: &str = "Rust disposable Dig/pet flavor read smoke";
 

@@ -484,6 +484,29 @@ impl DiscordDirectMessageError {
     }
 }
 
+/// Result of searching a bounded slice of Discord message history.
+pub enum DeliveryHistoryPage {
+    Found(DiscordMessageReceipt),
+    Exhausted,
+    ContinueBefore(u64),
+}
+
+/// Failure of a keyed delivery. Only a confirmed destination rejection permits
+/// the caller to abandon that destination and retry elsewhere.
+#[derive(Debug, thiserror::Error)]
+pub enum DiscordDeliveryError {
+    #[error("{0}")]
+    Undeliverable(String),
+    #[error("{0}")]
+    Retryable(String),
+}
+
+impl From<String> for DiscordDeliveryError {
+    fn from(message: String) -> Self {
+        Self::Retryable(message)
+    }
+}
+
 /// Whether a frozen Discord destination can still receive a message.
 ///
 /// A durable finalization plan freezes its channel ids at link time, so a
@@ -639,6 +662,17 @@ pub trait DiscordTransport: Send + Sync {
         self.send_message(channel_id, message).await
     }
 
+    async fn send_classified_keyed_message(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        message: DiscordMessage,
+    ) -> Result<DiscordMessageReceipt, DiscordDeliveryError> {
+        self.send_message_with_delivery_key(channel_id, delivery_key, message)
+            .await
+            .map_err(DiscordDeliveryError::Retryable)
+    }
+
     /// Find a bot-authored message carrying the exact delivery nonce.  This
     /// is the recovery fallback for an ambiguous send: Discord may have
     /// accepted a nonce-bearing request even when the HTTP response or the
@@ -652,6 +686,22 @@ pub trait DiscordTransport: Send + Sync {
         _limit: usize,
     ) -> Result<Option<DiscordMessageReceipt>, String> {
         Ok(None)
+    }
+
+    /// Continue an exact nonce lookup past the first page when reconciling
+    /// previously stored deliveries. Simple transports search their entire history.
+    async fn delivery_history_page(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        after_unix_seconds: i64,
+        _before_message_id: Option<u64>,
+        limit: usize,
+    ) -> Result<DeliveryHistoryPage, String> {
+        Ok(self
+            .find_message_by_delivery_key(channel_id, delivery_key, after_unix_seconds, limit)
+            .await?
+            .map_or(DeliveryHistoryPage::Exhausted, DeliveryHistoryPage::Found))
     }
 
     /// Ask Discord whether `channel_id` is permanently undeliverable for this

@@ -66,10 +66,9 @@ const RECALIBRATION_MIN_GAMES: i64 = 5;
 mod dota;
 
 pub use crate::runtime_ports::{
-    AdminExtendBettingRequest, AdminExtendBettingResult, AdminFakeLobbyRequest,
-    AdminFakeLobbyResult, AdminLobbyControl, AdminLobbyEjectionRequest, AdminLobbyEjectionResult,
-    AdminLobbyScope, AdminMatchControl, AdminRoleBackfillResult, AdminSeedHeroGridRequest,
-    AdminSeedHeroGridResult, CorrectionWinRewardControl, CorrectionWinRewardRequest,
+    AdminExtendBettingRequest, AdminExtendBettingResult, AdminLobbyControl,
+    AdminLobbyEjectionRequest, AdminLobbyEjectionResult, AdminLobbyScope, AdminMatchControl,
+    AdminRoleBackfillResult, CorrectionWinRewardControl, CorrectionWinRewardRequest,
     CorrectionWinRewardResult,
 };
 
@@ -377,7 +376,6 @@ impl AdminRegistrationProvider {
                     ai_configured,
                 },
                 rate_limits: Mutex::new(BTreeMap::new()),
-                processed_addfake: Mutex::new(BTreeMap::new()),
             }),
         }
     }
@@ -399,7 +397,6 @@ struct AdminHandler {
     config: AdminCommandConfig,
     monitoring: AdminMonitoring,
     rate_limits: Mutex<BTreeMap<RateLimitKey, VecDeque<Instant>>>,
-    processed_addfake: Mutex<BTreeMap<(u64, u64), Instant>>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -411,11 +408,9 @@ struct RateLimitKey {
 
 #[derive(Clone, Debug)]
 struct AdminCommandContext {
-    interaction_id: u64,
     actor_id: u64,
     _actor_display_name: String,
     guild_id: i64,
-    channel_id: u64,
     member_permissions: Option<u64>,
     path: Vec<String>,
     options: Vec<InteractionOption>,
@@ -444,14 +439,13 @@ impl InteractionHandler for AdminHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let InteractionRequest::Command {
-            interaction_id,
             name,
             user_id,
             user_display_name,
             guild_id,
-            channel_id,
             member_permissions,
             options,
+            ..
         } = request
         else {
             return Err("admin provider accepts slash commands only".into());
@@ -464,11 +458,9 @@ impl InteractionHandler for AdminHandler {
         };
         let (path, options) = nested_command_path(&options)?;
         let context = AdminCommandContext {
-            interaction_id,
             actor_id: user_id,
             _actor_display_name: user_display_name,
             guild_id: signed_id(guild_id, "guild")?,
-            channel_id: channel_id.unwrap_or_default(),
             member_permissions,
             path,
             options,
@@ -773,8 +765,6 @@ impl AdminHandler {
             "moderation list" => self.moderation_list(context, responder).await,
             "moderation history" => self.moderation_history(context, responder).await,
             "health" => self.health(context, responder).await,
-            "addfake" => self.addfake(context, responder).await,
-            "filllobbytest" => self.fill_lobby_test(context, responder).await,
             "resetuser" => self.reset_user(context, responder).await,
             "registeruser" => self.register_user(context, responder).await,
             "sync" => self.sync(context, responder).await,
@@ -794,7 +784,6 @@ impl AdminHandler {
             "addsteamid" => self.add_steam_id(context, responder).await,
             "removesteamid" => self.remove_steam_id(context, responder).await,
             "setprimarysteam" => self.set_primary_steam(context, responder).await,
-            "seedherogrid" => self.seed_hero_grid(context, responder).await,
             _ => Err(format!("unknown /admin route {route:?}").into()),
         }
     }
@@ -880,29 +869,6 @@ impl AdminHandler {
         attempts.push_back(now);
         None
     }
-
-    fn first_addfake_delivery(&self, interaction_id: u64, actor_id: u64) -> bool {
-        let mut processed = self
-            .processed_addfake
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let key = (interaction_id, actor_id);
-        if processed.contains_key(&key) {
-            warn!(
-                interaction_id,
-                actor_id, "duplicate admin addfake delivery ignored"
-            );
-            return false;
-        }
-        let now = Instant::now();
-        processed.insert(key, now);
-        if processed.len() > 100 {
-            processed.retain(|_, handled_at| {
-                now.duration_since(*handled_at) <= Duration::from_secs(300)
-            });
-        }
-        true
-    }
 }
 
 impl AdminHandler {
@@ -926,111 +892,6 @@ impl AdminHandler {
             respond_ephemeral(&responder, format_health_snapshot(&snapshot)).await
         } else {
             Ok(())
-        }
-    }
-
-    async fn addfake(
-        &self,
-        context: AdminCommandContext,
-        responder: Arc<dyn InteractionResponder>,
-    ) -> Result<(), InteractionHandlerError> {
-        if let Some(retry) = self.rate_limit(&context, "addfake", 2, Duration::from_secs(60)) {
-            return respond_ephemeral(
-                &responder,
-                format!("⏳ Please wait {retry}s before using `/admin addfake` again."),
-            )
-            .await;
-        }
-        if !self.first_addfake_delivery(context.interaction_id, context.actor_id) {
-            return Ok(());
-        }
-        let can_respond = try_defer(&responder, true).await;
-        if !self.admin_allowed(&context) {
-            return if can_respond {
-                respond_ephemeral(&responder, ADMIN_DENIED).await
-            } else {
-                Ok(())
-            };
-        }
-        let count = integer(&context.options, "count").unwrap_or(1);
-        if !(1..=10).contains(&count) {
-            return if can_respond {
-                respond_ephemeral(&responder, "❌ Count must be between 1 and 10.").await
-            } else {
-                Ok(())
-            };
-        }
-        let result = self
-            .ports
-            .lobby
-            .add_fake_users(AdminFakeLobbyRequest {
-                interaction_id: context.interaction_id,
-                guild_id: context.guild_id,
-                channel_id: context.channel_id,
-                count: usize::try_from(count)
-                    .map_err(|_| "validated fake-user count is negative")?,
-            })
-            .await;
-        if !can_respond {
-            return Ok(());
-        }
-        match result {
-            Ok(result) => {
-                respond_ephemeral(
-                    &responder,
-                    format!(
-                        "✅ Added {} fake user(s): {}",
-                        result.users_added,
-                        result.user_names.join(", ")
-                    ),
-                )
-                .await
-            }
-            Err(message) => respond_ephemeral(&responder, format!("❌ {message}")).await,
-        }
-    }
-
-    async fn fill_lobby_test(
-        &self,
-        context: AdminCommandContext,
-        responder: Arc<dyn InteractionResponder>,
-    ) -> Result<(), InteractionHandlerError> {
-        if !self.admin_allowed(&context) {
-            return respond_ephemeral(&responder, "❌ Admin only command.").await;
-        }
-        defer(&responder, true).await?;
-        let result = self
-            .ports
-            .lobby
-            .fill_lobby(AdminFakeLobbyRequest {
-                interaction_id: context.interaction_id,
-                guild_id: context.guild_id,
-                channel_id: context.channel_id,
-                count: 0,
-            })
-            .await;
-        match result {
-            Ok(AdminFakeLobbyResult {
-                already_at_threshold: Some((current, threshold)),
-                ..
-            }) => {
-                respond_ephemeral(
-                    &responder,
-                    format!("✅ Lobby already has {current}/{threshold} players."),
-                )
-                .await
-            }
-            Ok(result) => {
-                respond_ephemeral(
-                    &responder,
-                    format!(
-                        "✅ Added {} fake user(s) to fill lobby.",
-                        result.users_added
-                    ),
-                )
-                .await
-            }
-            Err(message) => respond_ephemeral(&responder, format!("❌ {message}")).await,
         }
     }
 
@@ -2722,38 +2583,6 @@ impl AdminHandler {
         .await
     }
 
-    async fn seed_hero_grid(
-        &self,
-        context: AdminCommandContext,
-        responder: Arc<dyn InteractionResponder>,
-    ) -> Result<(), InteractionHandlerError> {
-        if !self.admin_allowed(&context) {
-            return respond_ephemeral(&responder, "❌ Admin only command.").await;
-        }
-        defer(&responder, true).await?;
-        let result = self
-            .ports
-            .matches
-            .seed_hero_grid(AdminSeedHeroGridRequest {
-                guild_id: context.guild_id,
-                actor_id: signed_id(context.actor_id, "actor")?,
-            })
-            .await;
-        match result {
-            Ok(result) => {
-                respond_ephemeral(
-                    &responder,
-                    format!(
-                        "✅ Seeded {} players and {} enriched matches.\nRun `/herogrid source:All Players min_games:1` to see the grid.",
-                        result.players_seeded, result.matches_created
-                    ),
-                )
-                .await
-            }
-            Err(message) => respond_ephemeral(&responder, format!("❌ {message}")).await,
-        }
-    }
-
     async fn correct_match(
         &self,
         context: AdminCommandContext,
@@ -3380,20 +3209,6 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
             vec![],
         ),
         CommandOptionSpec::subcommand(
-            "addfake",
-            "Add fake users to lobby for testing (Admin only)",
-            vec![option(
-                "count",
-                "Number of fake users to add (1-10)",
-                CommandOptionKind::Integer,
-            )],
-        ),
-        CommandOptionSpec::subcommand(
-            "filllobbytest",
-            "Fill remaining lobby spots with fake users for testing (Admin only)",
-            vec![],
-        ),
-        CommandOptionSpec::subcommand(
             "resetuser",
             "Reset a specific user's account (Admin only)",
             vec![required(
@@ -3600,11 +3415,6 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                     CommandOptionKind::Integer,
                 ),
             ],
-        ),
-        CommandOptionSpec::subcommand(
-            "seedherogrid",
-            "Seed fake players with enriched match data for /herogrid testing (Admin only)",
-            vec![],
         ),
     ]
 }

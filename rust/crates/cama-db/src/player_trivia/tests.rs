@@ -121,6 +121,32 @@ fn start_persists_immutable_snapshot_and_enforces_cooldown() {
 }
 
 #[test]
+fn publication_deadline_survives_reload_and_duplicate_delivery() {
+    let fixture = Fixture::migrated();
+    let repo = &fixture.repository;
+    let id = repo
+        .try_start_session(USER, GUILD, &questions(), 100, 0, true)
+        .unwrap()
+        .unwrap();
+    let deadline = |timeout| {
+        repo.get_session(id)
+            .unwrap()
+            .unwrap()
+            .answer_deadline_ms(timeout)
+    };
+    assert_eq!(deadline(20), 120_000);
+    repo.mark_question_published(id, 1, 140_900).unwrap();
+    repo.mark_question_published(id, 1, 201_000).unwrap();
+    assert_eq!(deadline(30), 140_900);
+    repo.settle_answer(id, 1, 1, 1, 130, &ProfitDeductionPolicy::none())
+        .unwrap()
+        .unwrap();
+    assert_eq!(deadline(20), 150_000);
+    repo.mark_question_published(id, 2, 155_234).unwrap();
+    assert_eq!(deadline(20), 155_234);
+}
+
+#[test]
 fn settlement_is_ordered_idempotent_and_ledger_backed() {
     let fixture = Fixture::migrated();
     let session_id = fixture

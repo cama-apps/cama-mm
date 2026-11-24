@@ -68,11 +68,17 @@ pub fn configure(
             continue;
         }
         let mut payload: Value = serde_json::from_str(&raw).map_err(invalid)?;
-        let retained = routing.as_ref().is_some_and(|policy| {
-            policy.guild_ids.contains(&guild)
-                && payload.get(ACCOUNT_KEY).and_then(Value::as_str)
-                    == Some(policy.account_key.as_str())
-        });
+        let retired_player = ["radiant_team_ids", "dire_team_ids"]
+            .iter()
+            .filter_map(|key| payload[*key].as_array())
+            .flatten()
+            .any(|id| id.as_i64().is_some_and(|id| id <= 0));
+        let retained = !retired_player
+            && routing.as_ref().is_some_and(|policy| {
+                policy.guild_ids.contains(&guild)
+                    && payload.get(ACCOUNT_KEY).and_then(Value::as_str)
+                        == Some(policy.account_key.as_str())
+            });
         if !retained && payload.get(ACCOUNT_KEY).is_some() {
             // Tombstone outside the hashed Draft document. Re-enabling the
             // same config must never resurrect a withdrawn reservation.
@@ -85,7 +91,9 @@ pub fn configure(
         if retained && !withdrawn(&transaction, guild, pending)? {
             continue;
         }
-        let reason = if payload.get(ACCOUNT_KEY).is_some() {
+        let reason = if retired_player {
+            "invalid_roster"
+        } else if payload.get(ACCOUNT_KEY).is_some() {
             "hosting_unavailable"
         } else {
             "legacy_pending"

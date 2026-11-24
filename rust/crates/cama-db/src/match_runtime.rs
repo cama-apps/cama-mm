@@ -141,12 +141,23 @@ impl Default for PendingMatchState {
 }
 
 impl PendingMatchState {
+    #[must_use]
+    pub fn has_retired_participant(&self) -> bool {
+        self.radiant_team_ids
+            .iter()
+            .chain(&self.dire_team_ids)
+            .any(|id| *id <= 0)
+    }
+
     /// Whether this pending match still accepts a wager at `now_unix`.
     ///
     /// Every match, bot-hosted or not, uses the timed window that starts at
     /// the shuffle. Dota hosting never opens, pauses, or closes it.
     #[must_use]
     pub fn betting_open(&self, now_unix: i64) -> bool {
+        if self.has_retired_participant() {
+            return false;
+        }
         if self
             .extra
             .get("draft_setup_complete")

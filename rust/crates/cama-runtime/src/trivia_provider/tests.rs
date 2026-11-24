@@ -362,6 +362,68 @@ fn trivia_command() -> InteractionRequest {
     }
 }
 
+#[tokio::test]
+async fn trivia_start_schedules_the_opted_in_players_claimed_cooldown() {
+    use cama_app::reminders::{GuildId, ReminderKind, ReminderTaskKey, UserId};
+    for is_admin in [false, true] {
+        let fixture = MigratedFixture::new();
+        fixture.connection().execute(
+            "INSERT INTO reminder_preferences(discord_id,guild_id,trivia_enabled,updated_at) VALUES (?1,?2,1,0)",
+            (FLOW_USER,FLOW_GUILD),
+        ).unwrap();
+        let config = flow_config();
+        let hooks = crate::ReminderRegistrationProvider::new(
+            &fixture.path,
+            &config,
+            Arc::new(crate::SerenityDiscordTransport::new()),
+        )
+        .hooks();
+        let cache = tempfile::tempdir().unwrap();
+        let provider = TriviaRegistrationProvider::from_catalog(
+            &fixture.path,
+            flow_catalog(cache.path()),
+            TriviaImageCache::new(cache.path()).unwrap(),
+            &config,
+            fixture.vanity_tax(),
+            Arc::new(FlowDiscord::default()),
+            Some(hooks.clone()),
+        )
+        .unwrap();
+        let mut command = trivia_command();
+        if is_admin
+            && let InteractionRequest::Command {
+                member_permissions, ..
+            } = &mut command
+        {
+            *member_permissions = Some(ADMINISTRATOR_PERMISSION);
+        }
+        flow_registry(&provider)
+            .command_handler("trivia")
+            .unwrap()
+            .handle(command, Arc::new(FlowResponses::with_receipt(500)))
+            .await
+            .unwrap();
+        let claimed = provider
+            .handler
+            .state
+            .trivia
+            .get_last_trivia_session(FLOW_USER, Some(FLOW_GUILD))
+            .unwrap();
+        assert_eq!(claimed.is_some(), !is_admin);
+        let scheduled = hooks
+            .test_task_snapshot(ReminderTaskKey::new(
+                UserId::new(FLOW_USER),
+                GuildId::new(FLOW_GUILD),
+                ReminderKind::Trivia,
+            ))
+            .unwrap();
+        assert_eq!(
+            scheduled.map(|task| task.due_at),
+            claimed.map(|now| now + config.values.trivia_cooldown_seconds)
+        );
+    }
+}
+
 fn trivia_component(interaction_id: u64, question: i64, choice: usize) -> InteractionRequest {
     InteractionRequest::Component {
         interaction_id,

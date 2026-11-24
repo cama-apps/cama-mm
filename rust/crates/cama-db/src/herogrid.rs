@@ -250,7 +250,7 @@ impl HeroGridRepository {
             "SELECT mp.discord_id, COUNT(*) AS total_games
                FROM match_participants mp
                JOIN matches m ON mp.match_id = m.match_id
-              WHERE m.guild_id = ?1
+              WHERE m.guild_id = ?1 AND mp.discord_id > 0
                 AND mp.hero_id IS NOT NULL
                 AND mp.hero_id > 0
               GROUP BY mp.discord_id
@@ -301,24 +301,26 @@ fn stable_unique(values: &[i64]) -> Vec<i64> {
 }
 
 fn decode_id_list(payload: &str) -> Vec<i64> {
-    serde_json::from_str::<Vec<i64>>(payload).unwrap_or_default()
+    let mut ids = serde_json::from_str::<Vec<i64>>(payload).unwrap_or_default();
+    ids.retain(|id| *id > 0);
+    ids
 }
 
 fn decode_pending_teams(payload: &str) -> Option<HeroGridTeams> {
     let payload = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    let side = |key: &str| {
+        payload
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_i64)
+            .filter(|id| *id > 0)
+            .collect()
+    };
     Some(HeroGridTeams {
-        radiant: payload
-            .get("radiant_team_ids")
-            .and_then(serde_json::Value::as_array)
-            .map_or_else(Vec::new, |ids| {
-                ids.iter().filter_map(serde_json::Value::as_i64).collect()
-            }),
-        dire: payload
-            .get("dire_team_ids")
-            .and_then(serde_json::Value::as_array)
-            .map_or_else(Vec::new, |ids| {
-                ids.iter().filter_map(serde_json::Value::as_i64).collect()
-            }),
+        radiant: side("radiant_team_ids"),
+        dire: side("dire_team_ids"),
     })
 }
 
@@ -530,6 +532,10 @@ mod tests {
         }
         let match_id = fixture.record_match(&[200], &[100], 1, GUILD);
         fixture.enrich(match_id, 200, 2);
+
+        let legacy = fixture.record_match(&[-9], &[0], 1, GUILD);
+        fixture.enrich(legacy, -9, 3);
+        fixture.enrich(legacy, 0, 1);
 
         assert_eq!(
             fixture

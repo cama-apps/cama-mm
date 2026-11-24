@@ -127,6 +127,21 @@ fn test_set_roles_unregistered_player_raises() {
 }
 
 #[test]
+fn nonpositive_discord_ids_cannot_register_or_claim_a_steam_id() {
+    let fixture = Fixture::new();
+    for id in [-1, 0] {
+        assert!(
+            fixture
+                .repository
+                .register_player_atomic(&request(id, 123_456))
+                .is_err()
+        );
+        assert!(!fixture.repository.player_exists(id, Some(GUILD)).unwrap());
+        assert_eq!(fixture.primary_steam_id(id), None);
+    }
+}
+
+#[test]
 fn test_duplicate_steam_id_rejected_across_players() {
     let fixture = Fixture::new();
     fixture
@@ -498,6 +513,7 @@ fn test_dota_play_hours_guild_scoped() {
 
     let fixture = Fixture::new();
     fixture.add_player(4, None);
+    fixture.add_player(-1, None);
     fixture
         .connection()
         .execute(
@@ -524,6 +540,13 @@ fn test_dota_play_hours_guild_scoped() {
             .dota_play_hours_of(4, Some(SECONDARY_GUILD))
             .expect("read secondary play hours"),
         None
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .play_hours_for_guild(Some(GUILD))
+            .unwrap(),
+        vec![(None, Some(vec![18]))]
     );
 }
 

@@ -41,7 +41,7 @@ use crate::dig_provider::{
     DigPublicSendFailure, DigPublicSendFailureKind,
 };
 use crate::discord_transport::{
-    DiscordChannelName, DiscordDestinationStatus, DiscordDirectMessageError,
+    DiscordChannelName, DiscordDeliveryError, DiscordDestinationStatus, DiscordDirectMessageError,
     DiscordDirectMessageErrorKind, DiscordEmoji, DiscordGuildMemberRenderNames,
     DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt, DiscordMessageSnapshot,
     DiscordPresence, DiscordTransport, DiscordUserSnapshot, ScoutChannelPort,
@@ -2072,21 +2072,27 @@ struct CommandResponder {
 /// follow-up therefore deletes the public original first, after which a
 /// follow-up is a new message that honors the flag.
 #[derive(Default)]
-struct PublicDeferral(AtomicBool);
+struct PublicDeferral(tokio::sync::Mutex<bool>);
 
 impl PublicDeferral {
-    fn deferred(&self, ephemeral: bool) {
-        self.0.store(!ephemeral, Ordering::Release);
+    async fn deferred(&self, ephemeral: bool) {
+        *self.0.lock().await = !ephemeral;
     }
 
-    fn resolve(&self) {
-        self.0.store(false, Ordering::Release);
-    }
-
-    /// Whether this follow-up must delete the public original first. The
-    /// first follow-up resolves the original either way.
-    fn claim_for_followup(&self, ephemeral: bool) -> bool {
-        self.0.swap(false, Ordering::AcqRel) && ephemeral
+    async fn edit_original(
+        &self,
+        http: &Http,
+        token: &str,
+        response: InteractionResponse,
+    ) -> serenity::Result<()> {
+        let mut pending = self.0.lock().await;
+        if is_component_only_edit(&response) {
+            edit_component_only_original(http, token, response).await?;
+        } else {
+            serenity::builder::Builder::execute(edit_response(response), http, token).await?;
+        }
+        *pending = false;
+        Ok(())
     }
 }
 
@@ -2096,12 +2102,26 @@ async fn create_interaction_followup(
     deferral: &PublicDeferral,
     response: InteractionResponse,
 ) -> serenity::Result<serenity::all::Message> {
-    if deferral.claim_for_followup(response.ephemeral)
-        && let Err(error) = http.delete_original_interaction_response(token).await
-    {
-        warn!(%error, "could not delete the public deferral before a private follow-up");
+    // A concurrent follow-up must wait for Discord to confirm what happened
+    // to the public placeholder before sending any private content.
+    let mut pending = deferral.0.lock().await;
+    if *pending && response.ephemeral {
+        // An earlier DELETE can reach Discord while its response is lost.
+        // Unknown Message on this exact endpoint confirms the original is gone.
+        match http.delete_original_interaction_response(token).await {
+            Ok(()) => {}
+            Err(serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(
+                ref response,
+            ))) if response.status_code.as_u16() == 404 && response.error.code == 10_008 => {}
+            Err(error) => return Err(error),
+        }
+        *pending = false;
     }
-    serenity::builder::Builder::execute(followup_response(response), http, (None, token)).await
+    let message =
+        serenity::builder::Builder::execute(followup_response(response), http, (None, token))
+            .await?;
+    *pending = false;
+    Ok(message)
 }
 
 impl CommandResponder {
@@ -2168,7 +2188,7 @@ impl InteractionResponder for CommandResponder {
             .map_err(response_error);
         if result.is_ok() {
             self.acknowledged.store(true, Ordering::Release);
-            self.deferral.deferred(ephemeral);
+            self.deferral.deferred(ephemeral).await;
         }
         result
     }
@@ -2227,17 +2247,10 @@ impl InteractionResponder for CommandResponder {
         &self,
         response: InteractionResponse,
     ) -> Result<(), InteractionResponseError> {
-        let result = if is_component_only_edit(&response) {
-            edit_component_only_original(&self.http, &self.interaction.token, response).await
-        } else {
-            self.interaction
-                .edit_response(&self.http, edit_response(response))
-                .await
-        };
-        if result.is_ok() {
-            self.deferral.resolve();
-        }
-        result.map(drop).map_err(response_error)
+        self.deferral
+            .edit_original(&self.http, &self.interaction.token, response)
+            .await
+            .map_err(response_error)
     }
 
     async fn edit_message(
@@ -2599,7 +2612,7 @@ impl InteractionResponder for ComponentResponder {
             .map_err(response_error);
         if result.is_ok() {
             self.acknowledged.store(true, Ordering::Release);
-            self.deferral.deferred(ephemeral);
+            self.deferral.deferred(ephemeral).await;
         }
         result
     }
@@ -2665,17 +2678,10 @@ impl InteractionResponder for ComponentResponder {
         &self,
         response: InteractionResponse,
     ) -> Result<(), InteractionResponseError> {
-        let result = if is_component_only_edit(&response) {
-            edit_component_only_original(&self.http, &self.interaction.token, response).await
-        } else {
-            self.interaction
-                .edit_response(&self.http, edit_response(response))
-                .await
-        };
-        if result.is_ok() {
-            self.deferral.resolve();
-        }
-        result.map(drop).map_err(response_error)
+        self.deferral
+            .edit_original(&self.http, &self.interaction.token, response)
+            .await
+            .map_err(response_error)
     }
 
     async fn edit_message(
@@ -4497,15 +4503,36 @@ impl DiscordTransport for SerenityDiscordTransport {
         delivery_key: &str,
         message: DiscordMessage,
     ) -> Result<DiscordMessageReceipt, String> {
+        self.send_classified_keyed_message(channel_id, delivery_key, message)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn send_classified_keyed_message(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        message: DiscordMessage,
+    ) -> Result<DiscordMessageReceipt, DiscordDeliveryError> {
         let context = self.context()?;
         let channel_id = ChannelId::new(channel_id);
         let sent = channel_id
             .send_message(
-                (&context.cache, context.http.as_ref()),
+                context.http.as_ref(),
                 discord_message_with_delivery_key(&message, delivery_key),
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match &error {
+                serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response))
+                    if channel_rejects_message(
+                        response.status_code.as_u16(),
+                        response.error.code,
+                    ) =>
+                {
+                    DiscordDeliveryError::Undeliverable(error.to_string())
+                }
+                _ => DiscordDeliveryError::Retryable(error.to_string()),
+            })?;
         Ok(DiscordMessageReceipt {
             channel_id: channel_id.get(),
             message_id: sent.id.get(),
@@ -4520,8 +4547,31 @@ impl DiscordTransport for SerenityDiscordTransport {
         after_unix_seconds: i64,
         limit: usize,
     ) -> Result<Option<DiscordMessageReceipt>, String> {
+        use crate::discord_transport::DeliveryHistoryPage;
+        match self
+            .delivery_history_page(channel_id, delivery_key, after_unix_seconds, None, limit)
+            .await?
+        {
+            DeliveryHistoryPage::Found(receipt) => Ok(Some(receipt)),
+            DeliveryHistoryPage::Exhausted => Ok(None),
+            DeliveryHistoryPage::ContinueBefore(_) => Err(format!(
+                "Discord delivery history search reached its {}-message bound before the recovery time boundary",
+                limit.min(500)
+            )),
+        }
+    }
+
+    async fn delivery_history_page(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        after_unix_seconds: i64,
+        before_message_id: Option<u64>,
+        limit: usize,
+    ) -> Result<crate::discord_transport::DeliveryHistoryPage, String> {
+        use crate::discord_transport::DeliveryHistoryPage;
         if limit == 0 {
-            return Ok(None);
+            return Ok(DeliveryHistoryPage::Exhausted);
         }
         let context = self.context()?;
         let channel_id = ChannelId::new(channel_id);
@@ -4533,7 +4583,7 @@ impl DiscordTransport for SerenityDiscordTransport {
             .id
             .get();
         let bounded_limit = limit.min(500);
-        let mut before = None;
+        let mut before = before_message_id.map(MessageId::new);
         let mut inspected = 0usize;
         let mut reached_history_boundary = false;
         while inspected < bounded_limit {
@@ -4566,7 +4616,7 @@ impl DiscordTransport for SerenityDiscordTransport {
                     .as_ref()
                     .is_some_and(|nonce| message_nonce_matches(nonce, delivery_key));
                 if nonce_matches {
-                    return Ok(Some(DiscordMessageReceipt {
+                    return Ok(DeliveryHistoryPage::Found(DiscordMessageReceipt {
                         channel_id: message.channel_id.get(),
                         message_id: message.id.get(),
                         jump_url: message.link(),
@@ -4583,12 +4633,13 @@ impl DiscordTransport for SerenityDiscordTransport {
             }
             before = page.last().map(|message| message.id);
         }
-        if !reached_history_boundary && inspected >= bounded_limit {
-            return Err(format!(
-                "Discord delivery history search reached its {bounded_limit}-message bound before the recovery time boundary"
-            ));
+        if !reached_history_boundary
+            && inspected >= bounded_limit
+            && let Some(before) = before
+        {
+            return Ok(DeliveryHistoryPage::ContinueBefore(before.get()));
         }
-        Ok(None)
+        Ok(DeliveryHistoryPage::Exhausted)
     }
 
     async fn send_thread_reply(
@@ -5379,6 +5430,13 @@ const fn dig_public_send_failure_kind(status: Option<u16>) -> DigPublicSendFailu
         Some(400..=499) if !matches!(status, Some(408 | 429)) => DigPublicSendFailureKind::Rejected,
         _ => DigPublicSendFailureKind::Ambiguous,
     }
+}
+
+/// Discord identifies the channel as unknown, inaccessible, archived or locked.
+/// Other rejections may concern the payload or the bot's wider connection.
+const fn channel_rejects_message(status: u16, discord_code: isize) -> bool {
+    matches!(status, 400 | 403 | 404)
+        && matches!(discord_code, 10_003 | 50_001 | 50_013 | 50_083 | 160_005)
 }
 
 fn discord_destination_status(error: &serenity::Error) -> DiscordDestinationStatus {

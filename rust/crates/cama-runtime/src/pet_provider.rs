@@ -2911,6 +2911,7 @@ impl PetInteractionHandler {
     async fn advance_battle_timeout_once(
         state: Arc<PetRuntimeState>,
         brawl_id: i64,
+        expected_round: u8,
     ) -> Result<bool, String> {
         let Some(battle_lock) = state.battle_lock(brawl_id)? else {
             return Ok(true);
@@ -2925,6 +2926,10 @@ impl PetInteractionHandler {
         let Some(mut view) = view else {
             return Ok(true);
         };
+        if view.round_no != expected_round {
+            // A picker advanced the board while the expired timer waited for its lock.
+            return Ok(false);
+        }
         let worker_state = Arc::clone(&state);
         let (outcome, mut view, recorder) = tokio::task::spawn_blocking(move || {
             let mut commands = worker_state
@@ -3056,8 +3061,9 @@ impl PetInteractionHandler {
                         armed_for = current;
                         round_started = tokio::time::Instant::now();
                     }
-                    BattleTimeoutStep::Fire => {
-                        match Self::advance_battle_timeout_once(Arc::clone(&state), brawl_id).await
+                    BattleTimeoutStep::Fire(round) => {
+                        match Self::advance_battle_timeout_once(Arc::clone(&state), brawl_id, round)
+                            .await
                         {
                             Ok(true) | Err(_) => return,
                             Ok(false) => {
@@ -4287,7 +4293,7 @@ enum BattleTimeoutStep {
     /// The current round still has time left.
     Wait,
     /// The current round's window has expired.
-    Fire,
+    Fire(u8),
 }
 
 /// Decide one tick of the battle timeout.
@@ -4295,25 +4301,21 @@ enum BattleTimeoutStep {
 /// The window belongs to a round, not to the battle: a round that starts late
 /// still gets the full `turn` the embed promises, and a round is never expired
 /// on the strength of time that elapsed during an earlier one.
-const fn battle_timeout_step(
+fn battle_timeout_step(
     armed_for: Option<u8>,
     current: Option<u8>,
     round_elapsed: Duration,
     turn: Duration,
 ) -> BattleTimeoutStep {
-    if current.is_none() {
-        return BattleTimeoutStep::Stop;
-    }
-    // Option<u8> has no const PartialEq, so compare the discriminants directly.
     match (armed_for, current) {
-        (Some(armed), Some(now)) if armed != now => BattleTimeoutStep::Rearm,
-        (None, Some(_)) => BattleTimeoutStep::Rearm,
-        _ => {
-            if round_elapsed.as_secs() < turn.as_secs() {
+        (_, None) => BattleTimeoutStep::Stop,
+        (Some(armed), Some(round)) if armed == round => {
+            if round_elapsed < turn {
                 BattleTimeoutStep::Wait
             } else {
-                BattleTimeoutStep::Fire
+                BattleTimeoutStep::Fire(round)
             }
         }
+        _ => BattleTimeoutStep::Rearm,
     }
 }

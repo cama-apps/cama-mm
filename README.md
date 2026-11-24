@@ -63,7 +63,7 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
      DISCORD_BOT_TOKEN=your_bot_token_here
      ADMIN_USER_IDS=123456789012345678,234567890123456789
      ```
-     If `ADMIN_USER_IDS` is empty, no one is treated as an allowlisted admin for commands like `/admin addfake`.
+     If `ADMIN_USER_IDS` is empty, no one is treated as an allowlisted admin.
    - Optional variables you can include:
      ```
      DB_PATH=/path/to/cama_shuffle.db   # overrides the default sqlite file
@@ -190,13 +190,12 @@ lobby when the draft starts, not when it finishes.
 #### `/draft restart`
 Restart the current Immortal Draft, preserving the lobby. Captains or admins only.
 
-#### `/draft samplecomplete` / `/draft sampleinprogress`
-Admin-only sample draft UI renders for testing.
-
 ### Match Recording
 
 #### `/record`
 Record a match result or abort the match.
+
+Lobby and draft slots require a Discord account. If an older pending match contains a retired test player, select **Abort Match** to free its players.
 
 **Options:**
 - `result`: Choose "Radiant Won", "Dire Won", or "Abort Match"
@@ -320,7 +319,7 @@ List all available commands with descriptions.
 
 **Permissions:** Admin only (requires Administrator or Manage Server permission, or Discord ID in `ADMIN_USER_IDS`)
 
-- `/admin` — Maintenance subcommands: `addfake`, `filllobbytest`, `resetuser`, `registeruser`, `givecoin`, `setrating`, `bumprd`, `adjust rating|rd`, `recalibrate`, `extendbetting`, `correctmatch`, `sync`, `health`, `seedherogrid`, Steam ID management (`addsteamid`, `removesteamid`, `setprimarysteam`), and cooldown resets (`resetbankruptcycooldown`, `resetloancooldown`, `resetrecalibrationcooldown`)
+- `/admin` — Maintenance subcommands: `resetuser`, `registeruser`, `givecoin`, `setrating`, `bumprd`, `adjust rating|rd`, `recalibrate`, `extendbetting`, `correctmatch`, `sync`, `health`, Steam ID management (`addsteamid`, `removesteamid`, `setprimarysteam`), and cooldown resets (`resetbankruptcycooldown`, `resetloancooldown`, `resetrecalibrationcooldown`)
 - `/admin transferaccount lookup:Bismi` — Privately find registrations in this server by stored name, last-seen display name, exact Discord ID, or Steam32/Steam64 ID. Works after the old Discord account leaves or is deleted; shows copyable Discord IDs, Dotabuff links for every linked Steam account, and win/loss counts. Shows up to 10 matches; narrow the search if needed. Lookup requires an ID in `ADMIN_USER_IDS` and does not change any accounts.
 - `/admin transferaccount old_discord_id:<ID> new_account:@replacement` — After verifying the lookup result, transfer the old profile across all servers, preserving ratings, match history, balances, Steam links, progress, and active restrictions. Requires a configured bot admin and an unused replacement account that is a current server member. Joining the server and appearing in a guild-wide tax list are safe. An existing player profile, conflicting player history, or an active match or wager can block recovery. Old private notification routes are cleared; immutable moderation audit events retain their original IDs. Supplying `lookup` always performs a read-only search, even when a replacement is selected.
 - `/admin moderation suspend|lift|status|list|history` — Temporarily block selected lobby kinds by duration, future completed matches, or both, with private reasons and durable history

@@ -501,12 +501,10 @@ mod tests {
             .command(command(
                 "admin",
                 vec![
-                    option("addfake"),
                     option("addsteamid"),
                     option("bumprd"),
                     option("correctmatch"),
                     option("extendbetting"),
-                    option("filllobbytest"),
                     option("givecoin"),
                     option("health"),
                     option("recalibrate"),
@@ -516,7 +514,6 @@ mod tests {
                     option("resetloancooldown"),
                     option("resetrecalibrationcooldown"),
                     option("resetuser"),
-                    option("seedherogrid"),
                     option("setprimarysteam"),
                     option("transferaccount"),
                     option("setrating"),

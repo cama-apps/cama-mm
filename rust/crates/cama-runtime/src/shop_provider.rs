@@ -2600,143 +2600,47 @@ impl ShopInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let now = self.clock.now()?;
-        let Some(player) = self.load_player(context.user_id, context.guild_id).await? else {
-            return followup_ephemeral(
-                &responder,
-                "You need to `/player register` before you can recalibrate.",
-            )
-            .await;
-        };
         let user_id = context.user_id;
         let guild_id = context.guild_id;
+        let today = pacific_mana_day(now)?;
+        let base_cost = self.config.recalibrate_cost;
         let recalibration = self.recalibration.clone();
-        let eligibility = run_blocking("recalibration eligibility", move || {
-            recalibration.can_recalibrate_at(user_id, Some(guild_id), now)
+        let result = run_blocking("rating recalibration purchase", move || {
+            recalibration.purchase_at(user_id, guild_id, now, base_cost, &today)
         })
         .await?;
-        match eligibility {
-            RecalibrationEligibility::NotRegistered => {
+        let success = match result {
+            RecalibrationExecution::Success(success) => success,
+            RecalibrationExecution::InsufficientBalance { cost, balance } => {
                 return followup_ephemeral(
                     &responder,
-                    "You need to `/player register` before you can recalibrate.",
+                    format!("You need **{cost}** {JOPACOIN_EMOTE} to recalibrate but only have **{balance}** {JOPACOIN_EMOTE}."),
                 )
                 .await;
             }
-            RecalibrationEligibility::NoRating => {
-                return followup_ephemeral(
-                    &responder,
-                    "You don't have a rating yet. Play some games first!",
-                )
-                .await;
-            }
-            RecalibrationEligibility::InsufficientGames {
-                games_played,
-                min_games,
-            } => {
-                return followup_ephemeral(
-                    &responder,
-                    format!(
+            RecalibrationExecution::Rejected(reason) => {
+                let message = match reason {
+                    RecalibrationEligibility::NotRegistered => {
+                        "You need to `/player register` before you can recalibrate.".to_owned()
+                    }
+                    RecalibrationEligibility::NoRating => {
+                        "You don't have a rating yet. Play some games first!".to_owned()
+                    }
+                    RecalibrationEligibility::InsufficientGames {
+                        games_played,
+                        min_games,
+                    } => format!(
                         "You need at least {min_games} games to recalibrate (you have {games_played})."
                     ),
-                )
-                .await;
-            }
-            RecalibrationEligibility::OnCooldown { cooldown_ends_at } => {
-                return followup_ephemeral(
-                    &responder,
-                    format!(
+                    RecalibrationEligibility::OnCooldown { cooldown_ends_at } => format!(
                         "Recalibration is on cooldown. You can recalibrate again <t:{cooldown_ends_at}:R>."
                     ),
-                )
-                .await;
+                    RecalibrationEligibility::Allowed { .. } => {
+                        unreachable!("eligible recalibration was rejected")
+                    }
+                };
+                return followup_ephemeral(&responder, message).await;
             }
-            RecalibrationEligibility::Allowed { .. } => {}
-        }
-        let mana = self.mana.clone();
-        let today = pacific_mana_day(now)?;
-        let mana_row = run_blocking("recalibration mana lookup", move || {
-            mana.get_mana(user_id, Some(guild_id))
-        })
-        .await
-        .ok()
-        .flatten();
-        let discount = mana_row
-            .as_ref()
-            .filter(|mana| mana.assigned_date == today && !mana.consumed_today)
-            .and_then(|mana| Land::from_name(&mana.current_land))
-            .filter(|land| *land == Land::Island)
-            .map_or(0.0, |_| 0.10);
-        let cost = ((self.config.recalibrate_cost as f64) * (1.0 - discount)).floor() as i64;
-        let cost = cost.max(1);
-        if player.balance < cost {
-            return followup_ephemeral(
-                &responder,
-                format!(
-                    "You need **{cost}** {JOPACOIN_EMOTE} to recalibrate but only have **{}** {JOPACOIN_EMOTE}.",
-                    player.balance
-                ),
-            )
-            .await;
-        }
-        let repository = self.repository.clone();
-        let spent = run_blocking("recalibration debit", move || {
-            repository.try_spend(
-                user_id,
-                guild_id,
-                cost,
-                "shop_recalibrate",
-                "shop recalibration purchase",
-            )
-        })
-        .await?;
-        if !spent {
-            return followup_ephemeral(
-                &responder,
-                format!("You no longer have {cost} {JOPACOIN_EMOTE} for this."),
-            )
-            .await;
-        }
-        let recalibration = self.recalibration.clone();
-        let result = run_blocking("rating recalibration", move || {
-            recalibration.recalibrate_at(user_id, Some(guild_id), now)
-        })
-        .await;
-        let success = match result {
-            Ok(RecalibrationExecution::Success(success)) => Some(success),
-            Ok(RecalibrationExecution::Rejected(reason)) => {
-                warn!(?reason, user_id, "recalibration rejected after debit");
-                None
-            }
-            Err(error) => {
-                error!(%error, user_id, "recalibration failed after debit");
-                None
-            }
-        };
-        let Some(success) = success else {
-            let repository = self.repository.clone();
-            let _ = run_blocking("recalibration refund", move || {
-                repository.adjust_balance(
-                    user_id,
-                    guild_id,
-                    cost,
-                    Some("shop_recalibrate"),
-                    Some(user_id),
-                    Some("command"),
-                    Some("recalibrate"),
-                    Some("recalibration failed; purchase refunded"),
-                    None,
-                )
-            })
-            .await;
-            return responder
-                .followup(
-                    InteractionResponse::message(
-                        "Recalibration failed unexpectedly. You have been refunded.",
-                    )
-                    .without_mentions(),
-                )
-                .await
-                .map_err(|error| error.to_string().into());
         };
         responder
             .followup(
@@ -2759,7 +2663,7 @@ impl ShopInteractionHandler {
                             )
                             .field(
                                 "Cost",
-                                format!("{} {JOPACOIN_EMOTE}", self.config.recalibrate_cost),
+                                format!("{} {JOPACOIN_EMOTE}", success.cost),
                                 true,
                             ),
                     ),

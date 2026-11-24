@@ -17,7 +17,7 @@ use cama_app::wrapped_story::chapters::{
     QueueStyle, dig_cards, dig_headline_number, gamba_cards, mafia_cards, persona_card, pet_cards,
     story_seed,
 };
-use cama_db::gambling_stats_repository::GamblingStatsPort;
+use cama_db::gambling_stats_repository::BetHistoryEntry;
 use cama_db::wrapped_activity::YearWindow;
 use cama_domain::formatting::{format_grouped, format_grouped_signed};
 use cama_domain::wrapped_activity::{
@@ -181,6 +181,7 @@ impl WrappedSources {
         guild_id: i64,
         target_id: i64,
         window: YearWindow,
+        year_bets: &[BetHistoryEntry],
     ) -> Result<ActivityData, String> {
         let dig = self
             .activity
@@ -199,7 +200,7 @@ impl WrappedSources {
             .gamba_side_year(guild_id, target_id, window)
             .map_err(|error| error.to_string())?;
         let gamba = GambaYear {
-            events: self.gamble_events(guild_id, target_id, window)?,
+            events: self.gamble_events(guild_id, target_id, window, year_bets)?,
             wheel,
             tips,
             rank,
@@ -234,14 +235,13 @@ impl WrappedSources {
         guild_id: i64,
         target_id: i64,
         window: YearWindow,
+        year_bets: &[BetHistoryEntry],
     ) -> Result<Vec<GambleEvent>, String> {
         let port = self.gambling.port();
-        let inside = |at: i64| at >= window.start && at < window.end;
-        let mut events = port
-            .player_bet_history(target_id, Some(guild_id))
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .filter(|bet| inside(bet.bet_time) && bet.outcome != GamblingOutcome::Neutral)
+        let times = window.start..=window.end - 1;
+        let mut events = year_bets
+            .iter()
+            .filter(|bet| bet.outcome != GamblingOutcome::Neutral)
             .map(|bet| GambleEvent {
                 at: bet.bet_time,
                 profit: bet.profit,
@@ -251,10 +251,9 @@ impl WrappedSources {
             })
             .collect::<Vec<_>>();
         events.extend(
-            port.wheel_history(target_id, Some(guild_id))
+            port.wheel_history_between(target_id, Some(guild_id), times.clone())
                 .map_err(|error| error.to_string())?
                 .into_iter()
-                .filter(|spin| inside(spin.spin_time))
                 .map(|spin| GambleEvent {
                     at: spin.spin_time,
                     profit: spin.result,
@@ -264,10 +263,9 @@ impl WrappedSources {
                 }),
         );
         events.extend(
-            port.double_or_nothing_history(target_id, Some(guild_id))
+            port.double_or_nothing_history_between(target_id, Some(guild_id), times)
                 .map_err(|error| error.to_string())?
                 .into_iter()
-                .filter(|spin| inside(spin.spin_time))
                 .map(|spin| {
                     let original = spin.balance_before.saturating_add(spin.cost);
                     GambleEvent {

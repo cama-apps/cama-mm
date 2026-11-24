@@ -2430,6 +2430,39 @@ fn query_plan(connection: &Connection, sql: &str) -> String {
         .join("\n")
 }
 
+#[test]
+fn yearly_spin_windows_use_time_range_indexes_after_install_and_upgrade() {
+    let file = empty_database();
+    for upgrade in [false, true] {
+        if upgrade {
+            Connection::open(file.path()).unwrap().execute_batch(
+                "DROP INDEX idx_don_guild_player_time;
+                 DELETE FROM schema_migrations WHERE name='index_double_or_nothing_player_history';",
+            ).unwrap();
+        }
+        initialize_or_migrate(file.path()).unwrap();
+        let db = Connection::open(file.path()).unwrap();
+        for (table, index) in [
+            ("wheel_spins", "idx_wheel_spins_guild_player_time"),
+            ("double_or_nothing_spins", "idx_don_guild_player_time"),
+        ] {
+            let plan = query_plan(
+                &db,
+                &format!(
+                    "SELECT * FROM {table} WHERE discord_id=?1 AND guild_id=?2 AND spin_time BETWEEN ?3 AND ?4 ORDER BY spin_time, spin_id"
+                ),
+            );
+            assert!(
+                plan.contains(index)
+                    && plan.contains("spin_time>")
+                    && !plan.contains("TEMP B-TREE"),
+                "{plan}"
+            );
+        }
+        assert!(initialize_or_migrate(file.path()).unwrap().was_current());
+    }
+}
+
 fn insert_pending_match(connection: &Connection) -> i64 {
     connection
         .execute(
@@ -3062,6 +3095,40 @@ fn wrapped_item_facts_backfill_from_enrichment_data() {
         );
         assert_eq!(read(&connection, 1), expected);
     }
+}
+
+#[test]
+fn player_trivia_publication_migration_preserves_existing_questions() {
+    let file = empty_database();
+    initialize_or_migrate(file.path()).unwrap();
+    let connection = Connection::open(file.path()).unwrap();
+    connection.execute_batch(
+        "INSERT INTO player_trivia_sessions(session_id,discord_id,started_at) VALUES (1,42,100);
+         INSERT INTO player_trivia_questions(session_id,question_number,question_key,category,question_text,options_json,correct_index)
+         VALUES (1,1,'key','category','question','[]',0);
+         ALTER TABLE player_trivia_questions DROP COLUMN answer_deadline_ms;
+         DELETE FROM schema_migrations WHERE name='add_player_trivia_question_publication';",
+    ).unwrap();
+    assert_eq!(
+        initialize_or_migrate(file.path()).unwrap().newly_applied,
+        ["add_player_trivia_question_publication"]
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT question_text,answer_deadline_ms FROM player_trivia_questions",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+            )
+            .unwrap(),
+        ("question".to_owned(), None)
+    );
+    assert!(
+        initialize_or_migrate(file.path())
+            .unwrap()
+            .newly_applied
+            .is_empty()
+    );
 }
 
 #[test]

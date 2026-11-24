@@ -423,7 +423,7 @@ impl EconomyEventRepository {
                             THEN jopacoin_balance ELSE 0 END),0) AS positive_wallets,
                         COALESCE(SUM(CASE WHEN jopacoin_balance<0
                             THEN -jopacoin_balance ELSE 0 END),0) AS visible_debt
-                 FROM players WHERE guild_id=:gid
+                 FROM players WHERE guild_id=:gid AND discord_id > 0
              ), reserve_totals AS (
                  SELECT COALESCE(total_collected,0) AS reserve_available,
                         COALESCE(next_match_pot,0) AS reserve_next_match_pot,
@@ -769,7 +769,7 @@ impl EconomyEventRepository {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT jopacoin_balance FROM players
-             WHERE guild_id=?1 AND jopacoin_balance>0 ORDER BY jopacoin_balance",
+             WHERE guild_id=?1 AND discord_id>0 AND jopacoin_balance>0 ORDER BY jopacoin_balance",
         )?;
         let balances = statement
             .query_map([Self::normalize_guild_id(guild_id)], |row| row.get(0))?
@@ -1292,7 +1292,7 @@ fn player_balances(
 ) -> Result<Vec<(i64, i64)>, rusqlite::Error> {
     let mut statement = transaction.prepare(
         "SELECT discord_id,jopacoin_balance FROM players
-         WHERE guild_id=?1 AND jopacoin_balance>0 ORDER BY discord_id",
+         WHERE guild_id=?1 AND discord_id > 0 AND jopacoin_balance>0 ORDER BY discord_id",
     )?;
     statement
         .query_map([guild_id], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -1300,8 +1300,9 @@ fn player_balances(
 }
 
 fn player_ids(transaction: &Transaction<'_>, guild_id: i64) -> Result<Vec<i64>, rusqlite::Error> {
-    let mut statement = transaction
-        .prepare("SELECT discord_id FROM players WHERE guild_id=?1 ORDER BY discord_id")?;
+    let mut statement = transaction.prepare(
+        "SELECT discord_id FROM players WHERE guild_id=?1 AND discord_id > 0 ORDER BY discord_id",
+    )?;
     statement.query_map([guild_id], |row| row.get(0))?.collect()
 }
 
@@ -1521,7 +1522,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO players (discord_id,guild_id,name,jopacoin_balance)
-                 VALUES (3,?1,'debt',-25)",
+                 VALUES (3,?1,'debt',-25),(-1,?1,'legacy',10000)",
                 [GUILD],
             )
             .unwrap();
@@ -1709,17 +1710,12 @@ mod tests {
     fn test_distribution_indicators_report_concentration() {
         let file = fixture();
         let connection = Connection::open(file.path()).unwrap();
-        for (index, balance) in [10, 20, 30, 40, 100].into_iter().enumerate() {
+        for (id, balance) in [(-1, 10_000), (1, 10), (2, 20), (3, 30), (4, 40), (5, 100)] {
             connection
                 .execute(
                     "INSERT INTO players (discord_id,guild_id,name,jopacoin_balance)
                      VALUES (?1,?2,?3,?4)",
-                    params![
-                        i64::try_from(index).unwrap() + 1,
-                        GUILD,
-                        format!("player-{index}"),
-                        balance,
-                    ],
+                    params![id, GUILD, format!("player-{id}"), balance],
                 )
                 .unwrap();
         }

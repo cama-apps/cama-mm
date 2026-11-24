@@ -117,9 +117,6 @@ pub struct Values {
     /// Hard-coded shuffler penalty per excluded player.
     pub exclusion_penalty_weight: f64,
     pub first_game_pool_daily_amount: i64,
-    /// Explicit dev-only wheel fixture support. When enabled, negative
-    /// Discord IDs in the database are treated as synthetic guild members.
-    pub gamba_synthetic_members_enabled: bool,
     pub garnishment_percentage: f64,
     pub hostile_loss_min_balance: i64,
     pub house_payout_multiplier: f64,
@@ -465,7 +462,6 @@ impl ApplicationConfig {
                     .i64_list("ENRICHMENT_RETRY_DELAYS", &[1, 5, 20, 60, 180]),
                 exclusion_penalty_weight: 72.0,
                 first_game_pool_daily_amount: p.i64("FIRST_GAME_POOL_DAILY_AMOUNT", 200),
-                gamba_synthetic_members_enabled: p.bool("GAMBA_SYNTHETIC_MEMBERS_ENABLED", false),
                 garnishment_percentage: p.f64("GARNISHMENT_PERCENTAGE", 1.0),
                 hostile_loss_min_balance: p.i64("HOSTILE_LOSS_MIN_BALANCE", 50),
                 house_payout_multiplier: p.f64("HOUSE_PAYOUT_MULTIPLIER", 1.0),
@@ -771,7 +767,6 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
     keys.extend([
         "CAMA_GATEWAY_RECONNECT_INITIAL_SECONDS",
         "CAMA_GATEWAY_RECONNECT_MAX_SECONDS",
-        "GAMBA_SYNTHETIC_MEMBERS_ENABLED",
         "OPENDOTA_API_KEY",
     ]);
     keys.extend(crate::dota_host_config::ENV_KEYS);
@@ -810,7 +805,6 @@ mod tests {
         assert_eq!(config.values.enrichment_history_limit, 500);
         assert_eq!(config.values.enrichment_refresh_interval_ms, 1_250);
         assert_eq!(60_000 / config.values.enrichment_refresh_interval_ms, 48);
-        assert!(!config.values.gamba_synthetic_members_enabled);
         assert_eq!(config.channels.gamba, None);
         assert_eq!(config.channels.mafia, MAFIA_CHANNEL_ID);
         assert_eq!(config.llm.model, DEFAULT_CEREBRAS_MODEL);
@@ -882,15 +876,6 @@ mod tests {
         ]);
         assert_eq!(config.values.jopacoin_win_reward, 10);
         assert_eq!(config.values.jopacoin_per_game, 5);
-    }
-
-    #[test]
-    fn synthetic_gamba_members_are_explicitly_opt_in() {
-        let config = parse(&[
-            ("DISCORD_BOT_TOKEN", "token"),
-            ("GAMBA_SYNTHETIC_MEMBERS_ENABLED", "true"),
-        ]);
-        assert!(config.values.gamba_synthetic_members_enabled);
     }
 
     #[test]

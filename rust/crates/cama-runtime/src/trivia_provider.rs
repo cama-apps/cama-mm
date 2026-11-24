@@ -519,10 +519,13 @@ impl TriviaRuntimeState {
                 );
                 return followup_ephemeral(&responder, message).await;
             }
-        } else if let Some(reminders) = &self.reminder_hooks {
-            reminders
-                .schedule_trivia(user_id, guild_id, now + self.config.cooldown_seconds)
-                .await?;
+            if let Some(reminders) = &self.reminder_hooks
+                && let Err(error) = reminders
+                    .schedule_trivia(user_id, guild_id, now + self.config.cooldown_seconds)
+                    .await
+            {
+                warn!(user_id, guild_id, %error, "failed to schedule trivia cooldown reminder");
+            }
         }
 
         let user_display_name = self.render_player_name(user_id, guild_id).await;

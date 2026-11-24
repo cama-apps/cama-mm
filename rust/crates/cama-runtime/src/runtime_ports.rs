@@ -40,18 +40,6 @@ pub struct AdminExtendBettingResult {
     pub refresh_failures: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AdminSeedHeroGridRequest {
-    pub guild_id: i64,
-    pub actor_id: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AdminSeedHeroGridResult {
-    pub players_seeded: usize,
-    pub matches_created: usize,
-}
-
 /// Additive control surface implemented by the production match provider.
 #[async_trait]
 pub trait AdminMatchControl: Send + Sync {
@@ -59,11 +47,6 @@ pub trait AdminMatchControl: Send + Sync {
         &self,
         request: AdminExtendBettingRequest,
     ) -> Result<AdminExtendBettingResult, String>;
-
-    async fn seed_hero_grid(
-        &self,
-        request: AdminSeedHeroGridRequest,
-    ) -> Result<AdminSeedHeroGridResult, String>;
 
     async fn backfill_derived_roles(
         &self,
@@ -118,21 +101,6 @@ pub trait CorrectionWinRewardControl: Send + Sync {
     ) -> Result<CorrectionWinRewardResult, String>;
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AdminFakeLobbyRequest {
-    pub interaction_id: u64,
-    pub guild_id: i64,
-    pub channel_id: u64,
-    pub count: usize,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdminFakeLobbyResult {
-    pub users_added: usize,
-    pub user_names: Vec<String>,
-    pub already_at_threshold: Option<(usize, usize)>,
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AdminLobbyEjectionResult {
     pub applicable_lobbies: Vec<String>,
@@ -157,16 +125,6 @@ pub struct AdminLobbyEjectionRequest {
 /// Additive control surface implemented by the production lobby provider.
 #[async_trait]
 pub trait AdminLobbyControl: Send + Sync {
-    async fn add_fake_users(
-        &self,
-        request: AdminFakeLobbyRequest,
-    ) -> Result<AdminFakeLobbyResult, String>;
-
-    async fn fill_lobby(
-        &self,
-        request: AdminFakeLobbyRequest,
-    ) -> Result<AdminFakeLobbyResult, String>;
-
     /// Eject the player only from queued lobbies covered by `scope`. A lobby
     /// already starting a match must be left untouched.
     async fn eject_suspended_player(

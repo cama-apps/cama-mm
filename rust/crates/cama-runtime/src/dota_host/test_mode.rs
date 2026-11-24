@@ -1,101 +1,6 @@
 //! Explicit hosting previews, isolated from production launch and settlement.
 
-use std::collections::BTreeSet;
-
 use super::*;
-
-pub(super) fn validate_test_roster(state: &SessionState, bot: u32) -> Result<(), &'static str> {
-    let ids: Vec<_> = state
-        .roster
-        .iter()
-        .map(|p| (p.discord_id, p.radiant))
-        .chain(state.fake_roster.iter().copied())
-        .collect();
-    if ids.len() != 10
-        || ids.iter().filter(|(_, radiant)| *radiant).count() != 5
-        || ids.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>().len() != 10
-        || state.roster.is_empty()
-        || state.fake_roster.iter().any(|(id, _)| *id >= 0)
-        || state.roster.iter().any(|p| {
-            p.discord_id <= 0
-                || p.steam_account_id == 0
-                || p.steam_account_id == u32::MAX
-                || p.steam_account_id == bot
-        })
-        || state
-            .roster
-            .iter()
-            .map(|p| p.steam_account_id)
-            .collect::<BTreeSet<_>>()
-            .len()
-            != state.roster.len()
-    {
-        return Err(
-            "test hosting requires ten distinct entries, five per side, and a linked real player excluding the host",
-        );
-    }
-    Ok(())
-}
-
-pub(super) fn pending_matches_test_roster(
-    pending: &PendingMatchRecord,
-    state: &SessionState,
-) -> bool {
-    let side = |radiant| {
-        state
-            .roster
-            .iter()
-            .filter(|p| p.radiant == radiant)
-            .map(|p| p.discord_id)
-            .chain(
-                state
-                    .fake_roster
-                    .iter()
-                    .filter(move |(_, side)| *side == radiant)
-                    .map(|(id, _)| *id),
-            )
-            .collect::<BTreeSet<_>>()
-    };
-    pending.state.radiant_team_ids.len() == 5
-        && pending.state.dire_team_ids.len() == 5
-        && pending
-            .state
-            .radiant_team_ids
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            == side(true)
-        && pending
-            .state
-            .dire_team_ids
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            == side(false)
-}
-
-fn simulated_roster(state: &SessionState, bot: u32) -> Vec<HostedMatchRosterEntry> {
-    let mut roster = state.roster.clone();
-    let mut used = roster
-        .iter()
-        .map(|p| p.steam_account_id)
-        .collect::<BTreeSet<_>>();
-    used.insert(bot);
-    let mut next = u32::MAX - 1;
-    for &(discord_id, radiant) in &state.fake_roster {
-        while used.contains(&next) {
-            next -= 1;
-        }
-        used.insert(next);
-        roster.push(HostedMatchRosterEntry {
-            discord_id,
-            steam_account_id: next,
-            radiant,
-        });
-        next -= 1;
-    }
-    roster
-}
 
 impl DotaHostWorker {
     pub(super) async fn tick_test_session(
@@ -114,8 +19,10 @@ impl DotaHostWorker {
         {
             return self.review(record, state, "the saved hosting test mode differs from the current worker; restore its mode or cancel using the matching transport", now).await;
         }
-        if let Err(reason) = validate_test_roster(state, self.config.account_id) {
-            return self.review(record, state, reason, now).await;
+        // Retire persisted previews that used placeholder seats. The cancellation
+        // path checks ownership and protects externally launched real lobbies.
+        if dota_lobby::validate_roster(&state.expected(), self.config.account_id).is_err() {
+            state.cancel_requested = true;
         }
         if record.phase == Phase::NeedsReview && !state.cancel_requested {
             if !state.resume_requested {
@@ -126,12 +33,8 @@ impl DotaHostWorker {
             record.last_error = None;
             record.phase = Phase::Creating;
         }
-        let roster = if simulated {
-            simulated_roster(state, self.config.account_id)
-        } else {
-            state.roster.clone()
-        };
-        if simulated {
+        let roster = state.roster.clone();
+        if simulated && !state.cancel_requested {
             port.prepare_simulation(&roster).await?;
         }
         let lobby = port.snapshot().await?;
@@ -173,7 +76,7 @@ impl DotaHostWorker {
             state.cancel_requested = true;
             return self.save(record, state, now).await;
         };
-        if !pending_matches_test_roster(&pending, state) {
+        if !pending_matches_roster(&pending, &roster) {
             return self
                 .review(
                     record,
@@ -278,8 +181,6 @@ impl DotaHostWorker {
         {
             port.move_host_to_pool(lobby.id).await?;
         }
-        // Preview real players must follow their frozen shuffle sides too.
-        // Fake placeholders never need real seats and cannot authorize launch.
         let wrong_side: Vec<_> = roster
             .iter()
             .filter(|player| {
@@ -344,6 +245,6 @@ impl DotaHostWorker {
             }
             return self.announce(record, state, "SIMULATED Dota lobby: seating the frozen test roster and exercising simulated launch. No real match will be started.", now).await;
         }
-        self.announce(record, state, &format!("TEST LOBBY: **{}**. Invited {} real player(s); {} fake Cama entries remain placeholders. {}/{} real players are in the lobby. Choose your assigned shuffle side; {} wrong-side player(s) returned to the player pool. Automatic launch and result recording are disabled. Use `/record` with Abort to clear the pending match and remove this test lobby.", state.settings.name, roster.len(), state.fake_roster.len(), roster.len() - missing.len(), roster.len(), wrong_side.len()), now).await
+        self.announce(record, state, &format!("TEST LOBBY: **{}**. {}/{} players are in the lobby. Choose your assigned shuffle side; {} wrong-side player(s) returned to the player pool. Automatic launch and result recording are disabled. Use `/record` with Abort to clear the pending match and remove this test lobby.", state.settings.name, roster.len() - missing.len(), roster.len(), wrong_side.len()), now).await
     }
 }

@@ -529,8 +529,6 @@ fn provider_fixture() -> (
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
-            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
-                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -670,8 +668,6 @@ fn provider_fixture_with_scheduler(
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
-            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
-                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -726,8 +722,6 @@ async fn populated_lobby_fixture() -> (
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
-            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
-                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -981,8 +975,6 @@ fn provider_recreation_hydrates_state_phase_message_and_deadline() {
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
-            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
-                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -1194,8 +1186,6 @@ fn draft_ready_observer_hydrates_active_rows_idempotently() {
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
-            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
-                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -1274,8 +1264,6 @@ fn draft_ready_observer_ignores_foreign_guild_rows_before_transport() {
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
-            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
-                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -1316,6 +1304,42 @@ fn production_main_composes_draft_sqlite_recovery_and_ready_observer() {
     assert!(source.contains("SqliteDraftStatePersistence::new(&config.db_path)"));
     assert!(source.contains("with_persistence(Arc::new(SqliteDraftStatePersistence"));
     assert!(source.contains("draft_provider.gateway_observer()"));
+}
+
+#[tokio::test]
+async fn matchmaking_regression_retires_unlinked_synthetic_draft_during_hydration() {
+    let (database, _, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then(|| "test-token".into())
+    })
+    .unwrap();
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.player_pool_ids[0] = -1;
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies.clone(),
+        drafts.clone(),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .unwrap();
+    for finalizing in [false, true] {
+        let mut envelope = state.to_snapshot().envelope(1);
+        envelope.finalizing = finalizing;
+        persistence.create_envelope(&envelope).unwrap();
+        assert_eq!(provider.hydrate().await.unwrap(), 0);
+        assert!(persistence.load_all().unwrap().is_empty());
+        assert!(!drafts.has_active_draft(Some(42)));
+    }
+    assert!(
+        lobbies
+            .reserve_players(42, AppLobbyKind::Open, &(1..=10).collect())
+            .await
+    );
 }
 
 #[tokio::test]
@@ -3698,8 +3722,6 @@ fn hydration_skips_unfenced_complete_state_for_recovery() {
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
-            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
-                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),
@@ -3766,16 +3788,7 @@ fn command_surface_includes_admin_finalization_recovery() {
         .iter()
         .map(|option| option.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        [
-            "start",
-            "resume",
-            "restart",
-            "sampleinprogress",
-            "samplecomplete"
-        ]
-    );
+    assert_eq!(names, ["start", "resume", "restart",]);
     assert!(
         options[0]
             .options
@@ -3814,7 +3827,6 @@ fn command_surface_includes_admin_finalization_recovery() {
     assert_eq!(lobby.choices.len(), 2);
     assert!(options[1].options.is_empty());
     assert!(options[2].options.is_empty());
-    assert!(options[3].options.is_empty());
 }
 
 #[test]
@@ -4109,22 +4121,6 @@ fn pending_state_preserves_conditional_exclusions_without_incrementing_them() {
 
     assert_eq!(pending.excluded_conditional_player_ids, vec![12]);
     assert!(pending.half_exclusion_increment_ids.is_empty());
-}
-
-#[test]
-fn sample_fixtures_match_python_negative_ids_and_lifecycle() {
-    let in_progress = sample_state(42, false);
-    assert_eq!(in_progress.session_id, 0);
-    assert_eq!(in_progress.phase, DraftPhase::Drafting);
-    assert_eq!(
-        in_progress.player_pool_ids,
-        vec![-101, -102, -103, -104, -105, -106, -107, -108, -109, -110]
-    );
-    assert_eq!(in_progress.excluded_player_ids, vec![-111, -112]);
-    let complete = sample_state(42, true);
-    assert_eq!(complete.phase, DraftPhase::Complete);
-    assert_eq!(complete.radiant_player_ids.len(), 5);
-    assert_eq!(complete.dire_player_ids.len(), 5);
 }
 
 #[test]
@@ -4560,7 +4556,7 @@ async fn provider_registers_the_shared_manager_and_exact_route() {
 }
 
 #[tokio::test]
-async fn guild_and_admin_gates_match_python_commands() {
+async fn restart_requires_a_guild_and_an_active_draft() {
     let (_database, provider, _drafts, _discord) = provider_fixture();
     let mut builder = RegistryBuilder::default();
     provider.register(&mut builder).expect("register");
@@ -4569,48 +4565,10 @@ async fn guild_and_admin_gates_match_python_commands() {
 
     let no_guild = Arc::new(TestResponder::default());
     handler
-        .handle(
-            draft_request(7, None, None, "sampleinprogress"),
-            no_guild.clone(),
-        )
+        .handle(draft_request(7, None, None, "restart"), no_guild.clone())
         .await
         .expect("no-guild response");
     assert!(no_guild.responses.lock().expect("responses")[0].ephemeral);
-
-    let non_admin = Arc::new(TestResponder::default());
-    handler
-        .handle(
-            draft_request(7, Some(42), None, "sampleinprogress"),
-            non_admin.clone(),
-        )
-        .await
-        .expect("non-admin response");
-    assert_eq!(
-        non_admin.responses.lock().expect("responses")[0].content,
-        "❌ Admin only command."
-    );
-
-    let admin = Arc::new(TestResponder::default());
-    handler
-        .handle(
-            draft_request(9001, Some(42), Some(1 << 3), "sampleinprogress"),
-            admin.clone(),
-        )
-        .await
-        .expect("admin sample");
-    assert_eq!(*admin.defers.lock().expect("defers"), [false]);
-    let response = admin.original_edits.lock().expect("original edits")[0].clone();
-    assert_eq!(response.content, "**[SAMPLE UI - Not a real draft]**");
-    assert!(!response.embeds.is_empty());
-    assert!(!response.components.is_empty());
-    let sample_ids = response
-        .components
-        .iter()
-        .flat_map(|row| row.buttons.iter())
-        .map(|button| button.custom_id.as_str())
-        .collect::<Vec<_>>();
-    assert!(sample_ids.iter().any(|id| id.starts_with("draft_pick_")));
-    assert!(sample_ids.contains(&"draft_pref_radiant"));
 
     let restart = Arc::new(TestResponder::default());
     handler
@@ -4621,112 +4579,6 @@ async fn guild_and_admin_gates_match_python_commands() {
         restart.responses.lock().expect("responses")[0].content,
         "❌ No active draft to restart."
     );
-}
-
-/// Records whether the sample players were already stored when a command
-/// acknowledged its interaction.
-struct AckProbeResponder {
-    database: std::path::PathBuf,
-    stored_at_ack: StdMutex<Vec<bool>>,
-    edits: StdMutex<Vec<InteractionResponse>>,
-}
-
-#[async_trait]
-impl InteractionResponder for AckProbeResponder {
-    async fn respond(
-        &self,
-        _response: InteractionResponse,
-    ) -> Result<(), InteractionResponseError> {
-        Err(InteractionResponseError::new(
-            "sample commands must acknowledge before answering",
-        ))
-    }
-
-    async fn defer(&self, _ephemeral: bool) -> Result<(), InteractionResponseError> {
-        let stored = PlayerRepository::new(&self.database)
-            .get_by_id(-101, Some(42))
-            .expect("read sample player")
-            .is_some();
-        self.stored_at_ack.lock().expect("ack probe").push(stored);
-        Ok(())
-    }
-
-    async fn followup(
-        &self,
-        _response: InteractionResponse,
-    ) -> Result<(), InteractionResponseError> {
-        Ok(())
-    }
-
-    async fn edit_original(
-        &self,
-        response: InteractionResponse,
-    ) -> Result<(), InteractionResponseError> {
-        self.edits.lock().expect("edits").push(response);
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn sample_commands_acknowledge_before_seeding_sample_players() {
-    for subcommand in ["sampleinprogress", "samplecomplete"] {
-        let (database, provider, _drafts, _discord) = provider_fixture();
-        let mut builder = RegistryBuilder::default();
-        provider.register(&mut builder).expect("register");
-        let handler = builder.build().command_handler("draft").expect("handler");
-        let responder = Arc::new(AckProbeResponder {
-            database: database.path().to_path_buf(),
-            stored_at_ack: StdMutex::new(Vec::new()),
-            edits: StdMutex::new(Vec::new()),
-        });
-        handler
-            .handle(
-                draft_request(9001, Some(42), Some(1 << 3), subcommand),
-                responder.clone(),
-            )
-            .await
-            .expect("sample command");
-
-        assert_eq!(
-            *responder.stored_at_ack.lock().expect("ack probe"),
-            [false],
-            "{subcommand} must acknowledge before writing sample players"
-        );
-        assert!(
-            PlayerRepository::new(database.path())
-                .get_by_id(-101, Some(42))
-                .expect("read sample player")
-                .is_some()
-        );
-        assert_eq!(responder.edits.lock().expect("edits").len(), 1);
-    }
-}
-
-#[tokio::test]
-async fn sample_complete_is_admin_only_and_has_no_real_manager_state() {
-    let (_database, provider, drafts, _discord) = provider_fixture();
-    let mut builder = RegistryBuilder::default();
-    provider.register(&mut builder).expect("register");
-    let handler = builder.build().command_handler("draft").expect("handler");
-    let responder = Arc::new(TestResponder::default());
-    handler
-        .handle(
-            draft_request(9001, Some(42), Some(1 << 5), "samplecomplete"),
-            responder.clone(),
-        )
-        .await
-        .expect("sample complete");
-    assert_eq!(*responder.defers.lock().expect("defers"), [false]);
-    let sample = responder.original_edits.lock().expect("original edits")[0].clone();
-    assert!(sample.content.contains("SAMPLE UI"));
-    let fields = &sample.embeds[0].fields;
-    assert!(fields.iter().any(|field| field.name == "🎲 Blind Bets"));
-    assert!(
-        fields
-            .iter()
-            .any(|field| field.value.contains("Auto-liquidity"))
-    );
-    assert!(!drafts.has_active_draft(Some(42)));
 }
 
 #[tokio::test]
@@ -5181,8 +5033,6 @@ fn one_guild_hydration_failure_does_not_block_other_guilds() {
             max_players: 20,
             first_game_pool_daily_amount: 0,
             min_readycheck_players: 0,
-            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
-                .algorithm_fingerprint(),
         },
         Arc::clone(&drafts),
         discord.clone(),

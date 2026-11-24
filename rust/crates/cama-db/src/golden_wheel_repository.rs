@@ -99,7 +99,7 @@ impl GoldenWheelRepository {
             "SELECT discord_id, guild_id, COALESCE(discord_username, ''),
                     COALESCE(jopacoin_balance, 0), COALESCE(wins, 0), glicko_rating
                FROM players
-              WHERE guild_id = ?1 AND COALESCE(jopacoin_balance, 0) >= ?2
+              WHERE guild_id = ?1 AND discord_id > 0 AND COALESCE(jopacoin_balance, 0) >= ?2
               ORDER BY COALESCE(jopacoin_balance, 0) ASC,
                        COALESCE(wins, 0) ASC,
                        COALESCE(glicko_rating, 0) ASC,
@@ -132,7 +132,7 @@ impl GoldenWheelRepository {
             .query_row(
                 "SELECT COALESCE(SUM(jopacoin_balance), 0)
                    FROM players
-                  WHERE guild_id = ?1 AND COALESCE(jopacoin_balance, 0) > 0",
+                  WHERE guild_id = ?1 AND discord_id > 0 AND COALESCE(jopacoin_balance, 0) > 0",
                 [Self::normalize_guild_id(guild_id)],
                 |row| row.get(0),
             )

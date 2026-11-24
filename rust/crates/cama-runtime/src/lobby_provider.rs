@@ -35,7 +35,7 @@ use cama_app::readycheck::{
     ReadycheckCommandRequest, ReadycheckGeneration, ReadycheckPlayerData, ReadycheckService,
     ReadycheckTransportOperation, ready_announcement, readycheck_description,
 };
-use cama_db::core_repositories::{CoreRepositoryError, NewPlayer, PlayerRepository};
+use cama_db::core_repositories::PlayerRepository;
 use cama_db::curfew::CurfewRepository;
 use cama_db::dota_bet_seed_repository::DotaBetSeedRepository;
 use cama_db::moderation::{
@@ -75,8 +75,7 @@ use crate::registration::{
     RegistrationProvider, RegistryBuilder,
 };
 use crate::runtime_ports::{
-    AdminFakeLobbyRequest, AdminFakeLobbyResult, AdminLobbyControl, AdminLobbyEjectionRequest,
-    AdminLobbyEjectionResult, AdminLobbyScope,
+    AdminLobbyControl, AdminLobbyEjectionRequest, AdminLobbyEjectionResult, AdminLobbyScope,
 };
 pub use crate::runtime_ports::{
     ConfirmedLobbyJoin, LobbyGambaSpectator, LobbyJoinObserver, MatchLobbySnapshot,
@@ -116,8 +115,6 @@ pub struct LobbyRuntimeConfig {
     /// A ready check against too small a lobby wastes everyone's react.
     /// Fixed for now rather than a per-guild setting.
     pub min_readycheck_players: usize,
-    /// Fingerprint of the deployment's configured OpenSkill system.
-    pub openskill_algorithm_fingerprint: String,
 }
 
 impl LobbyRuntimeConfig {
@@ -144,7 +141,6 @@ impl LobbyRuntimeConfig {
             max_players: positive_usize(config.values.lobby_max_players, "LOBBY_MAX_PLAYERS")?,
             first_game_pool_daily_amount: config.values.first_game_pool_daily_amount,
             min_readycheck_players: MINIMUM_READYCHECK_PLAYERS,
-            openskill_algorithm_fingerprint: config.migration.openskill.algorithm_fingerprint(),
         })
     }
 }
@@ -759,8 +755,6 @@ impl LobbyRuntimeState {
         let player_ids = player_ids
             .iter()
             .map(|player_id| player_id.0)
-            // Negative IDs belong to synthetic players, not Discord accounts.
-            .filter(|player_id| *player_id >= 0)
             .collect::<Vec<_>>();
         let names = resolve_guild_player_names(
             self.transport.as_ref(),
@@ -905,9 +899,8 @@ impl LobbyRuntimeState {
         let users = notice
             .player_ids
             .iter()
-            .map(|player_id| to_u64(*player_id))
-            .collect::<Result<BTreeSet<_>, _>>()
-            .map_err(ReadycheckNoticePublishError::Fatal)?;
+            .filter_map(|id| u64::try_from(*id).ok().filter(|id| *id != 0))
+            .collect::<BTreeSet<_>>();
         let channel_id = to_u64(notice.channel_id).map_err(ReadycheckNoticePublishError::Fatal)?;
         // Discord's nonce dedup window is only minutes wide, while this outbox
         // is at-least-once: a send whose acknowledgement DELETE was lost (busy
@@ -915,12 +908,11 @@ impl LobbyRuntimeState {
         // History is checked for the durable delivery key first so an
         // already-delivered notice is acknowledged without pinging the pruned
         // players a second time.
-        let already_delivered = self
-            .transport
-            .find_message_by_delivery_key(channel_id, notice.delivery_nonce(), 0, 500)
-            .await
-            .map_err(ReadycheckNoticePublishError::Delivery)?;
-        if already_delivered.is_none() {
+        if !users.is_empty()
+            && !self
+                .pruned_notice_already_delivered(channel_id, &notice)
+                .await?
+        {
             let names = resolve_guild_player_names(
                 self.transport.as_ref(),
                 u64::try_from(scope.guild_id.0).ok(),
@@ -953,6 +945,30 @@ impl LobbyRuntimeState {
             );
         }
         Ok(())
+    }
+
+    async fn pruned_notice_already_delivered(
+        &self,
+        channel_id: u64,
+        notice: &ReadycheckPrunedNotice,
+    ) -> Result<bool, ReadycheckNoticePublishError> {
+        use crate::discord_transport::DeliveryHistoryPage;
+        // Legacy rows have no timestamp. Walk back to the beginning for
+        // those rows so an old acknowledgement loss cannot cause another ping.
+        let since = notice.created_at.unwrap_or(0);
+        let mut before = None;
+        loop {
+            match self
+                .transport
+                .delivery_history_page(channel_id, notice.delivery_nonce(), since, before, 500)
+                .await
+                .map_err(ReadycheckNoticePublishError::Delivery)?
+            {
+                DeliveryHistoryPage::Found(_) => return Ok(true),
+                DeliveryHistoryPage::Exhausted => return Ok(false),
+                DeliveryHistoryPage::ContinueBefore(cursor) => before = Some(cursor),
+            }
+        }
     }
 
     async fn publish_pending_readycheck_pruned_notices_for_scope(
@@ -1532,28 +1548,8 @@ struct LobbyAdminControl {
     state: Arc<LobbyRuntimeState>,
 }
 
-struct FakeLobbyMutation {
-    result: AdminFakeLobbyResult,
-    refresh_display: bool,
-}
-
 #[async_trait]
 impl AdminLobbyControl for LobbyAdminControl {
-    async fn add_fake_users(
-        &self,
-        request: AdminFakeLobbyRequest,
-    ) -> Result<AdminFakeLobbyResult, String> {
-        self.mutate_fake_lobby(request.guild_id, Some(request.count))
-            .await
-    }
-
-    async fn fill_lobby(
-        &self,
-        request: AdminFakeLobbyRequest,
-    ) -> Result<AdminFakeLobbyResult, String> {
-        self.mutate_fake_lobby(request.guild_id, None).await
-    }
-
     async fn eject_suspended_player(
         &self,
         request: AdminLobbyEjectionRequest,
@@ -1618,27 +1614,6 @@ impl AdminLobbyControl for LobbyAdminControl {
 }
 
 impl LobbyAdminControl {
-    async fn mutate_fake_lobby(
-        &self,
-        guild_id: i64,
-        requested_count: Option<usize>,
-    ) -> Result<AdminFakeLobbyResult, String> {
-        let scope = LobbyScope::new(AppGuildId(guild_id), LobbyKind::Open);
-        let operation_lock = self.state.commands.scope_operation_lock(scope);
-        let _guard = operation_lock.lock().await;
-        let state = Arc::clone(&self.state);
-        let mutation = tokio::task::spawn_blocking(move || {
-            mutate_fake_lobby_blocking(&state, scope, requested_count)
-        })
-        .await
-        .map_err(|error| format!("fake-lobby task failed: {error}"))??;
-        if mutation.refresh_display {
-            self.state.sync_ready_lobby(scope);
-            self.best_effort_display_refresh(scope, "fake-user").await;
-        }
-        Ok(mutation.result)
-    }
-
     async fn best_effort_display_refresh(&self, scope: LobbyScope, operation: &'static str) {
         let has_display = self.state.service.get_lobby(scope).is_some_and(|lobby| {
             lobby.message_ids.channel_id.is_some() && lobby.message_ids.message_id.is_some()
@@ -1647,119 +1622,6 @@ impl LobbyAdminControl {
             warn!(%error, ?scope, operation, "admin lobby display refresh failed");
         }
     }
-}
-
-fn mutate_fake_lobby_blocking(
-    state: &LobbyRuntimeState,
-    scope: LobbyScope,
-    requested_count: Option<usize>,
-) -> Result<FakeLobbyMutation, String> {
-    let lobby = state
-        .service
-        .get_or_create_lobby(None, scope)
-        .map_err(|error| error.to_string())?;
-    let current = lobby.players.len();
-    let count = match requested_count {
-        Some(count) => {
-            if current.saturating_add(count) > state.config.max_players {
-                return Err(format!(
-                    "Adding {count} users would exceed {} players. Currently {current}/{}.",
-                    state.config.max_players, state.config.max_players
-                ));
-            }
-            count
-        }
-        None if current >= state.config.ready_threshold => {
-            return Ok(FakeLobbyMutation {
-                result: AdminFakeLobbyResult {
-                    users_added: 0,
-                    user_names: Vec::new(),
-                    already_at_threshold: Some((current, state.config.ready_threshold)),
-                },
-                refresh_display: false,
-            });
-        }
-        None => state.config.ready_threshold.saturating_sub(current).min(10),
-    };
-    let next_index = lobby
-        .players
-        .iter()
-        .filter(|player_id| player_id.0 < 0)
-        .filter_map(|player_id| player_id.0.checked_neg())
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    let mut user_names = Vec::with_capacity(count);
-    let mut backdated = BTreeMap::new();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
-        .as_secs_f64();
-    const BACKDATE_OFFSETS: [f64; 10] = [
-        60.0, 300.0, 900.0, 1_800.0, 3_600.0, 7_200.0, 14_400.0, 28_800.0, 43_200.0, 86_400.0,
-    ];
-    for offset in 0..count {
-        let offset = i64::try_from(offset).map_err(|_| "fake-user index overflow")?;
-        let index = next_index
-            .checked_add(offset)
-            .ok_or_else(|| "fake-user index overflow".to_owned())?;
-        let fake_id = index
-            .checked_neg()
-            .ok_or_else(|| "fake-user id overflow".to_owned())?;
-        let fake_name = format!("FakeUser{index}");
-        if state
-            .players
-            .repository
-            .get_by_id(fake_id, Some(scope.guild_id.0))
-            .map_err(|error| error.to_string())?
-            .is_none()
-        {
-            let mut roles = ["1", "2", "3", "4", "5"];
-            fastrand::shuffle(&mut roles);
-            let role_count = 1 + fastrand::usize(..roles.len());
-            let mut player = NewPlayer::new(fake_id, &fake_name, Some(scope.guild_id.0));
-            player
-                .openskill_algorithm_fingerprint
-                .clone_from(&state.config.openskill_algorithm_fingerprint);
-            player.glicko_rating = Some(f64::from(fastrand::u16(1_000..2_001)));
-            player.glicko_rd = Some(50.0 + fastrand::f64() * 300.0);
-            player.glicko_volatility = Some(0.06);
-            player.preferred_roles = Some(
-                roles[..role_count]
-                    .iter()
-                    .map(|role| (*role).to_owned())
-                    .collect(),
-            );
-            match state.players.repository.add(&player) {
-                Ok(()) | Err(CoreRepositoryError::DuplicatePlayer { .. }) => {}
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-        if state.service.join_lobby(AppUserId(fake_id), scope).success {
-            if requested_count.is_none() {
-                let seconds = BACKDATE_OFFSETS[user_names.len() % BACKDATE_OFFSETS.len()];
-                backdated.insert(AppUserId(fake_id), now - seconds);
-            }
-            user_names.push(fake_name);
-        }
-    }
-    if !backdated.is_empty() {
-        let updated = state
-            .service
-            .try_set_player_join_times(scope, &backdated)
-            .map_err(|error| error.to_string())?;
-        if updated != backdated.len() {
-            return Err("lobby membership changed while backdating fake users".to_owned());
-        }
-    }
-    Ok(FakeLobbyMutation {
-        result: AdminFakeLobbyResult {
-            users_added: user_names.len(),
-            user_names,
-            already_at_threshold: None,
-        },
-        refresh_display: true,
-    })
 }
 
 impl MatchLobbyPort {
@@ -3368,11 +3230,11 @@ impl LobbyInteractionHandler {
             lobby.message_ids.channel_id,
             lobby.message_ids.message_id,
             lobby.message_ids.thread_id,
-        ) && let Ok(Some(message)) = self
+        ) && let Some(message) = self
             .state
             .transport
             .fetch_message(to_u64(existing_channel.0)?, to_u64(existing_message.0)?)
-            .await
+            .await?
         {
             return self
                 .finish_lobby_auto_join(

@@ -315,6 +315,7 @@ pub struct StoredPlayerTriviaQuestion {
     pub is_correct: Option<bool>,
     pub reward: i64,
     pub answered_at: Option<i64>,
+    pub answer_deadline_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -337,6 +338,20 @@ impl StoredPlayerTriviaSession {
         self.questions
             .iter()
             .find(|question| question.selected_index.is_none())
+    }
+
+    #[must_use]
+    pub fn answer_deadline_ms(&self, timeout_seconds: i64) -> i64 {
+        if let Some(answer_deadline_ms) = self
+            .next_question()
+            .and_then(|question| question.answer_deadline_ms)
+        {
+            return answer_deadline_ms;
+        }
+        // Older active games predate publication tracking.
+        self.last_activity_at()
+            .saturating_add(timeout_seconds)
+            .saturating_mul(1_000)
     }
 
     #[must_use]
@@ -492,7 +507,7 @@ impl PlayerTriviaRepository {
         let mut statement = connection.prepare(
             "SELECT question_number, question_key, category, spicy, question_text,
                     options_json, correct_index, COALESCE(explanation, ''), selected_index,
-                    is_correct, reward, answered_at
+                    is_correct, reward, answered_at, answer_deadline_ms
              FROM player_trivia_questions WHERE session_id = ?1
              ORDER BY question_number ASC",
         )?;
@@ -510,6 +525,7 @@ impl PlayerTriviaRepository {
                 row.get::<_, Option<bool>>(9)?,
                 row.get::<_, i64>(10)?,
                 row.get::<_, Option<i64>>(11)?,
+                row.get::<_, Option<i64>>(12)?,
             ))
         })?;
         let mut questions = Vec::new();
@@ -527,6 +543,7 @@ impl PlayerTriviaRepository {
                 is_correct,
                 reward,
                 answered_at,
+                answer_deadline_ms,
             ) = row?;
             let options: [String; 4] = serde_json::from_str::<Vec<String>>(&options_json)?
                 .try_into()
@@ -562,6 +579,7 @@ impl PlayerTriviaRepository {
                 is_correct,
                 reward,
                 answered_at,
+                answer_deadline_ms,
             });
         }
         Ok(Some(StoredPlayerTriviaSession {
@@ -576,6 +594,20 @@ impl PlayerTriviaRepository {
             jc_earned,
             questions,
         }))
+    }
+
+    pub fn mark_question_published(
+        &self,
+        session_id: i64,
+        question_number: i64,
+        deadline_ms: i64,
+    ) -> Result<(), PlayerTriviaRepositoryError> {
+        self.connection()?.execute(
+            "UPDATE player_trivia_questions SET answer_deadline_ms=?3
+             WHERE session_id=?1 AND question_number=?2 AND answer_deadline_ms IS NULL AND selected_index IS NULL",
+            params![session_id, question_number, deadline_ms],
+        )?;
+        Ok(())
     }
 
     pub fn cancel_session_if_unanswered_at(

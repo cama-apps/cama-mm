@@ -88,10 +88,9 @@ pub use admin_match_correction::{AdminMatchCorrectionBuildError, AdminMatchCorre
 pub use admin_provider::{
     AdminCommandSyncResult, AdminCorrectMatchBetResult, AdminCorrectMatchError,
     AdminCorrectMatchRequest, AdminCorrectMatchResult, AdminCorrectMatchSide, AdminDiscordControl,
-    AdminDiscordHealth, AdminExtendBettingRequest, AdminExtendBettingResult, AdminFakeLobbyRequest,
-    AdminFakeLobbyResult, AdminLobbyControl, AdminLobbyEjectionRequest, AdminLobbyEjectionResult,
-    AdminLobbyScope, AdminMatchControl, AdminMatchCorrectionControl, AdminRegistrationProvider,
-    AdminRuntimePorts, AdminSeedHeroGridRequest, AdminSeedHeroGridResult,
+    AdminDiscordHealth, AdminExtendBettingRequest, AdminExtendBettingResult, AdminLobbyControl,
+    AdminLobbyEjectionRequest, AdminLobbyEjectionResult, AdminLobbyScope, AdminMatchControl,
+    AdminMatchCorrectionControl, AdminRegistrationProvider, AdminRuntimePorts,
     CorrectionWinRewardControl, CorrectionWinRewardRequest, CorrectionWinRewardResult,
 };
 pub use application_config::{

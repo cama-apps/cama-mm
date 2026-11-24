@@ -127,6 +127,7 @@ fn test_richest_and_deepest_candidates_rank_others_and_exclude_the_digger() {
     let fixture = Fixture::new();
     for (id, balance, depth) in [
         (DIGGER, 9_000, 500),
+        (-1, 20_000, 1_000),
         (10_002, 100, 10),
         (10_003, 200, 200),
         (10_004, 300, 50),
@@ -159,7 +160,7 @@ fn test_active_digger_candidates_are_recent_guild_diggers() {
     let fixture = Fixture::new();
     fixture.add_player(DIGGER, GUILD, 50, None);
     fixture.log_dig(DIGGER, GUILD, NOW);
-    for id in [10_002, 10_003, 10_004] {
+    for id in [-1, 10_002, 10_003, 10_004] {
         fixture.add_player(id, GUILD, 100, None);
         fixture.log_dig(id, GUILD, NOW);
     }
@@ -179,7 +180,7 @@ fn test_active_digger_candidates_are_recent_guild_diggers() {
 fn test_random_active_candidates_are_recent_guild_players() {
     let fixture = Fixture::new();
     fixture.add_player(DIGGER, GUILD, 50, Some(RECENT_ISO));
-    for id in [10_002, 10_003, 10_004] {
+    for id in [-1, 10_002, 10_003, 10_004] {
         fixture.add_player(id, GUILD, 100, Some(RECENT_ISO));
     }
     fixture.add_player(10_005, GUILD, 100, Some("2020-01-01T00:00:00+00:00"));

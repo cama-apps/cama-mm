@@ -674,8 +674,9 @@ mod tests {
         }
     }
 
-    fn auth_fixture(saved_session: bool) -> (SteamAuthConfig, FakeAuthBackend) {
-        let config = SteamAuthConfig::new("bot", tempfile_path("cama-auth-policy"))
+    fn auth_fixture(saved_session: bool) -> (tempfile::TempDir, SteamAuthConfig, FakeAuthBackend) {
+        let directory = tempfile::tempdir().expect("auth fixture directory");
+        let config = SteamAuthConfig::new("bot", directory.path().join("session.json"))
             .with_password("configured-password");
         if saved_session {
             write_session(
@@ -688,6 +689,7 @@ mod tests {
             .expect("saved token");
         }
         (
+            directory,
             config,
             FakeAuthBackend {
                 access_result: Some(Ok("saved-session")),
@@ -698,18 +700,17 @@ mod tests {
 
     #[tokio::test]
     async fn saved_session_takes_precedence_over_password() {
-        let (config, mut backend) = auth_fixture(true);
+        let (_directory, config, mut backend) = auth_fixture(true);
         assert_eq!(
             connect_with_backend(&config, &mut backend).await.unwrap(),
             "saved-session"
         );
         assert_eq!(backend.attempts, ["session"]);
-        fs::remove_file(config.session_path).unwrap();
     }
 
     #[tokio::test]
     async fn missing_session_uses_configured_password() {
-        let (config, mut backend) = auth_fixture(false);
+        let (_directory, config, mut backend) = auth_fixture(false);
         assert_eq!(
             connect_with_backend(&config, &mut backend).await.unwrap(),
             "new-session"
@@ -724,14 +725,13 @@ mod tests {
             LoginError::Unknown(EResult::Expired),
             LoginError::Unknown(EResult::Revoked),
         ] {
-            let (config, mut backend) = auth_fixture(true);
+            let (_directory, config, mut backend) = auth_fixture(true);
             backend.access_result = Some(Err(AuthError::Login(rejection.into())));
             assert_eq!(
                 connect_with_backend(&config, &mut backend).await.unwrap(),
                 "new-session"
             );
             assert_eq!(backend.attempts, ["session", "password"]);
-            fs::remove_file(config.session_path).unwrap();
         }
     }
 
@@ -742,21 +742,20 @@ mod tests {
             ConnectionError::LoginError(LoginError::RateLimited),
             ConnectionError::LoginError(LoginError::UnavailableAccount),
         ] {
-            let (config, mut backend) = auth_fixture(true);
+            let (_directory, config, mut backend) = auth_fixture(true);
             backend.access_result = Some(Err(AuthError::Login(failure)));
             assert!(matches!(
                 connect_with_backend(&config, &mut backend).await,
                 Err(AuthError::Login(_))
             ));
             assert_eq!(backend.attempts, ["session"]);
-            fs::remove_file(config.session_path).unwrap();
         }
     }
 
     #[tokio::test]
     async fn absent_password_reports_actionable_reauthentication_error() {
         for saved in [false, true] {
-            let (mut config, mut backend) = auth_fixture(saved);
+            let (_directory, mut config, mut backend) = auth_fixture(saved);
             config.password = None;
             backend.access_result =
                 Some(Err(AuthError::Login(LoginError::InvalidCredentials.into())));
@@ -766,15 +765,12 @@ mod tests {
             assert!(matches!(error, AuthError::ReauthenticationRequired { .. }));
             assert!(error.to_string().contains("DOTA_STEAM_PASSWORD"));
             assert!(!backend.attempts.contains(&"password"));
-            if saved {
-                fs::remove_file(config.session_path).unwrap();
-            }
         }
     }
 
     #[tokio::test]
     async fn invalid_session_json_and_foreign_account_do_not_attempt_login() {
-        let (config, mut backend) = auth_fixture(false);
+        let (_directory, config, mut backend) = auth_fixture(false);
         write_private_file(&config.session_path, b"not json").unwrap();
         assert!(matches!(
             connect_with_backend(&config, &mut backend).await,
@@ -793,21 +789,19 @@ mod tests {
             Err(AuthError::ReauthenticationRequired { .. })
         ));
         assert!(backend.attempts.is_empty());
-        fs::remove_file(config.session_path).unwrap();
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn insecure_session_file_does_not_attempt_login() {
         use std::os::unix::fs::PermissionsExt;
-        let (config, mut backend) = auth_fixture(true);
+        let (_directory, config, mut backend) = auth_fixture(true);
         fs::set_permissions(&config.session_path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(
             connect_with_backend(&config, &mut backend).await,
             Err(AuthError::SessionIo { .. })
         ));
         assert!(backend.attempts.is_empty());
-        fs::remove_file(config.session_path).unwrap();
     }
 
     #[tokio::test]
@@ -860,7 +854,8 @@ mod tests {
 
     #[test]
     fn session_round_trip_is_json_and_redacted() {
-        let path = tempfile_path("cama-steam-auth");
+        let directory = tempfile::tempdir().expect("auth fixture directory");
+        let path = directory.path().join("session.json");
         let file = SessionFile {
             account: "bot".to_owned(),
             refresh_token: "token-value".to_owned(),
@@ -882,15 +877,5 @@ mod tests {
                 0o600
             );
         }
-        let _ = fs::remove_file(path);
-    }
-
-    fn tempfile_path(prefix: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let entropy = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        path.push(format!("{prefix}-{}-{entropy}.json", std::process::id()));
-        path
     }
 }

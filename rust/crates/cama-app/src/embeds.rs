@@ -119,10 +119,6 @@ pub fn format_player_list(
     bankruptcy_source: Option<&dyn BankruptcyPenaltySource>,
     guild_id: Option<i64>,
 ) -> (String, usize) {
-    if player_ids.is_empty() {
-        return ("No players yet".to_owned(), 0);
-    }
-
     let players_by_id = players
         .iter()
         .map(|player| (player.discord_id, player))
@@ -131,15 +127,14 @@ pub fn format_player_list(
     let unique_ids = player_ids
         .iter()
         .copied()
-        .filter(|discord_id| seen.insert(*discord_id))
+        .filter(|discord_id| *discord_id > 0 && seen.insert(*discord_id))
         .collect::<Vec<_>>();
+    if unique_ids.is_empty() {
+        return ("No players yet".to_owned(), 0);
+    }
 
     let mut penalty_ids_by_guild: BTreeMap<Option<i64>, Vec<i64>> = BTreeMap::new();
-    for discord_id in unique_ids
-        .iter()
-        .copied()
-        .filter(|discord_id| *discord_id >= 0)
-    {
+    for &discord_id in &unique_ids {
         let player = players_by_id.get(&discord_id).copied();
         let lookup_guild = guild_id.or_else(|| player.and_then(|player| player.guild_id));
         penalty_ids_by_guild
@@ -171,8 +166,7 @@ pub fn format_player_list(
         .into_iter()
         .enumerate()
         .map(|(index, (rating, player, discord_id))| {
-            let real_user = discord_id >= 0;
-            let tombstone = if real_user && penalties.get(&discord_id).copied().unwrap_or(0) > 0 {
+            let tombstone = if penalties.get(&discord_id).copied().unwrap_or(0) > 0 {
                 format!("{TOMBSTONE_EMOJI} ")
             } else {
                 String::new()
@@ -1596,14 +1590,13 @@ mod tests {
     }
 
     #[test]
-    fn test_fake_users_excluded_from_bankruptcy_check() {
+    fn matchmaking_regression_retired_players_are_absent_from_the_lobby_roster() {
         let player = bankruptcy_display_player(-1, "FakeUser");
         let source = MutablePenaltySource::default();
         source.set(-1, 5);
         let (text, count) = format_player_list(&[player], &[-1], Some(&source), Some(77));
-        assert_eq!(count, 1);
-        assert!(text.contains("FakeUser"));
-        assert!(!text.contains(TOMBSTONE_EMOJI));
+        assert_eq!(count, 0);
+        assert_eq!(text, "No players yet");
         assert!(source.bulk_calls.borrow().is_empty());
     }
 

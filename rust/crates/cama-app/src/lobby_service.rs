@@ -174,6 +174,7 @@ pub enum JoinContext {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JoinFailure {
+    InvalidPlayer,
     InPendingMatch,
     LobbyFull,
     AlreadyJoined,
@@ -277,10 +278,7 @@ impl LobbyRecord {
         }
     }
 
-    fn from_persisted(state: PersistedLobbyState) -> Option<Self> {
-        if !state.status.eq_ignore_ascii_case("open") {
-            return None;
-        }
+    fn from_persisted(state: PersistedLobbyState) -> Self {
         let kind = if state.lobby_id
             == LobbyScope::new(GuildId::DIRECT_MESSAGE, LobbyKind::LowSkill).lobby_id()
         {
@@ -297,7 +295,7 @@ impl LobbyRecord {
             .ok()
             .and_then(|created_at| created_at.timestamp_nanos_opt())
             .unwrap_or_default();
-        Some(Self {
+        Self {
             scope: LobbyScope::new(GuildId(state.guild_id), kind),
             created_by: Some(UserId(state.created_by)),
             created_at_ns,
@@ -318,7 +316,7 @@ impl LobbyRecord {
                 embed_message_id: state.embed_message_id.map(MessageId),
                 origin_channel_id: state.origin_channel_id.map(ChannelId),
             },
-        })
+        }
     }
 
     fn to_persisted(&self) -> PersistedLobbyState {
@@ -420,11 +418,30 @@ where
         let rows = persistence
             .load_all_lobbies()
             .map_err(LobbyPersistenceError::Storage)?;
-        let lobbies = rows
-            .into_iter()
-            .filter_map(LobbyRecord::from_persisted)
-            .map(|lobby| (lobby.scope, lobby))
-            .collect();
+        let mut lobbies = BTreeMap::new();
+        for mut row in rows {
+            if !row.status.eq_ignore_ascii_case("open") {
+                continue;
+            }
+            // Older admin commands could seat synthetic players. Keep the live
+            // Discord roster and its routing while retiring those seats on restart.
+            if row
+                .players
+                .iter()
+                .chain(&row.conditional_players)
+                .chain(row.player_join_times.keys())
+                .any(|id| *id <= 0)
+            {
+                row.players.retain(|id| *id > 0);
+                row.conditional_players.retain(|id| *id > 0);
+                row.player_join_times.retain(|id, _| *id > 0);
+                persistence
+                    .save_lobby(&row)
+                    .map_err(LobbyPersistenceError::Storage)?;
+            }
+            let lobby = LobbyRecord::from_persisted(row);
+            lobbies.insert(lobby.scope, lobby);
+        }
         self.persistence = Some(persistence);
         self.state = Mutex::new(LobbyState {
             lobbies,
@@ -594,6 +611,9 @@ where
 
     #[must_use]
     pub fn join_lobby(&self, player_id: UserId, scope: LobbyScope) -> JoinOutcome {
+        if player_id.0 <= 0 {
+            return JoinOutcome::failed(JoinFailure::InvalidPlayer);
+        }
         if let Some(port) = self.pending_match_port.as_ref() {
             match port.try_pending_match_for_player(scope.guild_id, player_id) {
                 Ok(Some(pending)) => return JoinOutcome::pending(pending),
@@ -808,40 +828,6 @@ where
             self.publish_record(&mut state, candidate);
         }
         Ok(removed)
-    }
-
-    /// Admin test support: replace seated players' durable join timestamps in
-    /// one lobby-state commit. The caller serializes this with the same scope
-    /// operation lock used by joins/leaves; persistence is committed before
-    /// the in-memory snapshot.
-    pub fn try_set_player_join_times(
-        &self,
-        scope: LobbyScope,
-        joined_at_seconds: &BTreeMap<UserId, f64>,
-    ) -> Result<usize, LobbyPersistenceError> {
-        let _writes = self.lock_writes();
-        let Some(mut candidate) = ({
-            let state = self.lock_state();
-            state.lobbies.get(&scope).cloned()
-        }) else {
-            return Ok(0);
-        };
-        let mut updated = 0;
-        for (player_id, joined_at_seconds) in joined_at_seconds {
-            if candidate.players.contains(player_id) {
-                candidate
-                    .player_join_times
-                    .insert(*player_id, *joined_at_seconds);
-                updated += 1;
-            }
-        }
-        if updated == 0 {
-            return Ok(0);
-        }
-        self.persist_record(&candidate)?;
-        let mut state = self.lock_state();
-        self.publish_record(&mut state, candidate);
-        Ok(updated)
     }
 
     pub fn remove_players_from_lobby(
