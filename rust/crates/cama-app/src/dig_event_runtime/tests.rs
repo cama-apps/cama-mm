@@ -829,12 +829,12 @@ fn reading_the_stone_uses_highest_jc_ev_stable_ties_and_number_free_copy() {
 }
 
 #[test]
-fn all_203_authored_events_and_every_visible_choice_settle_on_migrated_sqlite() {
+fn all_authored_events_and_every_visible_choice_settle_on_migrated_sqlite() {
     let fixture = Fixture::new();
     fixture.seed_actor(ACTOR, 10_000, 50, 10);
     let service = fixture.service();
     let catalog = crate::dig_loot::canonical_event_catalog();
-    assert_eq!(catalog.len(), 203);
+    assert_eq!(catalog.len(), 206);
     let mut settled = 0_usize;
 
     for event in catalog {
@@ -906,7 +906,7 @@ fn all_203_authored_events_and_every_visible_choice_settle_on_migrated_sqlite() 
         }
     }
 
-    assert_eq!(settled, 475, "exact authored option surface changed");
+    assert_eq!(settled, 482, "exact authored option surface changed");
 }
 
 #[test]
@@ -1278,6 +1278,59 @@ fn migrated_artifact_reward_pool_loads_owned_set_once_before_settlement() {
             .expect("artifact reward row count"),
         1,
     );
+}
+
+#[test]
+fn tunnel_findings_lock_only_opens_for_the_waterline_tune() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 55, 7);
+    let service = fixture.service();
+    let prompt =
+        canonical_event_action_presentation("drowned_lock", 0, r#"["reading_the_stone"]"#, 0)
+            .unwrap();
+    assert!(!prompt.safe_disabled);
+    assert_eq!(
+        prompt.reading_the_stone_hint.as_deref(),
+        Some(READING_THE_STONE_RISKY_HINTS[0])
+    );
+    for (choice, solved) in [("safe", false), ("risky", true), ("desperate", false)] {
+        let action_id = fixture.seed_event_dig_action("drowned_lock");
+        let result = service
+            .resolve_action_event(DigEventActionRequest {
+                discord_id: ACTOR,
+                guild_id: GUILD,
+                dig_action_id: action_id,
+                choice,
+                now: NOW,
+            })
+            .unwrap();
+        assert_eq!(
+            result.resolution.as_ref().expect("playable lock").succeeded,
+            solved
+        );
+        assert_eq!(
+            result
+                .chain_event
+                .as_ref()
+                .map(|event| event.event_id.as_str()),
+            solved.then_some("lockkeepers_strongbox")
+        );
+        if solved {
+            let open = DigEventActionRequest {
+                discord_id: ACTOR,
+                guild_id: GUILD,
+                dig_action_id: result.action_id.unwrap(),
+                choice: "safe",
+                now: NOW,
+            };
+            let box_result = service.resolve_action_event(open).unwrap();
+            assert_eq!(
+                box_result.resolution.unwrap().reward,
+                Some(CanonicalReward::Consumable("rescue_line".into()))
+            );
+            assert!(!service.resolve_action_event(open).unwrap().applied_now);
+        }
+    }
 }
 
 #[test]

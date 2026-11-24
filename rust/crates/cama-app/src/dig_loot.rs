@@ -190,6 +190,8 @@ pub enum EventComplexity {
     Choice,
     Complex,
     Boon,
+    /// Choices are answers. A correct answer unlocks the authored follow-up.
+    Puzzle,
 }
 
 impl EventComplexity {
@@ -198,6 +200,7 @@ impl EventComplexity {
             "simple" => Self::Simple,
             "complex" => Self::Complex,
             "boon" => Self::Boon,
+            "puzzle" => Self::Puzzle,
             _ => Self::Choice,
         }
     }
@@ -565,7 +568,11 @@ pub fn resolve_canonical_event(
         _ => None,
     }
     .ok_or_else(|| format!("Invalid choice: {choice}"))?;
-    let succeeded = success_roll < option.success_chance;
+    let succeeded = if event.complexity == EventComplexity::Puzzle {
+        option.success_chance == 1.0
+    } else {
+        success_roll < option.success_chance
+    };
     let outcome = if succeeded {
         &option.success
     } else {
@@ -760,8 +767,8 @@ pub fn resolve_canonical_event_with_policy(
     {
         return Err("Invalid event roll.".to_owned());
     }
-    if requested_choice.starts_with("boon_") {
-        return resolve_canonical_event(event_id, requested_choice, 0.0);
+    if requested_choice.starts_with("boon_") || event.complexity == EventComplexity::Puzzle {
+        return resolve_canonical_event(event_id, requested_choice, rolls.success_roll);
     }
 
     let choice =
@@ -999,6 +1006,7 @@ pub fn canonical_event_needs_cruel_echo_roll(
         return false;
     }
     canonical_event(event_id)
+        .filter(|event| event.complexity != EventComplexity::Puzzle)
         .and_then(|event| event.safe_option.as_ref())
         .is_some_and(|option| option.failure.is_none())
 }
@@ -2039,6 +2047,9 @@ collapsed_armory_cache|90|_|_|rare|0|0|choice|1|0|0|0|0
 relic_bearing_strata|110|_|_|rare|0|0|choice|1|0|0|0|0
 prospector_s_last_pack|140|_|_|rare|0|0|choice|1|0|0|0|0
 song_below_stone|175|_|_|legendary|0|0|choice|1|0|0|0|0
+drowned_lock|35|140|_|rare|0|0|puzzle|1|1|0|0|0
+lockkeepers_strongbox|35|_|_|rare|0|0|choice|1|1|0|1|0
+frog_shift|5|55|_|uncommon|0|0|boon|0|0|2|0|0
 first_descent_cartography|220|_|_|legendary|0|0|choice|1|0|0|0|0"#;
 
 #[must_use]

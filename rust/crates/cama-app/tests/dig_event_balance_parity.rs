@@ -196,7 +196,12 @@ fn dig_event_balance_negative_depth_setback_is_quarter_harsher() {
 fn dig_event_balance_every_risky_branch_outrewards_safe() {
     let offenders = canonical_event_catalog()
         .iter()
-        .filter(|event| event.complexity != EventComplexity::Boon && event.boon_options.is_empty())
+        .filter(|event| {
+            !matches!(
+                event.complexity,
+                EventComplexity::Boon | EventComplexity::Puzzle
+            ) && event.boon_options.is_empty()
+        })
         .filter_map(|event| {
             let safe = event.safe_option.as_ref()?;
             let risky = event.risky_option.as_ref()?;
@@ -233,7 +238,12 @@ fn dig_event_balance_event_curses_are_stronger_and_last_two_extra_digs() {
 fn dig_event_balance_every_risky_branch_is_genuinely_risky() {
     let offenders = canonical_event_catalog()
         .iter()
-        .filter(|event| event.complexity != EventComplexity::Boon && event.boon_options.is_empty())
+        .filter(|event| {
+            !matches!(
+                event.complexity,
+                EventComplexity::Boon | EventComplexity::Puzzle
+            ) && event.boon_options.is_empty()
+        })
         .filter_map(|event| {
             let risky = event.risky_option.as_ref()?;
             let carries_threat = |outcome: &CanonicalEventOutcome| {

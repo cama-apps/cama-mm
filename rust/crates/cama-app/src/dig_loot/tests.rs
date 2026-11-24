@@ -66,6 +66,84 @@ fn survival_preserves_guaranteed_safe_choices_and_cruel_echoes() {
 }
 
 #[test]
+fn tunnel_findings_lock_answers_ignore_luck_light_and_perks() {
+    let lock = canonical_event("drowned_lock").unwrap();
+    assert_eq!(
+        lock.risky_option.as_ref().unwrap().label,
+        "High · low · middle"
+    );
+    for clue in &lock.descriptions {
+        let (_, after_high) = clue.split_once("chin").expect("highest mark");
+        let (_, after_low) = after_high.split_once("boot").expect("lowest mark");
+        assert!(after_low.contains("belt"), "the last mark is in the middle");
+    }
+    for luminosity in [0, 100] {
+        let policy = CanonicalEventPolicy {
+            luminosity,
+            cruel_safe_failure: 1.0,
+            survival: 20,
+            risky_success_bonus: 0.25,
+            ..Default::default()
+        };
+        for roll in [0.0, 1.0] {
+            for (choice, solved) in [("safe", false), ("risky", true), ("desperate", false)] {
+                let result = resolve_canonical_event_with_policy(
+                    "drowned_lock",
+                    choice,
+                    CanonicalEventRolls {
+                        success_roll: roll,
+                        cruel_echo_roll: Some(0.0),
+                        ..Default::default()
+                    },
+                    policy,
+                )
+                .unwrap();
+                assert_eq!(result.choice, choice);
+                assert_eq!(result.succeeded, solved);
+                assert!(!result.cruel_echoes);
+            }
+        }
+    }
+}
+
+#[test]
+fn tunnel_findings_are_discoverable_before_prestige_and_keep_the_box_behind_the_lock() {
+    let eligible = |depth, id| {
+        canonical_eligible_events(depth, 100, 0, &BTreeSet::new(), false, false)
+            .iter()
+            .any(|event| event.id == id)
+    };
+    for (id, min, max) in [("frog_shift", 5, 55), ("drowned_lock", 35, 140)] {
+        assert!(!eligible(min - 1, id));
+        assert!(eligible(min, id));
+        assert!(eligible(max, id));
+        assert!(!eligible(max + 1, id));
+    }
+    assert!(!eligible(55, "lockkeepers_strongbox"));
+}
+
+#[test]
+fn tunnel_findings_frog_songs_grant_the_advertised_boons() {
+    for (choice, effect) in [("boon_0", "advance_bonus"), ("boon_1", "cave_in_reduction")] {
+        let buff = resolve_canonical_event("frog_shift", choice, 0.0)
+            .unwrap()
+            .buff
+            .unwrap();
+        assert_eq!(buff.duration_digs, 3);
+        assert!(buff.effect[effect].as_f64().unwrap() > 0.0);
+    }
+}
+
+#[test]
+fn tunnel_findings_striking_the_pipe_can_replace_or_lose_the_line() {
+    let box_result =
+        |roll| resolve_canonical_event("lockkeepers_strongbox", "desperate", roll).unwrap();
+    assert_eq!(box_result(0.0).gear_reward_pool, ["anchor_boots"]);
+    assert!(box_result(0.99).gear_reward_pool.is_empty());
+    assert!(box_result(0.99).consumable_reward_pool.is_empty());
+}
+
+#[test]
 fn authored_event_chains_are_finite_and_bounded() {
     for event in canonical_event_catalog() {
         let mut seen = BTreeSet::new();
@@ -489,7 +567,7 @@ fn test_use_item_valid_type_succeeds() {
 #[test]
 fn test_event_pool_size_floor() {
     assert!(event_catalog().len() >= 116);
-    assert_eq!(event_catalog().len(), 203);
+    assert_eq!(event_catalog().len(), 206);
 }
 
 #[test]
@@ -501,6 +579,7 @@ fn test_new_events_have_complexity_field() {
             | EventComplexity::Choice
             | EventComplexity::Complex
             | EventComplexity::Boon
+            | EventComplexity::Puzzle
     )));
 }
 
@@ -765,8 +844,8 @@ fn test_widened_depth_ranges() {
 #[test]
 fn canonical_event_snapshot_is_complete_and_matches_route_projection() {
     let canonical = canonical_event_catalog();
-    assert_eq!(canonical_event_snapshot_hash(), 0x62cf4f258ebca030);
-    assert_eq!(canonical.len(), 203);
+    assert_eq!(canonical_event_snapshot_hash(), 0x1381a07605cdc77b);
+    assert_eq!(canonical.len(), 206);
     assert_eq!(
         canonical.first().map(|event| event.id.as_str()),
         Some("underground_stream")
@@ -1024,11 +1103,11 @@ fn canonical_event_snapshot_preserves_all_authored_effects() {
             }
         }
     }
-    assert_eq!(outcomes, 691);
+    assert_eq!(outcomes, 697);
     assert_eq!(curses, 43);
     assert_eq!(streak_losses, 27);
-    assert_eq!(gear_rewards, 10);
-    assert_eq!(consumable_rewards, 16);
+    assert_eq!(gear_rewards, 11);
+    assert_eq!(consumable_rewards, 17);
     assert_eq!(artifact_rewards, 4);
 }
 

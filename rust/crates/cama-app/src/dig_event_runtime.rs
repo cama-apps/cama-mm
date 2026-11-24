@@ -38,7 +38,7 @@ use crate::dig_loot::{
     CANONICAL_EVENT_CHAIN_CHANCE, CanonicalEventPolicy, CanonicalEventPresentation,
     CanonicalEventResolution, CanonicalEventResolutionRequest, CanonicalEventRollContext,
     CanonicalEventRolls, CanonicalQuestFinale, CanonicalQuestFinaleOutcome, CanonicalQuestProgress,
-    CanonicalReward, CanonicalSplash, LootEntropy, SeededLootEntropy,
+    CanonicalReward, CanonicalSplash, EventComplexity, LootEntropy, SeededLootEntropy,
     advance_canonical_quest_on_desperate_success, artifact_catalog, canonical_chain_event,
     canonical_eligible_quest_event_ids, canonical_event, canonical_event_needs_cruel_echo_roll,
     canonical_event_presentation, canonical_quest_for_event, resolve_canonical_event_with_policy,
@@ -880,23 +880,13 @@ impl DigEventRuntimeService {
         // Chain selection is part of the immutable event result, so consume
         // it before the actor transaction and include it in the same outbox
         // snapshot as the actor settlement.
-        let chain_event = if request.chained {
-            // Continue finite authored stories, but never roll another random chain.
-            canonical_chain_event(
-                &resolution.event_id,
-                depth_after,
-                expected.prestige_level,
-                None,
-                None,
-            )
-        } else {
-            resolve_chain(
-                &resolution,
-                depth_after,
-                expected.prestige_level,
-                &mut entropy,
-            )
-        }
+        let chain_event = resolve_chain(
+            &resolution,
+            depth_after,
+            expected.prestige_level,
+            request.chained,
+            &mut entropy,
+        )
         .map(|event| canonical_event_presentation(&event.id))
         .transpose()
         .map_err(DigEventRuntimeError::Policy)?;
@@ -1624,7 +1614,9 @@ pub fn canonical_event_action_presentation(
     Ok(DigEventActionPresentation {
         event,
         luminosity,
-        safe_disabled: luminosity <= 0 && authored.risky_option.is_some(),
+        safe_disabled: luminosity <= 0
+            && authored.risky_option.is_some()
+            && authored.complexity != EventComplexity::Puzzle,
         reading_the_stone_hint,
     })
 }
@@ -1802,7 +1794,11 @@ fn reading_the_stone_hint(
             .failure
             .as_ref()
             .map_or(0.0, |outcome| outcome.jc as f64);
-        let expected = option.success_chance * success + (1.0 - option.success_chance) * failure;
+        let expected = if event.complexity == EventComplexity::Puzzle {
+            option.success_chance
+        } else {
+            option.success_chance * success + (1.0 - option.success_chance) * failure
+        };
         if best.is_none_or(|(_, best_expected)| expected > best_expected) {
             best = Some((hints, expected));
         }
@@ -2069,8 +2065,12 @@ fn resolve_chain(
     resolution: &CanonicalEventResolution,
     depth_after: i64,
     prestige_level: i64,
+    chained: bool,
     entropy: &mut impl LootEntropy,
 ) -> Option<&'static crate::dig_loot::CanonicalEventDef> {
+    if resolution.complexity == EventComplexity::Puzzle && !resolution.succeeded {
+        return None;
+    }
     let deterministic = canonical_chain_event(
         &resolution.event_id,
         depth_after,
@@ -2078,9 +2078,8 @@ fn resolve_chain(
         None,
         None,
     );
-    if deterministic.is_some() {
-        // Catalog entries are process-static; make the inferred lifetime
-        // explicit through the canonical lookup return value.
+    // A chained event can continue an authored story, but never rolls another random chain.
+    if deterministic.is_some() || chained {
         return deterministic;
     }
     if prestige_level < 7 {

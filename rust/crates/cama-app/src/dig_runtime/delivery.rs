@@ -464,7 +464,8 @@ pub(super) fn build_delivery_snapshot(
         let event_kind = match authored.complexity {
             crate::dig_loot::EventComplexity::Simple => DigRuntimeEventKind::Simple,
             crate::dig_loot::EventComplexity::Choice
-            | crate::dig_loot::EventComplexity::Complex => DigRuntimeEventKind::Choice,
+            | crate::dig_loot::EventComplexity::Complex
+            | crate::dig_loot::EventComplexity::Puzzle => DigRuntimeEventKind::Choice,
             crate::dig_loot::EventComplexity::Boon => DigRuntimeEventKind::Boon,
         };
         let event = DigRuntimeEventRenderSnapshot {
