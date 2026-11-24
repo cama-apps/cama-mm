@@ -42,6 +42,31 @@ fn state(offset: i64) -> PendingMatchState {
 }
 
 #[test]
+fn matchmaking_regression_restart_releases_legacy_synthetic_host_reservation() {
+    let file = fixture();
+    let repo = PendingMatchRepository::new(file.path());
+    config(&repo);
+    let pending = repo.create_pending_match(1, &state(0)).unwrap();
+    repo.mutate_pending_match(1, pending.pending_match_id, |s| s.dire_team_ids[0] = -1)
+        .unwrap();
+    config(&repo);
+    let saved = repo
+        .pending_match(1, pending.pending_match_id)
+        .unwrap()
+        .unwrap()
+        .state;
+    assert!(!saved.extra.contains_key("dota_host_account_key"));
+    assert!(!saved.betting_open(101));
+    assert_eq!(
+        repo.create_pending_match(1, &state(10))
+            .unwrap()
+            .state
+            .extra["dota_host_account_key"],
+        "99"
+    );
+}
+
+#[test]
 fn busy_fallback_is_permanent_manual_and_keeps_timed_betting_after_restart() {
     let file = fixture();
     let repo = PendingMatchRepository::new(file.path());

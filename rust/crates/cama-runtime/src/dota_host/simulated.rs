@@ -39,35 +39,6 @@ fn roster_signature(roster: &[HostedMatchRosterEntry]) -> BTreeSet<(i64, u32, bo
         .collect()
 }
 
-fn validate_simulated_roster(roster: &[HostedMatchRosterEntry], owner: u32) -> Result<(), String> {
-    if roster.len() != 10
-        || roster.iter().filter(|player| player.radiant).count() != 5
-        || roster
-            .iter()
-            .map(|player| player.discord_id)
-            .collect::<BTreeSet<_>>()
-            .len()
-            != 10
-        || roster
-            .iter()
-            .map(|player| player.steam_account_id)
-            .collect::<BTreeSet<_>>()
-            .len()
-            != 10
-        || roster.iter().any(|player| {
-            player.discord_id == 0
-                || matches!(player.steam_account_id, 0 | u32::MAX)
-                || player.steam_account_id == owner
-        })
-    {
-        return Err(
-            "SIMULATED: expected ten distinct players, five on each side, excluding the host"
-                .into(),
-        );
-    }
-    Ok(())
-}
-
 // Stable across process restarts. These deliberately high synthetic IDs stay
 // inside explicitly marked simulated sessions; they are never sent to Steam.
 fn synthetic_lobby_id(name: &str) -> u64 {
@@ -163,7 +134,7 @@ impl DotaHostPort for SimulatedHost {
     }
 
     async fn prepare_simulation(&self, roster: &[HostedMatchRosterEntry]) -> Result<(), String> {
-        validate_simulated_roster(roster, self.owner)?;
+        dota_lobby::validate_roster(&expected_players(roster), self.owner)?;
         let mut state = self.state.lock().await;
         if state.lobby.is_some() && roster_signature(&state.roster) != roster_signature(roster) {
             return Err("SIMULATED: frozen roster cannot change while its lobby exists".into());
@@ -182,7 +153,7 @@ impl DotaHostPort for SimulatedHost {
 
     async fn create(&self, settings: &LobbySettings) -> Result<(), String> {
         let mut state = self.state.lock().await;
-        validate_simulated_roster(&state.roster, self.owner)?;
+        dota_lobby::validate_roster(&expected_players(&state.roster), self.owner)?;
         if state.lobby.is_some() {
             return Err("SIMULATED: a lobby already exists".into());
         }
@@ -299,37 +270,8 @@ impl DotaHostPort for SimulatedHost {
         if lobby.stage != LobbyStage::Gathering {
             return Err("SIMULATED: launch was already requested".into());
         }
-        // Negative /addfake Discord IDs are allowed here only. The production
-        // admission helper intentionally rejects those, so validate simulator
-        // seats directly against the already frozen ten-player roster.
-        let seats = lobby
-            .members
-            .iter()
-            .filter(|seat| seat.side.is_some())
-            .collect::<Vec<_>>();
-        if seats.len() != 10
-            || expected.iter().any(|player| {
-                seats
-                    .iter()
-                    .filter(|seat| {
-                        seat.account_id == player.steam_account_id
-                            && seat.side
-                                == Some(if player.radiant {
-                                    Side::Radiant
-                                } else {
-                                    Side::Dire
-                                })
-                            && seat.slot < 5
-                    })
-                    .count()
-                    != 1
-            })
-            || seats
-                .iter()
-                .map(|seat| (seat.side == Some(Side::Radiant), seat.slot))
-                .collect::<BTreeSet<_>>()
-                .len()
-                != 10
+        if !dota_lobby::assess_admission(&expected_players(expected), &lobby.members, self.owner)
+            .ready
         {
             return Err(
                 "SIMULATED: all ten players must be correctly seated and the host in the pool"
@@ -376,7 +318,7 @@ mod tests {
     fn roster() -> Vec<HostedMatchRosterEntry> {
         (0..10)
             .map(|index| HostedMatchRosterEntry {
-                discord_id: if index == 0 { 12345 } else { -i64::from(index) },
+                discord_id: i64::from(index) + 1,
                 steam_account_id: 1000 + index,
                 radiant: index < 5,
             })

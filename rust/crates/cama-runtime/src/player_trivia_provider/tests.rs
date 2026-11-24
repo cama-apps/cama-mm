@@ -159,6 +159,9 @@ struct RecordingResponder {
     captured: Mutex<Captured>,
     receipt: Option<InteractionMessageReceipt>,
     fail_followup: bool,
+    age_previous_activity_on_delivery: Option<std::path::PathBuf>,
+    defer_barrier: Option<Arc<tokio::sync::Barrier>>,
+    publication_pause: Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
 }
 
 impl Default for RecordingResponder {
@@ -171,6 +174,9 @@ impl Default for RecordingResponder {
                 delivery: InteractionMessageDelivery::InteractionFollowup,
             }),
             fail_followup: false,
+            age_previous_activity_on_delivery: None,
+            defer_barrier: None,
+            publication_pause: None,
         }
     }
 }
@@ -187,11 +193,16 @@ impl InteractionResponder for RecordingResponder {
     }
 
     async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
-        self.captured
-            .lock()
-            .expect("captured")
-            .defers
-            .push(ephemeral);
+        let first_defer = {
+            let mut captured = self.captured.lock().unwrap();
+            captured.defers.push(ephemeral);
+            captured.defers.len() == 1
+        };
+        if let Some(barrier) = &self.defer_barrier
+            && first_defer
+        {
+            barrier.wait().await;
+        }
         Ok(())
     }
 
@@ -215,10 +226,16 @@ impl InteractionResponder for RecordingResponder {
         response: InteractionResponse,
     ) -> Result<Option<InteractionMessageReceipt>, InteractionResponseError> {
         self.followup(response).await?;
+        if let Some(pause) = &self.publication_pause {
+            pause.0.notify_one();
+            pause.1.notified().await;
+        }
+        self.age_previous_activity();
         Ok(self.receipt)
     }
 
     async fn update(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        self.age_previous_activity();
         self.captured
             .lock()
             .expect("captured")
@@ -226,6 +243,168 @@ impl InteractionResponder for RecordingResponder {
             .push(response);
         Ok(())
     }
+}
+
+impl RecordingResponder {
+    fn age_previous_activity(&self) {
+        if let Some(path) = &self.age_previous_activity_on_delivery {
+            // Simulate elapsed preparation / delivery time without sleeping.
+            Connection::open(path)
+                .unwrap()
+                .execute_batch(
+                    "UPDATE player_trivia_sessions SET started_at=started_at-3600;
+                 UPDATE player_trivia_questions SET answered_at=answered_at-3600;",
+                )
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn delivered_player_trivia_question_gets_its_full_window_after_restart() {
+    for first in [true, false] {
+        let fixture = Fixture::migrated();
+        let config = config(
+            fixture.database.path(),
+            &[("PLAYER_TRIVIA_ANSWER_TIMEOUT_SECONDS", "20")],
+        );
+        let original = provider(&fixture, &config, discord());
+        let delivery = Arc::new(RecordingResponder {
+            age_previous_activity_on_delivery: Some(fixture.database.path().to_owned()),
+            ..Default::default()
+        });
+        let (session_id, question) = if first {
+            registry(&original)
+                .command_handler("playertrivia")
+                .unwrap()
+                .handle(command(USER, None), delivery)
+                .await
+                .unwrap();
+            (
+                fixture
+                    .repository()
+                    .active_session_for_player(USER, GUILD)
+                    .unwrap()
+                    .unwrap()
+                    .session_id,
+                1,
+            )
+        } else {
+            let id = start_manual(&fixture, 2);
+            registry(&original)
+                .component_handler("player_trivia:")
+                .unwrap()
+                .handle(component(format!("player_trivia:{id}:1:1"), USER), delivery)
+                .await
+                .unwrap();
+            (id, 2)
+        };
+        let restarted = provider(&fixture, &config, discord());
+        registry(&restarted)
+            .component_handler("player_trivia:")
+            .unwrap()
+            .handle(
+                component(format!("player_trivia:{session_id}:{question}:1"), USER),
+                Arc::new(RecordingResponder::default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .repository()
+                .get_session(session_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn first_click_waiting_on_publication_is_acknowledged_once() {
+    let fixture = Fixture::migrated();
+    let provider = provider(&fixture, &config(fixture.database.path(), &[]), discord());
+    let registry = registry(&provider);
+    let command_handler = registry.command_handler("playertrivia").unwrap();
+    let pause = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+    let delivery = Arc::new(RecordingResponder {
+        publication_pause: Some(Arc::clone(&pause)),
+        ..Default::default()
+    });
+    let publication =
+        tokio::spawn(async move { command_handler.handle(command(USER, None), delivery).await });
+    tokio::time::timeout(Duration::from_secs(10), pause.0.notified())
+        .await
+        .expect("first question reaches Discord");
+    let active = latest_session(&fixture, USER);
+    let id = active.session_id;
+    let answer = active.questions[0].question.correct_index;
+    let acknowledged = Arc::new(tokio::sync::Barrier::new(2));
+    let response = Arc::new(RecordingResponder {
+        defer_barrier: Some(Arc::clone(&acknowledged)),
+        ..Default::default()
+    });
+    let callback = Arc::clone(&response);
+    let button = registry.component_handler("player_trivia:").unwrap();
+    let click = tokio::spawn(async move {
+        button
+            .handle(
+                component(format!("player_trivia:{id}:1:{answer}"), USER),
+                callback,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), acknowledged.wait())
+        .await
+        .expect("click acknowledged while publication is paused");
+    assert!(!click.is_finished());
+    pause.1.notify_one();
+    publication.await.unwrap().unwrap();
+    click.await.unwrap().unwrap();
+    assert_eq!(response.captured.lock().unwrap().defers, [false]);
+    assert_eq!(
+        fixture.repository().get_session(id).unwrap().unwrap().score,
+        1
+    );
+}
+
+#[tokio::test]
+async fn concurrent_final_answers_leave_only_the_completed_scorecard() {
+    let fixture = Fixture::migrated();
+    let id = start_manual(&fixture, 1);
+    let provider = provider(&fixture, &config(fixture.database.path(), &[]), discord());
+    let handler = registry(&provider)
+        .component_handler("player_trivia:")
+        .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let responses = [0, 1].map(|_| {
+        Arc::new(RecordingResponder {
+            defer_barrier: Some(Arc::clone(&barrier)),
+            ..Default::default()
+        })
+    });
+    let request = component(format!("player_trivia:{id}:1:1"), USER);
+    let (first, second) = tokio::join!(
+        handler.handle(request.clone(), responses[0].clone()),
+        handler.handle(request, responses[1].clone())
+    );
+    first.unwrap();
+    second.unwrap();
+    let titles: Vec<_> = responses
+        .iter()
+        .flat_map(|response| {
+            response
+                .captured
+                .lock()
+                .unwrap()
+                .updates
+                .iter()
+                .filter_map(|update| update.embeds[0].title.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(titles, ["Player Trivia — Complete!"]);
 }
 
 fn config(path: &Path, overrides: &[(&str, &str)]) -> ApplicationConfig {
@@ -1041,27 +1220,40 @@ fn test_missing_bot_or_player_trivia_event_service_is_neutral() {
 }
 
 #[tokio::test]
-async fn test_other_player_is_rejected_ephemerally() {
+async fn missing_and_foreign_player_trivia_sessions_are_rejected_privately() {
     let fixture = Fixture::migrated();
     let session_id = start_manual(&fixture, 1);
     let config = config(fixture.database.path(), &[]);
     let provider = provider(&fixture, &config, discord());
-    let responder = Arc::new(RecordingResponder::default());
-    registry(&provider)
+    let handler = registry(&provider)
         .component_handler("player_trivia:")
-        .unwrap()
-        .handle(
-            component(format!("player_trivia:{session_id}:1:0"), USER + 1),
-            responder.clone(),
-        )
-        .await
-        .expect("other user");
-    let captured = responder.captured.lock().unwrap();
-    assert_eq!(
-        captured.immediate[0].content,
-        "This isn't your player-trivia session!"
-    );
-    assert!(captured.immediate[0].ephemeral);
+        .unwrap();
+    for (id, user, message) in [
+        (
+            session_id,
+            USER + 1,
+            "This isn't your player-trivia session!",
+        ),
+        (
+            session_id + 1,
+            USER,
+            "That player-trivia session no longer exists.",
+        ),
+    ] {
+        let responder = Arc::new(RecordingResponder::default());
+        handler
+            .handle(
+                component(format!("player_trivia:{id}:1:0"), user),
+                responder.clone(),
+            )
+            .await
+            .unwrap();
+        let captured = responder.captured.lock().unwrap();
+        assert_eq!(captured.defers, [false]);
+        assert_eq!(captured.followups[0].content, message);
+        assert!(captured.followups[0].ephemeral);
+        assert!(captured.updates.is_empty());
+    }
     assert!(
         fixture
             .repository()
@@ -1144,10 +1336,7 @@ fn wrong_answer_response_continues_with_exact_previous_result_copy() {
 #[tokio::test]
 async fn a_repeated_click_on_a_settled_question_leaves_the_session_running() {
     // A second click on an already-settled question must not end a healthy run
-    // or burn the daily cooldown. This pins the sequential case, which the
-    // stale-question guard handles; the concurrent case, where both clicks pass
-    // that guard and the loser's settle returns None, needs an interleaving
-    // seam the provider does not expose.
+    // or burn the daily cooldown.
     let fixture = Fixture::migrated();
     let session_id = start_manual(&fixture, 3);
     let config = config(fixture.database.path(), &[]);

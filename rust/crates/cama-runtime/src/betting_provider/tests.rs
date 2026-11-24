@@ -468,31 +468,21 @@ fn economy_invest_retry_after_truncates_four_point_two_to_four_seconds() {
     );
 }
 
-#[test]
-fn synthetic_wheel_members_require_explicit_opt_in_and_negative_ids() {
-    assert!(is_enabled_synthetic_wheel_member(-101, true));
-    assert!(!is_enabled_synthetic_wheel_member(-101, false));
-    assert!(!is_enabled_synthetic_wheel_member(101, true));
-}
-
 #[tokio::test]
 async fn wheel_member_snapshot_complete_cache_skips_member_requests() {
-    let visible = resolve_wheel_member_snapshot(
-        vec![1, 2, -101],
-        Some(BTreeSet::from([1, 99])),
-        true,
-        |_| async { panic!("complete cache must not request members") },
-    )
-    .await
-    .expect("complete cached snapshot");
-    assert_eq!(visible, BTreeSet::from([-101, 1]));
-
-    let empty =
-        resolve_wheel_member_snapshot(vec![1, -101], Some(BTreeSet::new()), false, |_| async {
-            panic!("empty complete cache must not request members")
+    let visible =
+        resolve_wheel_member_snapshot(vec![1, 2, -101], Some(BTreeSet::from([1, 99])), |_| async {
+            panic!("complete cache must not request members")
         })
         .await
-        .expect("authoritative empty snapshot");
+        .expect("complete cached snapshot");
+    assert_eq!(visible, BTreeSet::from([1]));
+
+    let empty = resolve_wheel_member_snapshot(vec![1, -101], Some(BTreeSet::new()), |_| async {
+        panic!("empty complete cache must not request members")
+    })
+    .await
+    .expect("authoritative empty snapshot");
     assert!(empty.is_empty());
 }
 
@@ -503,7 +493,7 @@ async fn wheel_member_snapshot_fallback_overlaps_requests_with_a_bound() {
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let started = tokio::time::Instant::now();
-    let visible = resolve_wheel_member_snapshot((1..=24).collect(), None, false, |user_id| {
+    let visible = resolve_wheel_member_snapshot((1..=24).collect(), None, |user_id| {
         let active = Arc::clone(&active);
         let peak = Arc::clone(&peak);
         async move {
@@ -523,8 +513,8 @@ async fn wheel_member_snapshot_fallback_overlaps_requests_with_a_bound() {
 }
 
 #[tokio::test]
-async fn wheel_member_snapshot_fallback_preserves_unknown_and_synthetic_members() {
-    let error = resolve_wheel_member_snapshot(vec![1, 2], None, false, |user_id| async move {
+async fn wheel_member_snapshot_fallback_propagates_lookup_errors_and_skips_invalid_ids() {
+    let error = resolve_wheel_member_snapshot(vec![1, 2], None, |user_id| async move {
         if user_id == 2 {
             Err("Discord unavailable".to_owned())
         } else {
@@ -534,23 +524,13 @@ async fn wheel_member_snapshot_fallback_preserves_unknown_and_synthetic_members(
     .await;
     assert_eq!(error, Err("Discord unavailable".to_owned()));
 
-    for enabled in [false, true] {
-        let visible =
-            resolve_wheel_member_snapshot(vec![-101, 1, 2], None, enabled, |id| async move {
-                assert!(id <= 2, "synthetic IDs must not reach Discord");
-                Ok(id == 1)
-            })
-            .await
-            .expect("synthetic member snapshot");
-        assert_eq!(
-            visible,
-            if enabled {
-                BTreeSet::from([-101, 1])
-            } else {
-                BTreeSet::from([1])
-            }
-        );
-    }
+    let visible = resolve_wheel_member_snapshot(vec![-101, 0, 1, 2], None, |id| async move {
+        assert!((1..=2).contains(&id), "invalid IDs must not reach Discord");
+        Ok(id == 1)
+    })
+    .await
+    .unwrap();
+    assert_eq!(visible, BTreeSet::from([1]));
 }
 
 #[tokio::test(start_paused = true)]
@@ -572,7 +552,7 @@ async fn wheel_member_snapshot_failure_cancels_pending_requests() {
     let started = Arc::new(tokio::sync::Notify::new());
     let cancelled = Arc::new(tokio::sync::Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
-    let result = resolve_wheel_member_snapshot(vec![1, 2], None, false, |user_id| {
+    let result = resolve_wheel_member_snapshot(vec![1, 2], None, |user_id| {
         let started = Arc::clone(&started);
         let cancelled = Arc::clone(&cancelled);
         let dropped = Arc::clone(&dropped);
@@ -3162,7 +3142,6 @@ fn wheel_interaction_timeout_policy_matches_python_views() {
             minigame_jc_delta_scale: 1.0,
             prediction_contract_value: 10,
             prediction_initial_fair_default: 50,
-            synthetic_members_enabled: false,
             disburse_min_fund: 0,
             lottery_activity_days: 14,
             economy_events_enabled: false,
@@ -3524,6 +3503,75 @@ async fn disbursement_worker_settles_a_legacy_ballot_without_another_vote() {
         assert_eq!(empty.quorum_required, 1);
         assert!(!empty.quorum_reached());
     }
+}
+
+#[tokio::test]
+async fn stale_disbursement_worker_snapshot_cannot_reopen_a_reset_ballot() {
+    let database = NamedTempFile::new().unwrap();
+    initialize_or_migrate(database.path()).unwrap();
+    let repository = DisbursementRepository::new(database.path());
+    let proposal = repository.create_proposal_atomic(Some(42), 900, 0).unwrap();
+    repository.set_proposal_message(&proposal, 55, 77).unwrap();
+    let queued = repository.get_active_proposal(Some(42)).unwrap().unwrap();
+    cama_db::open_runtime_connection(database.path()).unwrap().execute_batch(
+        "INSERT INTO players(guild_id,discord_id,discord_username) VALUES(42,1,'one'),(42,2,'two'),(42,3,'three');
+         INSERT INTO matches(match_id,guild_id,team1_players,team2_players,match_date)
+            VALUES(1,42,'[]','[]',CURRENT_TIMESTAMP);
+         INSERT INTO match_participants(match_id,guild_id,discord_id,team_number) VALUES(1,42,1,1),(1,42,2,1),(1,42,3,2);"
+    ).unwrap();
+    let latest = repository
+        .add_vote(Some(42), queued.proposal_id, 1, "burn")
+        .unwrap();
+    assert_eq!(latest.quorum_required, 2);
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .unwrap();
+    let edit_gate = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+    let discord = Arc::new(PartialMemberCacheDiscord {
+        first_edit_gate: Mutex::new(Some(edit_gate.clone())),
+        ..Default::default()
+    });
+    let provider = BettingRegistrationProvider::new(database.path(), &config, discord.clone());
+    let responder: Arc<dyn InteractionResponder> = Arc::new(RecordingResponder::default());
+    let action = InteractionOption {
+        name: "action".to_owned(),
+        value: InteractionValue::String("reset".to_owned()),
+    };
+    let (published, ()) = tokio::join!(provider.handler.reconcile_disbursement(&queued), async {
+        edit_gate.0.notified().await;
+        let actions = [action];
+        let reset =
+            provider
+                .handler
+                .disburse(1, Some(42), MANAGE_GUILD_PERMISSION, &actions, &responder);
+        tokio::pin!(reset);
+        tokio::select! {
+            biased;
+            _ = &mut reset => panic!("reset completed while the open-ballot edit was in flight"),
+            () = std::future::ready(()) => {}
+        }
+        edit_gate.1.notify_one();
+        reset.await.unwrap();
+    });
+    published.unwrap();
+    provider
+        .handler
+        .reconcile_disbursement(&queued)
+        .await
+        .unwrap();
+    assert!(repository.get_active_proposal(Some(42)).unwrap().is_none());
+    let edits = discord.edits.lock().unwrap();
+    assert_eq!(edits.len(), 2);
+    assert_eq!(edits[0].response, disbursement_proposal_response(&latest));
+    assert!(
+        edits[1]
+            .response
+            .components
+            .iter()
+            .flat_map(|row| &row.buttons)
+            .all(|button| button.disabled)
+    );
 }
 
 #[tokio::test]
@@ -4357,6 +4405,8 @@ struct PartialMemberCacheDiscord {
     /// When set, channel sends are recorded in `sent` instead of refused.
     accept_sends: bool,
     sent: Mutex<Vec<(u64, DiscordMessage)>>,
+    edits: Mutex<Vec<DiscordMessage>>,
+    first_edit_gate: Mutex<Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>>,
 }
 
 #[async_trait]
@@ -4390,8 +4440,14 @@ impl DiscordTransport for PartialMemberCacheDiscord {
         &self,
         _channel_id: u64,
         _message_id: u64,
-        _message: DiscordMessage,
+        message: DiscordMessage,
     ) -> Result<(), String> {
+        let gate = self.first_edit_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.0.notify_one();
+            gate.1.notified().await;
+        }
+        self.edits.lock().unwrap().push(message);
         Ok(())
     }
 

@@ -1154,7 +1154,7 @@ fn investment_snapshot(
            FROM autobet_investments i
            LEFT JOIN players p
              ON p.guild_id=i.guild_id AND p.discord_id=i.investor_id
-          WHERE i.guild_id=?1 AND i.target_id IN ({placeholders})
+          WHERE i.guild_id=?1 AND i.investor_id>0 AND i.target_id IN ({placeholders})
           ORDER BY i.investor_id,i.target_id"
     );
     let mut values = Vec::with_capacity(targets.len() + 1);
@@ -1189,7 +1189,7 @@ fn wealth_snapshot(
     let mut statement = transaction.prepare(
         "SELECT discord_id,COALESCE(jopacoin_balance,0)
            FROM players
-          WHERE guild_id=?1 AND COALESCE(jopacoin_balance,0)>=1
+          WHERE guild_id=?1 AND discord_id>0 AND COALESCE(jopacoin_balance,0)>=1
           ORDER BY wins DESC,glicko_rating DESC,rowid ASC",
     )?;
     let rows = statement
@@ -1569,7 +1569,14 @@ mod tests {
         connection
             .pragma_update(None, "foreign_keys", false)
             .expect("disable unrelated legacy foreign-key mismatch for fixture setup");
-        for (discord_id, balance) in [(1, 100), (2, -5), (3, 100), (11, 1_000), (12, 1)] {
+        for (discord_id, balance) in [
+            (-1, 99_000),
+            (1, 100),
+            (2, -5),
+            (3, 100),
+            (11, 1_000),
+            (12, 1),
+        ] {
             connection
                 .execute(
                     "INSERT INTO players(
@@ -1579,7 +1586,7 @@ mod tests {
                 )
                 .expect("insert planner player");
         }
-        for (investor_id, target_id) in [(1, 2), (11, 1)] {
+        for (investor_id, target_id) in [(-1, 1), (1, 2), (11, 1)] {
             connection
                 .execute(
                     "INSERT INTO autobet_investments(
@@ -1621,6 +1628,16 @@ mod tests {
         )
         .expect("freeze financial planner intents");
         transaction.rollback().expect("close planner transaction");
+        assert!(
+            plan.wealth_snapshot
+                .iter()
+                .all(|wallet| wallet.discord_id > 0)
+        );
+        assert!(
+            plan.investment_positions
+                .iter()
+                .all(|position| position.investor_id > 0)
+        );
 
         let effect = |kind: DraftFinancialEffectKind, discord_id: i64| {
             plan.effects
@@ -1676,6 +1693,13 @@ mod tests {
         assert_eq!(skipped.intended["amount"], json!(0));
         assert_eq!(skipped.intended["successful_rank"], json!(1));
 
+        let mut malformed = plan.clone();
+        malformed.wealth_snapshot[0].discord_id = -1;
+        assert!(
+            malformed
+                .validate_for_identity(42, 7, pending_match_id)
+                .is_err()
+        );
         let mut malformed = plan.clone();
         malformed.effects[1].effect_key = "draft:42:7:blind:999:1".to_owned();
         assert!(matches!(

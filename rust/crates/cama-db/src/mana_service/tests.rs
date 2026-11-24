@@ -206,6 +206,7 @@ fn test_guild_id_none_normalised_to_zero() {
 fn test_get_all_mana_returns_guild_rows() {
     let fixture = Fixture::new();
     for (discord_id, guild_id, land) in [
+        (-1, GUILD, "Plains"),
         (1, GUILD, "Island"),
         (2, GUILD, "Mountain"),
         (3, OTHER_GUILD, "Forest"),

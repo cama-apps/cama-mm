@@ -655,7 +655,7 @@ fn read_distribution_roster(
     let mut statement = connection.prepare(
         "SELECT discord_id, COALESCE(discord_username,''), COALESCE(jopacoin_balance,0),
                 COALESCE(wins,0), COALESCE(losses,0), unixepoch(last_match_date)
-         FROM players WHERE guild_id=?1 AND discord_id IS NOT NULL ORDER BY discord_id",
+         FROM players WHERE guild_id=?1 AND discord_id > 0 ORDER BY discord_id",
     )?;
     statement
         .query_map([guild_id], |row| {
@@ -678,7 +678,7 @@ fn active_quorum(connection: &Connection, guild_id: i64) -> rusqlite::Result<i64
          FROM matches m
          CROSS JOIN match_participants mp ON mp.match_id=m.match_id AND mp.guild_id=m.guild_id
          JOIN players p ON p.discord_id=mp.discord_id AND p.guild_id=mp.guild_id
-         WHERE m.guild_id=?1 AND mp.team_number IN (1,2)
+         WHERE m.guild_id=?1 AND mp.discord_id > 0 AND mp.team_number IN (1,2)
            AND datetime(m.match_date, 'auto') BETWEEN datetime('now', '-30 days') AND datetime('now')",
         [guild_id],
         |row| row.get(0),
@@ -872,7 +872,7 @@ mod tests {
             "INSERT INTO disburse_proposals(guild_id,proposal_id,fund_amount,quorum_required,status)
              VALUES(7,100,50,99,'active');
              INSERT INTO players(guild_id,discord_id,discord_username)
-             VALUES(7,1,'one'),(7,2,'two'),(7,3,'three'),(7,4,'four'),(7,5,'five'),(8,5,'five');
+             VALUES(7,1,'one'),(7,2,'two'),(7,3,'three'),(7,4,'four'),(7,5,'five'),(8,5,'five'),(7,-1,'legacy'),(7,-2,'legacy');
              INSERT INTO matches(match_id,guild_id,team1_players,team2_players,match_date)
              VALUES(1,7,'[]','[]',datetime('now','-1 day')),
                    (2,7,'[]','[]',unixepoch('now','-29 days')),
@@ -880,8 +880,14 @@ mod tests {
                    (4,8,'[]','[]',CURRENT_TIMESTAMP);
              INSERT INTO match_participants(match_id,guild_id,discord_id,team_number)
              VALUES(1,7,1,1),(2,7,1,1),(2,7,2,1),(2,7,3,2),(2,7,99,2),
-                   (3,7,4,2),(4,8,5,1);",
+                   (3,7,4,2),(4,8,5,1),(1,7,-1,1),(1,7,-2,1);",
         ).unwrap();
+        assert!(
+            read_distribution_roster(&db, 7)
+                .unwrap()
+                .iter()
+                .all(|player| player.discord_id > 0)
+        );
         let ballot = repository.add_vote(Some(7), 100, 1, "burn").unwrap();
         assert_eq!(ballot.quorum_required, 2);
         assert!(!ballot.quorum_reached());

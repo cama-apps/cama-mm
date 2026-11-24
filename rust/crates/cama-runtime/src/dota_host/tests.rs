@@ -393,7 +393,6 @@ impl Fixture {
             configuration: None,
             last_configuration: None,
             test_mode: DotaHostTestMode::Off,
-            fake_roster: Vec::new(),
             simulated_winner: None,
             start_mode: StartMode::Automatic,
             manual_start_requested: false,
@@ -587,36 +586,21 @@ impl Fixture {
             .unwrap();
         let repo = PendingMatchRepository::new(&f.worker.path);
         let mut pending = repo.pending_match(1, f.pending).unwrap().unwrap();
-        // Internal fake-port tests seed a reservation explicitly; production
-        // creation rejects fake players before reserving the real account.
         pending
             .state
             .extra
             .insert("dota_host_account_key".into(), "99".into());
-        pending.state.radiant_team_ids = vec![1, -1, -2, -3, -4];
-        pending.state.dire_team_ids = vec![-5, -6, -7, -8, -9];
         repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
             .unwrap();
         GuildConfigRepository::new(&f.worker.path, false)
             .set_league_id(1, 123)
             .unwrap();
-        let players = cama_db::core_repositories::PlayerRepository::new(&f.worker.path);
-        for id in -9..=-1 {
-            players
-                .add(&cama_db::core_repositories::NewPlayer::new(
-                    id,
-                    format!("FakeUser{}", -id),
-                    Some(1),
-                ))
-                .unwrap();
-        }
         let links = OpenDotaPlayerRepository::new(&f.worker.path);
-        if link_real {
-            links.add_steam_id(1, 1, true, 100).unwrap();
+        for id in 1..=10 {
+            if link_real || id != 1 {
+                links.add_steam_id(id, id, true, 100).unwrap();
+            }
         }
-        // Even an old link attached to a fake placeholder must never cause
-        // a real invitation to that Steam account.
-        links.add_steam_id(-1, 42, true, 100).unwrap();
         f
     }
 }
@@ -850,14 +834,13 @@ async fn simulation_obeys_manual_start_before_running_stages() {
 }
 
 #[tokio::test]
-async fn real_lobby_preview_invites_only_real_player_and_never_launches_or_settles() {
+async fn real_lobby_preview_invites_linked_players_and_never_launches_or_settles() {
     let f = Fixture::preview(DotaHostTestMode::RealLobby, true);
     f.worker.tick(&f.port, 100).await.unwrap();
     let saved: SessionState = serde_json::from_value(f.session().payload).unwrap();
     assert_eq!(saved.test_mode, DotaHostTestMode::RealLobby);
     assert_eq!(saved.settings.name, format!("Cama TEST #{}", f.pending));
-    assert_eq!(saved.roster.len(), 1);
-    assert_eq!(saved.fake_roster.len(), 9);
+    assert_eq!(saved.roster.len(), 10);
     assert_eq!(saved.settings.visibility, 2);
     assert_eq!(saved.settings.league_id, 123);
     assert_eq!(saved.settings.server_region, 27);
@@ -867,20 +850,15 @@ async fn real_lobby_preview_invites_only_real_player_and_never_launches_or_settl
         slot: 0,
     }];
     f.worker.tick(&f.port, 101).await.unwrap();
-    assert!(
-        f.port
-            .calls
-            .lock()
-            .unwrap()
-            .contains(&"invite:1".to_owned())
-    );
-    assert!(
-        !f.port
-            .calls
-            .lock()
-            .unwrap()
-            .contains(&"invite:42".to_owned())
-    );
+    let invited: std::collections::BTreeSet<_> = f
+        .port
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call.strip_prefix("invite:")?.parse::<u32>().ok())
+        .collect();
+    assert_eq!(invited, (1..=10).collect());
     assert!(
         f.port.lobby.lock().unwrap().as_ref().unwrap().members[0]
             .side
@@ -917,11 +895,17 @@ async fn real_lobby_preview_invites_only_real_player_and_never_launches_or_settl
 async fn real_lobby_preview_returns_wrong_side_player_to_pool_and_preserves_correct_side() {
     let f = Fixture::preview(DotaHostTestMode::RealLobby, true);
     f.worker.tick(&f.port, 100).await.unwrap();
-    f.port.lobby.lock().unwrap().as_mut().unwrap().members = vec![LobbySeat {
-        account_id: 1,
-        side: Some(Side::Dire),
-        slot: 1,
-    }];
+    {
+        let mut current = f.port.lobby.lock().unwrap();
+        let lobby_state = current.as_mut().unwrap();
+        lobby_state.members = lobby(
+            &serde_json::from_value::<SessionState>(f.session().payload)
+                .unwrap()
+                .settings,
+        )
+        .members;
+        lobby_state.members[0].side = Some(Side::Dire);
+    }
     f.worker.tick(&f.port, 101).await.unwrap();
     assert!(f.port.calls.lock().unwrap().contains(&"pool:1".to_owned()));
     assert!(
@@ -951,20 +935,19 @@ async fn real_lobby_preview_returns_wrong_side_player_to_pool_and_preserves_corr
 }
 
 #[tokio::test]
-async fn test_discovery_rejects_unlinked_real_players_unregistered_fakes_and_disabled_mode() {
-    for (mode, link_real, remove_fake) in [
-        (DotaHostTestMode::Off, true, false),
+async fn discovery_rejects_incomplete_links_and_legacy_placeholder_rosters() {
+    for (mode, linked, placeholder) in [
+        (DotaHostTestMode::Off, true, true),
         (DotaHostTestMode::RealLobby, false, false),
         (DotaHostTestMode::RealLobby, true, true),
+        (DotaHostTestMode::Simulated, true, true),
     ] {
-        let f = Fixture::preview(mode, link_real);
-        if remove_fake {
-            let connection = rusqlite::Connection::open(&f.worker.path).unwrap();
-            connection
-                .pragma_update(None, "foreign_keys", false)
-                .unwrap();
-            connection
-                .execute("DELETE FROM players WHERE discord_id=-9 AND guild_id=1", [])
+        let f = Fixture::preview(mode, linked);
+        if placeholder {
+            let repo = PendingMatchRepository::new(&f.worker.path);
+            let mut pending = repo.pending_match(1, f.pending).unwrap().unwrap();
+            pending.state.dire_team_ids[4] = -10;
+            repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
                 .unwrap();
         }
         f.worker.tick(&f.port, 100).await.unwrap();
@@ -976,6 +959,31 @@ async fn test_discovery_rejects_unlinked_real_players_unregistered_fakes_and_dis
         );
         assert!(f.port.calls.lock().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn historical_preview_with_placeholder_seats_releases_the_host() {
+    let f = Fixture::preview(DotaHostTestMode::RealLobby, true);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    let mut record = f.session();
+    record.payload["roster"].as_array_mut().unwrap().truncate(1);
+    record.payload["fake_roster"] = serde_json::json!([[-1, true], [-2, false]]);
+    DotaSessionRepository::new(&f.worker.path)
+        .update(&record, record.revision, 101)
+        .unwrap();
+    f.port.calls.lock().unwrap().clear();
+    f.worker.tick(&f.port, 102).await.unwrap();
+    f.worker.tick(&f.port, 103).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Cancelled);
+    assert!(f.port.lobby.lock().unwrap().is_none());
+    assert!(
+        !f.port
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "launch" || call.starts_with("invite:"))
+    );
 }
 
 #[tokio::test]
@@ -1037,7 +1045,7 @@ async fn enabling_test_mode_cannot_adopt_an_existing_production_session() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn simulated_worker_runs_fake_roster_to_result_without_recording_or_betting_changes() {
+async fn simulated_worker_runs_linked_roster_to_result_without_recording_or_betting_changes() {
     let mut f = Fixture::preview(DotaHostTestMode::Simulated, true);
     let discord = Arc::new(TestDiscord::default());
     f.worker.discord = discord.clone();

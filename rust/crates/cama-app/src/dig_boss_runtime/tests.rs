@@ -15,7 +15,7 @@ use crate::boss_multi_tier::{
 };
 use crate::vanity_tax_service::{VanityMember, VanityTaxService};
 
-const PLAYER: i64 = -84_001;
+const PLAYER: i64 = 84_001;
 const GUILD: i64 = 84_002;
 
 fn key() -> PlayerKey {

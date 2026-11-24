@@ -253,6 +253,11 @@ impl PlayerRepository {
     }
 
     pub fn add(&self, player: &NewPlayer) -> Result<(), CoreRepositoryError> {
+        if player.discord_id <= 0 {
+            return Err(CoreRepositoryError::InvalidInput(
+                "player registration requires a positive Discord ID".to_owned(),
+            ));
+        }
         let guild_id = Self::normalize_guild_id(player.guild_id);
         let connection = self.connection()?;
         if connection
@@ -363,14 +368,13 @@ impl PlayerRepository {
             .collect())
     }
 
-    /// Return every registered player in one guild using SQLite's natural
-    /// row order, matching Python's unqualified `SELECT * FROM players`.
+    /// Return registered Discord players in one guild in natural row order.
     ///
     /// Daily mana assignment consumes entropy in this order, so this is kept
     /// separate from the sorted leaderboard queries.
     pub fn get_all(&self, guild_id: Option<i64>) -> Result<Vec<Player>, CoreRepositoryError> {
         let connection = self.connection()?;
-        let sql = format!("{PLAYER_SELECT} WHERE guild_id = ?1");
+        let sql = format!("{PLAYER_SELECT} WHERE guild_id = ?1 AND discord_id > 0 ORDER BY rowid");
         let mut statement = connection.prepare(&sql)?;
         statement
             .query_map([Self::normalize_guild_id(guild_id)], player_from_row)?
@@ -388,12 +392,12 @@ impl PlayerRepository {
     ) -> Result<Vec<i64>, CoreRepositoryError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT discord_id FROM players WHERE guild_id = ?1
+            "SELECT discord_id FROM (SELECT discord_id FROM players WHERE guild_id = ?1
              UNION SELECT discord_id FROM bets WHERE guild_id = ?1
              UNION SELECT sender_id FROM tip_transactions WHERE guild_id = ?1
              UNION SELECT recipient_id FROM tip_transactions WHERE guild_id = ?1
              UNION SELECT discord_id FROM trivia_sessions WHERE guild_id = ?1
-             UNION SELECT discord_id FROM wrapped_enrichment_facts WHERE guild_id = ?1
+             UNION SELECT discord_id FROM wrapped_enrichment_facts WHERE guild_id = ?1) WHERE discord_id > 0
              ORDER BY 1",
         )?;
         statement
@@ -960,7 +964,7 @@ impl PlayerRepository {
             ""
         };
         let sql = format!(
-            "{PLAYER_SELECT} WHERE guild_id = ?1{games_clause}
+            "{PLAYER_SELECT} WHERE guild_id = ?1 AND discord_id > 0{games_clause}
              ORDER BY {ordering} LIMIT ?2 OFFSET ?3"
         );
         let mut statement = connection.prepare(&sql)?;
@@ -1056,7 +1060,7 @@ impl PlayerRepository {
             ""
         };
         let sql = format!(
-            "{PLAYER_SELECT} WHERE guild_id = ?1{eligibility} AND ({comparison})
+            "{PLAYER_SELECT} WHERE guild_id = ?1 AND discord_id > 0{eligibility} AND ({comparison})
              ORDER BY {ordering} LIMIT 1"
         );
         let minimum = min_balance.unwrap_or(balance);
@@ -8678,41 +8682,41 @@ mod tests {
     #[test]
     fn concurrent_steals_are_serialized_without_lost_updates() {
         let fixture = Fixture::new_durable();
-        for discord_id in [-1, -2, -3] {
+        for discord_id in [1, 2, 3] {
             fixture.add_player(discord_id, TEST_GUILD_ID);
         }
         fixture
             .players
-            .update_balance(-1, Some(TEST_GUILD_ID), 0)
+            .update_balance(1, Some(TEST_GUILD_ID), 0)
             .unwrap();
         fixture
             .players
-            .update_balance(-2, Some(TEST_GUILD_ID), 0)
+            .update_balance(2, Some(TEST_GUILD_ID), 0)
             .unwrap();
         fixture
             .players
-            .update_balance(-3, Some(TEST_GUILD_ID), 100)
+            .update_balance(3, Some(TEST_GUILD_ID), 100)
             .unwrap();
         let left = fixture.players.clone();
         let right = fixture.players.clone();
         let first = std::thread::spawn(move || {
-            left.steal_atomic_with_context(-1, -3, Some(TEST_GUILD_ID), 30, None)
+            left.steal_atomic_with_context(1, 3, Some(TEST_GUILD_ID), 30, None)
                 .unwrap()
         });
         let second = std::thread::spawn(move || {
             right
-                .steal_atomic_with_context(-2, -3, Some(TEST_GUILD_ID), 40, None)
+                .steal_atomic_with_context(2, 3, Some(TEST_GUILD_ID), 40, None)
                 .unwrap()
         });
         first.join().unwrap();
         second.join().unwrap();
         let balances = fixture
             .players
-            .get_balances_bulk(&[-1, -2, -3], Some(TEST_GUILD_ID))
+            .get_balances_bulk(&[1, 2, 3], Some(TEST_GUILD_ID))
             .unwrap();
-        assert_eq!(balances.get(&-1), Some(&30));
-        assert_eq!(balances.get(&-2), Some(&40));
-        assert_eq!(balances.get(&-3), Some(&30));
+        assert_eq!(balances.get(&1), Some(&30));
+        assert_eq!(balances.get(&2), Some(&40));
+        assert_eq!(balances.get(&3), Some(&30));
     }
 
     #[test]
@@ -9256,6 +9260,41 @@ mod tests {
         fixture.add_player(11, TEST_GUILD_ID);
         fixture.add_player(12, TEST_GUILD_ID);
         fixture.add_player(99, TEST_GUILD_ID_SECONDARY);
+        for id in [0, -1] {
+            assert!(matches!(
+                fixture
+                    .players
+                    .add(&NewPlayer::new(id, "retired", Some(TEST_GUILD_ID))),
+                Err(CoreRepositoryError::InvalidInput(_))
+            ));
+        }
+        fixture
+            .connection()
+            .execute(
+                "INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance)
+             VALUES(-1,?1,'legacy',10000)",
+                [TEST_GUILD_ID],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.players.get_all(Some(TEST_GUILD_ID)).unwrap().len(),
+            2
+        );
+        assert_eq!(
+            fixture
+                .players
+                .get_leaderboard(Some(TEST_GUILD_ID), 1, 0)
+                .unwrap()[0]
+                .discord_id,
+            Some(11)
+        );
+        assert!(
+            fixture
+                .players
+                .get_by_id(-1, Some(TEST_GUILD_ID))
+                .unwrap()
+                .is_some()
+        );
         let connection = fixture.connection();
         connection
             .execute(

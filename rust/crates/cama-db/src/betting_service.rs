@@ -1254,7 +1254,7 @@ impl BettingServiceRepository {
             && !json_bool(&payload, "is_draft").unwrap_or(false);
         for discord_id in participants
             .intersection(&requested_participants)
-            .filter(|_| grant_exclusions)
+            .filter(|id| grant_exclusions && **id > 0)
         {
             transaction.execute(
                 "UPDATE players SET exclusion_count=COALESCE(exclusion_count,0)+1,
@@ -2153,7 +2153,7 @@ fn configured_investments_in_transaction(
     let sql = format!(
         "SELECT guild_id, investor_id, target_id, direction, percentage
          FROM autobet_investments
-         WHERE guild_id = ?1 AND target_id IN ({placeholders})
+         WHERE guild_id = ?1 AND investor_id > 0 AND target_id > 0 AND target_id IN ({placeholders})
          ORDER BY investor_id ASC, target_id ASC"
     );
     let mut values = Vec::with_capacity(target_ids.len() + 1);
@@ -2405,6 +2405,9 @@ fn validate_pending_bet_with_setup(
     }
     let radiant_ids = json_i64_array(payload, "radiant_team_ids");
     let dire_ids = json_i64_array(payload, "dire_team_ids");
+    if !allow_setup && radiant_ids.iter().chain(&dire_ids).any(|id| *id <= 0) {
+        return Err(BettingServiceRepositoryError::BettingClosed);
+    }
     let participant_team = if radiant_ids.contains(&request.discord_id) {
         Some(BettingTeam::Radiant)
     } else if dire_ids.contains(&request.discord_id) {

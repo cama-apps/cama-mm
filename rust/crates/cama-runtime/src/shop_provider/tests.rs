@@ -993,6 +993,13 @@ async fn all_fifteen_mana_items_complete_durably_and_reject_replay_after_restart
         let connection = fixture.connection();
         connection
             .execute(
+                "INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance)
+                 VALUES(-1,?1,'Retired',10000)",
+                [i64::try_from(GUILD).unwrap()],
+            )
+            .expect("seed legacy player");
+        connection
+            .execute(
                 "INSERT INTO player_mana(
                    discord_id,guild_id,current_land,assigned_date,consumed_today,
                    white_shield_remaining)
@@ -1060,6 +1067,18 @@ async fn all_fifteen_mana_items_complete_durably_and_reject_replay_after_restart
         );
         let purchase_id = format!("shop-mana:{GUILD}:{interaction_id}");
         let connection = fixture.connection();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT jopacoin_balance FROM players WHERE discord_id=-1 AND guild_id=?1",
+                    [i64::try_from(GUILD).unwrap()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            10_000,
+            "{} affected a retired account",
+            spec.key,
+        );
         assert_eq!(
             connection
                 .query_row(
@@ -1864,6 +1883,20 @@ async fn recalibration_debit_and_uncertainty_reset_are_atomic_and_restart_durabl
             params![i64::try_from(BUYER).unwrap(), i64::try_from(GUILD).unwrap()],
         )
         .expect("seed recalibration rating");
+    let today = pacific_mana_day(fixture.provider.handler.clock.now().unwrap()).unwrap();
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO player_mana(discord_id,guild_id,current_land,assigned_date,consumed_today)
+         VALUES(?1,?2,'Island',?3,0)",
+            params![
+                i64::try_from(BUYER).unwrap(),
+                i64::try_from(GUILD).unwrap(),
+                today
+            ],
+        )
+        .unwrap();
+    let discounted_cost = fixture.provider.handler.config.recalibrate_cost * 9 / 10;
     let responder = Arc::new(Responder::default());
     fixture
         .registry()
@@ -1883,6 +1916,12 @@ async fn recalibration_debit_and_uncertainty_reset_are_atomic_and_restart_durabl
             followups[0].embeds[0].title.as_deref(),
             Some("Rating Recalibration")
         );
+        let cost = followups[0].embeds[0]
+            .fields
+            .iter()
+            .find(|field| field.name == "Cost")
+            .unwrap();
+        assert_eq!(cost.value, format!("{discounted_cost} {JOPACOIN_EMOTE}"));
         assert_eq!(
             followups[0].embeds[0]
                 .description
@@ -1912,10 +1951,14 @@ async fn recalibration_debit_and_uncertainty_reset_are_atomic_and_restart_durabl
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(
-        balance,
-        starting_balance - fixture.provider.handler.config.recalibrate_cost
-    );
+    assert_eq!(balance, starting_balance - discounted_cost);
+    let charge: (i64, i64) = connection.query_row(
+        "SELECT COUNT(*),SUM(delta) FROM economy_ledger_entries
+         WHERE guild_id=?1 AND account_type='player' AND account_id=?2 AND actor_id=?2 AND source='shop_recalibrate'",
+        params![i64::try_from(GUILD).unwrap(), i64::try_from(BUYER).unwrap()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!(charge, (1, -discounted_cost));
     assert_eq!(rd, fixture.provider.handler.config.recalibration_initial_rd);
     drop(connection);
 
@@ -1954,6 +1997,74 @@ async fn recalibration_debit_and_uncertainty_reset_are_atomic_and_restart_durabl
             .unwrap(),
         balance
     );
+}
+
+#[tokio::test]
+async fn failed_recalibration_rolls_back_the_debit_and_its_ledger_entry() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 1_000);
+    let db = fixture.connection();
+    db.execute_batch(
+        "UPDATE players SET wins=5,glicko_rating=1700,glicko_rd=100,glicko_volatility=0.04;
+         CREATE TRIGGER fail_rating_write BEFORE UPDATE OF glicko_rd ON players
+         BEGIN SELECT RAISE(ABORT,'injected rating failure'); END;",
+    )
+    .unwrap();
+    let responder = Arc::new(Responder::default());
+    let error = fixture
+        .registry()
+        .command_handler("shop")
+        .unwrap()
+        .handle(
+            command("buy", vec![string("item", "recalibrate")], 23_002),
+            responder,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("injected rating failure"));
+    let state: (i64, i64, i64, i64) = db
+        .query_row(
+            "SELECT jopacoin_balance,lowest_balance_ever,
+                (SELECT COUNT(*) FROM economy_ledger_entries WHERE source='shop_recalibrate'),
+                (SELECT COUNT(*) FROM recalibration_state)
+         FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![i64::try_from(BUYER).unwrap(), i64::try_from(GUILD).unwrap()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(state, (1_000, 1_000, 0, 0));
+
+    db.execute_batch(
+        "DROP TRIGGER fail_rating_write;
+         UPDATE players SET jopacoin_balance=5;",
+    )
+    .unwrap();
+    let responder = Arc::new(Responder::default());
+    fixture
+        .registry()
+        .command_handler("shop")
+        .unwrap()
+        .handle(
+            command("buy", vec![string("item", "recalibrate")], 23_003),
+            responder.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        responder.followups.lock().unwrap()[0]
+            .content
+            .contains("only have **5**")
+    );
+    let rejected: (f64, i64, i64) = db
+        .query_row(
+            "SELECT glicko_rd,(SELECT COUNT(*) FROM recalibration_state),
+         (SELECT COUNT(*) FROM economy_ledger_entries WHERE source='shop_recalibrate')
+         FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![i64::try_from(BUYER).unwrap(), i64::try_from(GUILD).unwrap()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(rejected, (100.0, 0, 0));
 }
 
 #[tokio::test]

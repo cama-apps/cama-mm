@@ -17,6 +17,7 @@ pub mod profit_deductions;
 mod runtime_connection;
 pub mod schema_manager;
 pub mod schema_manager_contracts;
+pub mod shop_purchase;
 pub mod steam_identity;
 
 #[cfg(test)]

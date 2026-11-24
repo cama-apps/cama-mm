@@ -21,7 +21,7 @@ use cama_app::reminders::{
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-#[cfg(all(test, feature = "runtime-test-dig"))]
+#[cfg(all(test, any(feature = "runtime-test-dig", feature = "runtime-test-core")))]
 use cama_app::reminders::ScheduledReminder;
 
 use crate::application_config::ApplicationConfig;
@@ -187,7 +187,7 @@ impl ReminderRuntimeState {
             .map_err(|_| "reminder timer lock was poisoned".to_owned())
     }
 
-    #[cfg(all(test, feature = "runtime-test-dig"))]
+    #[cfg(all(test, any(feature = "runtime-test-dig", feature = "runtime-test-core")))]
     fn task_snapshot(&self, key: ReminderTaskKey) -> Result<Option<ScheduledReminder>, String> {
         Ok(self.lock_service()?.task(key).cloned())
     }
@@ -604,7 +604,7 @@ impl ReminderHooks {
         Ok(())
     }
 
-    #[cfg(all(test, feature = "runtime-test-dig"))]
+    #[cfg(all(test, any(feature = "runtime-test-dig", feature = "runtime-test-core")))]
     pub(crate) fn test_task_snapshot(
         &self,
         key: ReminderTaskKey,

@@ -434,6 +434,20 @@ fn settlement_rejects_disagreement_with_committed_winner_before_any_money_change
 }
 
 #[test]
+fn matchmaking_regression_legacy_synthetic_match_refuses_new_public_wagers() {
+    let file = fixture();
+    add_pending(file.path(), 11, false);
+    add_player(file.path(), 1, 200);
+    Connection::open(file.path()).unwrap().execute(
+        "UPDATE pending_matches SET payload=json_set(payload,'$.dire_team_ids',json('[-1]')) WHERE pending_match_id=11", []).unwrap();
+    assert!(matches!(
+        repo(file.path()).place_bet_atomic(request(11, 1, BettingTeam::Radiant, 10)),
+        Err(BettingServiceRepositoryError::BettingClosed)
+    ));
+    assert_eq!(balance(file.path(), 1), 200);
+}
+
+#[test]
 fn incomplete_setup_blocks_public_wagers_but_can_place_and_replay_automatic_batch() {
     let file = fixture();
     add_pending(file.path(), 11, false);
@@ -1468,7 +1482,15 @@ fn test_configured_investments_use_snapshot_team_policy_and_attribution() {
     }
     add_player(file.path(), 11, 100);
     add_player(file.path(), 12, 100);
+    add_player(file.path(), -1, 99_000);
     let connection = Connection::open(file.path()).expect("open fixture");
+    connection
+        .execute(
+            "INSERT INTO autobet_investments(guild_id,investor_id,target_id,direction,percentage)
+             VALUES(?1,-1,1,'long',10)",
+            [GUILD],
+        )
+        .unwrap();
     connection
         .execute(
             "INSERT INTO autobet_investments
@@ -1497,6 +1519,7 @@ fn test_configured_investments_use_snapshot_team_policy_and_attribution() {
         .expect("configured investments");
     assert_eq!(outcome.created.len(), 2);
     assert!(outcome.skipped.is_empty());
+    assert_eq!(balance(file.path(), -1), 99_000);
     assert_eq!(balance(file.path(), 11), 90);
     assert_eq!(balance(file.path(), 12), 90);
     let rows = connection

@@ -199,6 +199,7 @@ pub enum RecalibrationEligibility {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RecalibrationSuccess {
+    pub cost: i64,
     pub old_rating: f64,
     pub old_rd: f64,
     pub old_volatility: f64,
@@ -212,6 +213,7 @@ pub struct RecalibrationSuccess {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RecalibrationExecution {
+    InsufficientBalance { cost: i64, balance: i64 },
     Rejected(RecalibrationEligibility),
     Success(RecalibrationSuccess),
 }
@@ -339,12 +341,12 @@ impl RatingHistoryRepository {
     }
 
     fn recalibration_player(
-        &self,
+        connection: &Connection,
         discord_id: i64,
         guild_id: Option<i64>,
     ) -> Result<Option<RecalibrationPlayer>, RecalibrationRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
-        self.connection()?
+        connection
             .query_row(
                 "SELECT glicko_rating,glicko_rd,glicko_volatility,os_sigma,
                         COALESCE(wins,0)+COALESCE(losses,0)
@@ -373,9 +375,18 @@ impl RatingHistoryRepository {
         &self,
         request: RecalibrationRequest,
     ) -> Result<(i64, Option<f64>), RecalibrationRepositoryError> {
-        let guild_id = Self::normalize_guild_id(request.guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = Self::apply_recalibration(&transaction, request)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    fn apply_recalibration(
+        transaction: &Transaction<'_>,
+        request: RecalibrationRequest,
+    ) -> Result<(i64, Option<f64>), RecalibrationRepositoryError> {
+        let guild_id = Self::normalize_guild_id(request.guild_id);
         let state = transaction
             .query_row(
                 "SELECT last_recalibration_at, COALESCE(total_recalibrations, 0)
@@ -469,9 +480,8 @@ impl RatingHistoryRepository {
                     fingerprint,
                 ],
             )?;
-            increment_openskill_revision(&transaction, guild_id)?;
+            increment_openskill_revision(transaction, guild_id)?;
         }
-        transaction.commit()?;
         Ok((new_total, rating_at_recalibration))
     }
 
@@ -830,7 +840,29 @@ impl RecalibrationService {
         guild_id: Option<i64>,
         now: i64,
     ) -> Result<RecalibrationEligibility, RecalibrationRepositoryError> {
-        let Some(player) = self.repository.recalibration_player(discord_id, guild_id)? else {
+        let eligibility = {
+            let connection = self.repository.connection()?;
+            self.player_eligibility(&connection, discord_id, guild_id)?
+        };
+        if matches!(eligibility, RecalibrationEligibility::Allowed { .. })
+            && let Some(cooldown_ends_at) = self
+                .get_state_at(discord_id, guild_id, now)?
+                .cooldown_ends_at
+        {
+            return Ok(RecalibrationEligibility::OnCooldown { cooldown_ends_at });
+        }
+        Ok(eligibility)
+    }
+
+    fn player_eligibility(
+        &self,
+        connection: &Connection,
+        discord_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<RecalibrationEligibility, RecalibrationRepositoryError> {
+        let Some(player) =
+            RatingHistoryRepository::recalibration_player(connection, discord_id, guild_id)?
+        else {
             return Ok(RecalibrationEligibility::NotRegistered);
         };
         let (Some(current_rating), Some(current_rd), Some(current_volatility)) =
@@ -843,10 +875,6 @@ impl RecalibrationService {
                 games_played: player.games_played,
                 min_games: self.config.min_games,
             });
-        }
-        let state = self.get_state_at(discord_id, guild_id, now)?;
-        if let Some(cooldown_ends_at) = state.cooldown_ends_at {
-            return Ok(RecalibrationEligibility::OnCooldown { cooldown_ends_at });
         }
         Ok(RecalibrationEligibility::Allowed {
             current_rating,
@@ -863,7 +891,30 @@ impl RecalibrationService {
         guild_id: Option<i64>,
         now: i64,
     ) -> Result<RecalibrationExecution, RecalibrationRepositoryError> {
-        let eligibility = self.can_recalibrate_at(discord_id, guild_id, now)?;
+        self.execute(discord_id, guild_id, now, None)
+    }
+
+    pub fn purchase_at(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        now: i64,
+        base_cost: i64,
+        mana_day: &str,
+    ) -> Result<RecalibrationExecution, RecalibrationRepositoryError> {
+        self.execute(discord_id, Some(guild_id), now, Some((base_cost, mana_day)))
+    }
+
+    fn execute(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        now: i64,
+        shop_price: Option<(i64, &str)>,
+    ) -> Result<RecalibrationExecution, RecalibrationRepositoryError> {
+        let mut connection = self.repository.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let eligibility = self.player_eligibility(&transaction, discord_id, guild_id)?;
         let RecalibrationEligibility::Allowed {
             current_rating,
             current_rd,
@@ -876,32 +927,73 @@ impl RecalibrationService {
         };
         let new_rd = current_rd.max(self.config.initial_rd).min(MAX_GLICKO_RD);
         let new_os_sigma = current_os_sigma.map(|_| CamaOpenSkillSystem::DEFAULT_SIGMA);
-        let (total_recalibrations, settled_rating) = match self
-            .repository
-            .execute_recalibration_atomic(RecalibrationRequest {
-                discord_id,
-                guild_id,
-                now,
-                cooldown_seconds: self.config.cooldown_seconds,
-                new_rd,
-                new_volatility: self.config.initial_volatility,
-                new_os_sigma,
-                openskill_algorithm_fingerprint: self
-                    .config
-                    .openskill_algorithm_fingerprint
-                    .clone(),
-            }) {
-            Ok(settled) => settled,
-            Err(RecalibrationRepositoryError::OnCooldown { remaining_seconds }) => {
-                return Ok(RecalibrationExecution::Rejected(
-                    RecalibrationEligibility::OnCooldown {
-                        cooldown_ends_at: now.saturating_add(remaining_seconds),
-                    },
-                ));
-            }
-            Err(error) => return Err(error),
+        let (total_recalibrations, settled_rating) =
+            match RatingHistoryRepository::apply_recalibration(
+                &transaction,
+                RecalibrationRequest {
+                    discord_id,
+                    guild_id,
+                    now,
+                    cooldown_seconds: self.config.cooldown_seconds,
+                    new_rd,
+                    new_volatility: self.config.initial_volatility,
+                    new_os_sigma,
+                    openskill_algorithm_fingerprint: self
+                        .config
+                        .openskill_algorithm_fingerprint
+                        .clone(),
+                },
+            ) {
+                Ok(settled) => settled,
+                Err(RecalibrationRepositoryError::OnCooldown { remaining_seconds }) => {
+                    return Ok(RecalibrationExecution::Rejected(
+                        RecalibrationEligibility::OnCooldown {
+                            cooldown_ends_at: now.saturating_add(remaining_seconds),
+                        },
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
+        let cost = if let Some((base_cost, mana_day)) = shop_price {
+            let island: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM player_mana WHERE discord_id=?1 AND guild_id=?2
+                 AND current_land='Island' AND assigned_date=?3 AND consumed_today=0)",
+                params![
+                    discord_id,
+                    RatingHistoryRepository::normalize_guild_id(guild_id),
+                    mana_day
+                ],
+                |row| row.get(0),
+            )?;
+            let price = if island {
+                (base_cost as f64 * 0.9).floor() as i64
+            } else {
+                base_cost
+            };
+            price.max(1)
+        } else {
+            0
         };
+        if cost != 0
+            && !cama_db_core::shop_purchase::try_spend(
+                &transaction,
+                discord_id,
+                RatingHistoryRepository::normalize_guild_id(guild_id),
+                cost,
+                "shop_recalibrate",
+                "shop recalibration purchase",
+            )?
+        {
+            let balance = transaction.query_row(
+                "SELECT COALESCE(jopacoin_balance,0) FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![discord_id, RatingHistoryRepository::normalize_guild_id(guild_id)],
+                |row| row.get(0),
+            )?;
+            return Ok(RecalibrationExecution::InsufficientBalance { cost, balance });
+        }
+        transaction.commit()?;
         Ok(RecalibrationExecution::Success(RecalibrationSuccess {
+            cost,
             // The rating the transaction preserved, which is what the player
             // row now holds; the eligibility read may predate a settlement.
             old_rating: settled_rating.unwrap_or(current_rating),
@@ -922,11 +1014,11 @@ impl RecalibrationService {
         guild_id: Option<i64>,
         now: i64,
     ) -> Result<RecalibrationCooldownReset, RecalibrationRepositoryError> {
-        if self
-            .repository
-            .recalibration_player(discord_id, guild_id)?
-            .is_none()
-        {
+        let player = {
+            let connection = self.repository.connection()?;
+            RatingHistoryRepository::recalibration_player(&connection, discord_id, guild_id)?
+        };
+        if player.is_none() {
             return Ok(RecalibrationCooldownReset::NotRegistered);
         }
         let state = self.get_state_at(discord_id, guild_id, now)?;

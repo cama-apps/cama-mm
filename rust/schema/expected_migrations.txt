@@ -261,3 +261,5 @@ index_economy_ledger_related_markers
 index_pending_dig_deliveries
 add_wrapped_item_facts
 backfill_full_wrapped_item_counts
+add_player_trivia_question_publication
+index_double_or_nothing_player_history

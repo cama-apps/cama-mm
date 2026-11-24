@@ -91,6 +91,7 @@ pub struct ReadycheckPrunedNotice {
     pub lobby_id: i64,
     pub channel_id: i64,
     pub player_ids: BTreeSet<i64>,
+    pub created_at: Option<i64>,
     delivery_nonce: String,
     key: String,
     value: String,
@@ -108,6 +109,8 @@ struct ReadycheckPrunedNoticePayload {
     lobby_id: i64,
     channel_id: i64,
     player_ids: BTreeSet<i64>,
+    #[serde(default)]
+    created_at: Option<i64>,
 }
 
 /// Fail-open pruned-notice listing: rows that cannot be decoded are reported
@@ -182,6 +185,7 @@ impl ReadycheckRepository {
             lobby_id: state.lobby_id,
             channel_id,
             player_ids: player_ids.clone(),
+            created_at: Some(chrono::Utc::now().timestamp()),
         };
         let key = format!(
             "{PRUNED_NOTICE_PREFIX}{}:{:016x}",
@@ -348,6 +352,7 @@ fn decode_pruned_notice(
         lobby_id: payload.lobby_id,
         channel_id: payload.channel_id,
         player_ids: payload.player_ids,
+        created_at: payload.created_at,
         delivery_nonce,
         key,
         value,

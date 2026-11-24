@@ -1,3 +1,4 @@
+use cama_db::core_repositories::NewPlayer;
 use cama_db::match_runtime::PendingMatchRepositoryError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -5374,6 +5375,8 @@ struct PublicationProbeDiscord {
     unpins: Mutex<Vec<(u64, u64)>>,
     order: Mutex<Vec<String>>,
     failed_send_channels: Mutex<BTreeSet<u64>>,
+    send_rejections: Mutex<BTreeMap<u64, String>>,
+    fail_archive: AtomicBool,
     fail_message_edits: AtomicBool,
     blocked_send_channels: Mutex<BTreeSet<u64>>,
     blocked_send_started: AtomicUsize,
@@ -5403,6 +5406,8 @@ impl Default for PublicationProbeDiscord {
             unpins: Mutex::new(Vec::new()),
             order: Mutex::new(Vec::new()),
             failed_send_channels: Mutex::new(BTreeSet::new()),
+            send_rejections: Mutex::new(BTreeMap::new()),
+            fail_archive: AtomicBool::new(false),
             fail_message_edits: AtomicBool::new(false),
             blocked_send_channels: Mutex::new(BTreeSet::new()),
             blocked_send_started: AtomicUsize::new(0),
@@ -5524,6 +5529,20 @@ impl PublicationProbeDiscord {
 
 #[async_trait]
 impl DiscordTransport for PublicationProbeDiscord {
+    async fn send_classified_keyed_message(
+        &self,
+        channel: u64,
+        key: &str,
+        message: DiscordMessage,
+    ) -> Result<crate::discord_transport::DiscordMessageReceipt, DiscordDeliveryError> {
+        if let Some(error) = self.send_rejections.lock().unwrap().get(&channel) {
+            return Err(DiscordDeliveryError::Undeliverable(error.clone()));
+        }
+        Ok(self
+            .send_message_with_delivery_key(channel, key, message)
+            .await?)
+    }
+
     async fn fetch_message(
         &self,
         _channel_id: u64,
@@ -5649,6 +5668,9 @@ impl DiscordTransport for PublicationProbeDiscord {
         locked: bool,
     ) -> Result<(), String> {
         let phase = if archived {
+            if self.fail_archive.load(Ordering::SeqCst) {
+                return Err("unable to archive thread".into());
+            }
             "archive"
         } else if locked {
             "lock"
@@ -7551,13 +7573,14 @@ async fn test_shuffle_embed_never_renders_ids_for_unresolved_excluded_player() {
 async fn test_shuffle_embed_skips_discord_lookup_for_invalid_excluded_ids() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
-    let players = PlayerRepository::new(fixture.database.path());
-    players
-        .add(&NewPlayer::new(0, "zero-id-player", Some(GUILD)))
-        .expect("add zero-ID player");
-    players
-        .add(&NewPlayer::new(-1, "negative-id-player", Some(GUILD)))
-        .expect("add negative-ID player");
+    cama_db::open_runtime_connection(fixture.database.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO players(discord_id,guild_id,discord_username)
+             VALUES(0,?1,'zero-id-player'),(-1,?1,'negative-id-player')",
+            [GUILD],
+        )
+        .expect("seed historical invalid IDs");
     let player_ids = fixture.add_shuffle_pool(10, false);
     let mut prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
     prepared.pending.state.excluded_player_ids = vec![0, -1];
@@ -9416,6 +9439,138 @@ async fn manual_retry_with_opposite_winner_is_rejected_without_rewards() {
         5,
         "only the committed winning team receives win bonuses"
     );
+}
+
+#[tokio::test]
+async fn matchmaking_regression_legacy_synthetic_match_can_only_be_aborted() {
+    let fixture = MatchRuntimeFixture::new();
+    let repository = PendingMatchRepository::new(fixture.database.path());
+    let pending = fixture.pending(unix_seconds() + 120);
+    let connection = Connection::open(fixture.database.path()).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO players(discord_id,guild_id,discord_username,exclusion_count)
+             VALUES(-1,?1,'Retired',0)",
+            [GUILD],
+        )
+        .unwrap();
+    let (pending, ()) = repository
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            state.radiant_team_ids[0] = -1;
+        })
+        .unwrap()
+        .unwrap();
+    fixture
+        .provider
+        .schedule_draft_betting_reminders_recovery(pending.clone())
+        .unwrap();
+    assert!(
+        fixture
+            .provider
+            .handler
+            .betting_tasks
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    let error = fixture
+        .provider
+        .handler
+        .record_match_blocking(&pending, "radiant", None)
+        .unwrap_err();
+    assert!(error.contains("abort"), "{error}");
+    fixture
+        .provider
+        .handler
+        .finalize_abort(&pending, Arc::new(RecordingMatchResponder::default()))
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .pending_match(GUILD, pending.pending_match_id)
+            .unwrap()
+            .is_none()
+    );
+    let retired_exclusions: i64 = connection
+        .query_row(
+            "SELECT exclusion_count FROM players WHERE discord_id=-1 AND guild_id=?1",
+            [GUILD],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retired_exclusions, 0);
+}
+
+#[tokio::test]
+async fn matchmaking_regression_record_finalizes_with_an_unwritable_thread_or_failed_archive() {
+    for (rejection, previously_rejected) in [
+        (Some("Unknown Channel"), false),
+        (Some("Missing Permissions"), false),
+        (None, true),
+        (None, false),
+    ] {
+        let discord = Arc::new(PublicationProbeDiscord::default());
+        discord.fail_archive.store(true, Ordering::SeqCst);
+        if let Some(error) = rejection {
+            discord
+                .send_rejections
+                .lock()
+                .unwrap()
+                .insert(555, error.to_owned());
+        }
+        let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+        let pending = fixture.pending(unix_seconds() + 120);
+        let repository = PendingMatchRepository::new(fixture.database.path());
+        let (pending, ()) = repository
+            .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+                state.thread_shuffle_thread_id = Some(555);
+                state.origin_channel_id = Some(777);
+                if previously_rejected {
+                    state
+                        .extra
+                        .insert("record_result_undeliverable".into(), json!(true));
+                }
+            })
+            .unwrap()
+            .unwrap();
+        fixture
+            .provider
+            .handler
+            .finalize_record(
+                pending.clone(),
+                record_context(1, GUILD, "radiant", true),
+                Arc::new(RecordingMatchResponder::default()),
+                "radiant",
+                0,
+                0,
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .pending_match(GUILD, pending.pending_match_id)
+                .unwrap()
+                .is_none()
+        );
+        let channel = if rejection.is_some() || previously_rejected {
+            777
+        } else {
+            555
+        };
+        assert!(
+            discord
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(id, msg)| *id == channel && msg.response.content.contains("Match Complete"))
+        );
+    }
 }
 
 #[tokio::test]

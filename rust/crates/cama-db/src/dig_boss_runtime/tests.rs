@@ -8,7 +8,7 @@ use super::*;
 use crate::core_repositories::{NewPlayer, PlayerRepository};
 use crate::test_support::copy_migrated_database;
 
-const PLAYER: i64 = -83_001;
+const PLAYER: i64 = 83_001;
 const GUILD: i64 = 83_002;
 const KEY: DigBossRuntimeKey = DigBossRuntimeKey {
     discord_id: PLAYER,

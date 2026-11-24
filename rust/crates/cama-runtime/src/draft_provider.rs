@@ -23,7 +23,7 @@ use cama_app::draft::{
     draft_finalization_process_owner,
 };
 use cama_app::embeds::LobbyKind as AppLobbyKind;
-use cama_db::core_repositories::{CoreRepositoryError, NewPlayer, PlayerRepository};
+use cama_db::core_repositories::{CoreRepositoryError, PlayerRepository};
 use cama_db::match_runtime::{PendingMatchRecord, PendingMatchRepository, PendingMatchState};
 use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::formatting::{JOPACOIN_EMOTE, escape_discord_text};
@@ -433,7 +433,8 @@ impl DraftRegistrationProvider {
         let Some(persistence) = self.handler.persistence.clone() else {
             return Ok(0);
         };
-        let envelopes = spawn_blocking(move || persistence.load_all())
+        let loader = Arc::clone(&persistence);
+        let envelopes = spawn_blocking(move || loader.load_all())
             .await
             .map_err(|error| format!("draft state load task failed: {error}"))?
             .map_err(|error| error.to_string())?;
@@ -494,6 +495,38 @@ impl DraftRegistrationProvider {
                         "draft guild {guild_id} changed sessions during hydration: loaded {session_id}, current {}",
                         envelope.session_id
                     ));
+                }
+                // An unlinked draft has no pending match or financial journal.
+                // Its old synthetic seats cannot be reserved after hydration.
+                let state = envelope.state.as_state();
+                let has_retired_player = state
+                    .player_pool_ids
+                    .iter()
+                    .chain(&state.radiant_player_ids)
+                    .chain(&state.dire_player_ids)
+                    .any(|id| *id <= 0);
+                if envelope.pending_match_id.is_none() && has_retired_player {
+                    let persistence = Arc::clone(&persistence);
+                    let revision = envelope.revision;
+                    let deleted = spawn_blocking(move || {
+                        persistence.delete_if_revision(guild_id, session_id, revision)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())?;
+                    if !deleted {
+                        return Err(format!("draft {session_id} changed during retirement"));
+                    }
+                    let live = self.handler.drafts.get_state(Some(guild_id))
+                        .filter(|handle| lock_state(handle).session_id == session_id);
+                    if let Some(handle) = live {
+                        self.handler.unwind_fresh_hydration(&handle, state, &operation_lock);
+                    } else {
+                        self.handler.cleanup_unused_draft_operation_lock(
+                            guild_id, session_id, &operation_lock,
+                        );
+                    }
+                    return Ok(false);
                 }
                 if !envelope.active
                     || envelope.finalizing
@@ -679,8 +712,6 @@ struct DraftConfig {
     max_debt: i64,
     dota_bet_seed_amount: i64,
     first_game_pool_daily_amount: i64,
-    /// Fingerprint of the deployment's configured OpenSkill system.
-    openskill_algorithm_fingerprint: String,
 }
 
 impl DraftConfig {
@@ -707,7 +738,6 @@ impl DraftConfig {
             max_debt: config.values.max_debt,
             dota_bet_seed_amount: config.values.dota_bet_seed_amount,
             first_game_pool_daily_amount: config.values.first_game_pool_daily_amount,
-            openskill_algorithm_fingerprint: config.migration.openskill.algorithm_fingerprint(),
         }
     }
 }
@@ -2598,14 +2628,6 @@ impl DraftHandler {
                 )
                 .await
             }
-            "sampleinprogress" => {
-                self.sample_in_progress(guild_id, user_id, permissions, responder)
-                    .await
-            }
-            "samplecomplete" => {
-                self.sample_complete(guild_id, user_id, permissions, responder)
-                    .await
-            }
             other => Err(format!("unknown /draft subcommand {other:?}")),
         }
     }
@@ -4207,106 +4229,6 @@ impl DraftHandler {
         }
     }
 
-    async fn sample_in_progress(
-        &self,
-        guild_id: i64,
-        user_id: i64,
-        permissions: Option<u64>,
-        responder: Arc<dyn InteractionResponder>,
-    ) -> Result<(), String> {
-        if !is_admin(&self.config, user_id, permissions) {
-            return respond_ephemeral(&responder, "❌ Admin only command.").await;
-        }
-        // Seeding the sample players is SQLite work, so acknowledge first.
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
-        let state = sample_state(guild_id, false);
-        self.ensure_sample_players(guild_id).await?;
-        responder
-            .edit_original(
-                InteractionResponse::message("**[SAMPLE UI - Not a real draft]**")
-                    .embed(sample_live_embed(&state))
-                    .action_rows(drafting_sample_view(&state)),
-            )
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    async fn sample_complete(
-        &self,
-        guild_id: i64,
-        user_id: i64,
-        permissions: Option<u64>,
-        responder: Arc<dyn InteractionResponder>,
-    ) -> Result<(), String> {
-        if !is_admin(&self.config, user_id, permissions) {
-            return respond_ephemeral(&responder, "❌ Admin only command.").await;
-        }
-        // Seeding the sample players is SQLite work, so acknowledge first.
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
-        let state = sample_state(guild_id, true);
-        self.ensure_sample_players(guild_id).await?;
-        let pending = db_pending_state(&state, unix_now(), self.config.bet_lock_seconds, false)?;
-        let mut pending = PendingMatchRecord {
-            pending_match_id: 0,
-            guild_id,
-            state: pending,
-            created_at: None,
-            updated_at: None,
-        };
-        pending.state.blind_bets_result = Some(json!({
-            "created": 3,
-            "total_radiant": 15,
-            "total_dire": 12,
-            "percentage": 0.1,
-            "is_bomb_pot": false,
-        }));
-        responder
-            .edit_original(
-                InteractionResponse::message("**[SAMPLE UI - Not a real draft]**")
-                    .embed(completion_embed(&state, &pending)),
-            )
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    async fn ensure_sample_players(&self, guild_id: i64) -> Result<(), String> {
-        let players = self.players.clone();
-        let fingerprint = self.config.openskill_algorithm_fingerprint.clone();
-        spawn_blocking(move || {
-            for (id, name, rating, roles) in sample_players() {
-                if players
-                    .get_by_id(id, Some(guild_id))
-                    .map_err(|error| error.to_string())?
-                    .is_some()
-                {
-                    continue;
-                }
-                let mut player = NewPlayer::new(id, name, Some(guild_id));
-                player
-                    .openskill_algorithm_fingerprint
-                    .clone_from(&fingerprint);
-                player.glicko_rating = Some(rating);
-                player.glicko_rd = Some(100.0);
-                player.glicko_volatility = Some(0.06);
-                player.preferred_roles =
-                    Some(roles.iter().map(|role| (*role).to_owned()).collect());
-                match players.add(&player) {
-                    Ok(()) | Err(CoreRepositoryError::DuplicatePlayer { .. }) => {}
-                    Err(error) => return Err(error.to_string()),
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|error| format!("draft sample player task failed: {error}"))?
-    }
-
     async fn load_players(
         &self,
         ids: &[i64],
@@ -4423,16 +4345,6 @@ fn draft_options() -> Vec<CommandOptionSpec> {
         CommandOptionSpec::subcommand(
             "restart",
             "Restart the current Immortal Draft (preserves lobby)",
-            Vec::new(),
-        ),
-        CommandOptionSpec::subcommand(
-            "sampleinprogress",
-            "[Admin] Show sample draft UI mid-draft for testing",
-            Vec::new(),
-        ),
-        CommandOptionSpec::subcommand(
-            "samplecomplete",
-            "[Admin] Show sample draft complete UI for testing",
             Vec::new(),
         ),
     ]
@@ -4588,10 +4500,6 @@ fn pre_choice_view(
 
 fn drafting_view(state: &DraftState) -> Vec<InteractionActionRow> {
     drafting_view_with_session(state, Some(state.session_id))
-}
-
-fn drafting_sample_view(state: &DraftState) -> Vec<InteractionActionRow> {
-    drafting_view_with_session(state, None)
 }
 
 fn drafting_view_with_session(
@@ -4802,10 +4710,6 @@ fn live_embed(state: &DraftState) -> InteractionEmbed {
             },
         ],
     })
-}
-
-fn sample_live_embed(state: &DraftState) -> InteractionEmbed {
-    live_embed(state)
 }
 
 fn completion_embed(state: &DraftState, pending: &PendingMatchRecord) -> InteractionEmbed {
@@ -5062,68 +4966,6 @@ fn format_roles(roles: &[String]) -> String {
             .collect::<Vec<_>>()
             .join(",")
     )
-}
-
-fn sample_state(guild_id: i64, complete: bool) -> DraftState {
-    let mut state = DraftState::with_session(guild_id, DraftLobbyKind::Open, 0);
-    state.captain1_id = Some(-101);
-    state.captain2_id = Some(-102);
-    state.captain1_rating = 1650.0;
-    state.captain2_rating = 1580.0;
-    state.radiant_captain_id = Some(-101);
-    state.dire_captain_id = Some(-102);
-    state.coinflip_winner_id = Some(-101);
-    state.radiant_hero_pick_order = Some(1);
-    state.dire_hero_pick_order = Some(2);
-    state.player_pool_ids = vec![-101, -102, -103, -104, -105, -106, -107, -108, -109, -110];
-    state.excluded_player_ids = vec![-111, -112];
-    for (id, name, rating, roles) in sample_players() {
-        state.player_pool_data.insert(
-            id,
-            PlayerPoolEntry {
-                name: name.to_owned(),
-                rating,
-                roles: roles.iter().map(|role| (*role).to_owned()).collect(),
-            },
-        );
-    }
-    state.radiant_player_ids = if complete {
-        vec![-101, -103, -105, -107, -109]
-    } else {
-        vec![-101]
-    };
-    state.dire_player_ids = if complete {
-        vec![-102, -104, -106, -108, -110]
-    } else {
-        vec![-102, -103]
-    };
-    state.side_preferences.insert(-105, "radiant".to_owned());
-    state.side_preferences.insert(-107, "dire".to_owned());
-    state.current_pick_index = if complete { DRAFT_TOTAL_PICKS } else { 1 };
-    state.phase = if complete {
-        DraftPhase::Complete
-    } else {
-        DraftPhase::Drafting
-    };
-    state.current_round_first_captain_id = Some(-102);
-    state
-}
-
-fn sample_players() -> Vec<(i64, &'static str, f64, &'static [&'static str])> {
-    vec![
-        (-101, "SampleCapt1", 1650.0, &["1", "2"]),
-        (-102, "SampleCapt2", 1580.0, &["1", "3"]),
-        (-103, "SamplePlayer3", 1720.0, &["2"]),
-        (-104, "SamplePlayer4", 1540.0, &["3", "4"]),
-        (-105, "SamplePlayer5", 1610.0, &["4", "5"]),
-        (-106, "SamplePlayer6", 1490.0, &["5"]),
-        (-107, "SamplePlayer7", 1555.0, &["1", "2", "3"]),
-        (-108, "SamplePlayer8", 1480.0, &["4", "5"]),
-        (-109, "SamplePlayer9", 1630.0, &["2", "3"]),
-        (-110, "SamplePlayer10", 1520.0, &["3", "4", "5"]),
-        (-111, "ExcludedPlayer1", 1450.0, &["5"]),
-        (-112, "ExcludedPlayer2", 1410.0, &["4", "5"]),
-    ]
 }
 
 fn db_pending_state(

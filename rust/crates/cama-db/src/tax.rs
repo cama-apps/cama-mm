@@ -361,7 +361,7 @@ impl TaxRepository {
                     COALESCE(SUM(CASE WHEN jopacoin_balance>0 THEN jopacoin_balance ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN jopacoin_balance<0 THEN -jopacoin_balance ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN jopacoin_balance<=0 THEN 1 ELSE 0 END),0)
-             FROM players WHERE guild_id=?1",
+             FROM players WHERE guild_id=?1 AND discord_id>0",
             [guild_id],
             |row| {
                 Ok((

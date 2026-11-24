@@ -570,7 +570,7 @@ impl CalibrationDataSources {
                 "SELECT discord_id,COUNT(*),
                         SUM(CASE WHEN won=1 THEN 1 ELSE 0 END)-SUM(expected_team_win_prob)
                    FROM rating_history
-                  WHERE guild_id=?1 AND expected_team_win_prob IS NOT NULL
+                  WHERE guild_id=?1 AND discord_id > 0 AND expected_team_win_prob IS NOT NULL
                   GROUP BY discord_id HAVING COUNT(*)>=5 ORDER BY 3 DESC",
             )
             .map_err(|error| error.to_string())?;
@@ -748,7 +748,10 @@ fn format_ranked(
             format!(
                 "{}. {} ({})",
                 index + 1,
-                player_name(player, names),
+                player
+                    .discord_id
+                    .map(|id| names.resolve(id))
+                    .unwrap_or_else(|| cama_domain::discord_content::UNKNOWN_PLAYER.to_owned()),
                 value(player)
             )
         })
@@ -761,15 +764,6 @@ fn format_calibrated(players: &[Player], names: &GuildPlayerNameDirectory) -> St
         let rd = cap_glicko_rd(player.glicko_rd.unwrap_or(MAX_GLICKO_RD));
         format!("RD {rd:.0}, {:.0}%", rd_to_certainty(rd))
     })
-}
-
-/// Synthetic members have no Discord account, so their stored name is all
-/// they have; real players use their resolved display name.
-fn player_name(player: &Player, names: &GuildPlayerNameDirectory) -> String {
-    player.discord_id.filter(|id| *id > 0).map_or_else(
-        || player.name.clone(),
-        |discord_id| names.resolve(discord_id),
-    )
 }
 
 fn lobby_stats_lines(stats: &[LobbyTypeStats], player: bool) -> Vec<String> {
@@ -2077,7 +2071,7 @@ mod configured_model_tests {
 
         assert_eq!(
             text,
-            "1. Calibrated Player (x)\n2. Unknown player (x)\n3. Synthetic Seat (x)"
+            "1. Calibrated Player (x)\n2. Unknown player (x)\n3. Unknown player (x)"
         );
         assert!(!text.contains(&NAMED.to_string()));
         assert!(!text.contains(&NAMELESS.to_string()));

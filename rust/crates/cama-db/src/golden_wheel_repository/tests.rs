@@ -85,6 +85,7 @@ fn test_get_leaderboard_bottom_returns_ascending_order() {
     fixture.add_player(102, GUILD, 53);
     fixture.add_player(103, GUILD, 13);
     fixture.add_player(999, GUILD + 1, 1);
+    fixture.add_player(-1, GUILD, 1);
 
     let bottom = fixture
         .repository
@@ -138,6 +139,7 @@ fn test_get_total_positive_balance_sums_only_positive() {
     fixture.add_player(302, GUILD, 203);
     fixture.add_player(303, GUILD, -997);
     fixture.add_player(399, GUILD + 1, 50_000);
+    fixture.add_player(-1, GUILD, 50_000);
 
     assert_eq!(
         fixture

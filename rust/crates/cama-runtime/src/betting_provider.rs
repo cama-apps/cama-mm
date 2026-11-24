@@ -782,9 +782,6 @@ pub struct BettingRuntimeConfig {
     pub minigame_jc_delta_scale: f64,
     pub prediction_contract_value: i64,
     pub prediction_initial_fair_default: i64,
-    /// Admit negative-ID database fixtures to wheel rank mechanics. Real
-    /// Discord IDs remain checked against the live guild member snapshot.
-    pub synthetic_members_enabled: bool,
     pub disburse_min_fund: i64,
     /// Recency window that admits a player to the `lottery` disbursement draw.
     pub lottery_activity_days: i64,
@@ -846,7 +843,6 @@ impl BettingRuntimeConfig {
             minigame_jc_delta_scale: values.minigame_jc_delta_scale,
             prediction_contract_value: values.prediction_contract_value,
             prediction_initial_fair_default: values.prediction_initial_fair_default,
-            synthetic_members_enabled: values.gamba_synthetic_members_enabled,
             disburse_min_fund: values.disburse_min_fund,
             lottery_activity_days: values.lottery_activity_days,
             economy_events_enabled: values.economy_events_enabled,
@@ -964,6 +960,7 @@ impl BettingRegistrationProvider {
                 rates: Mutex::new(BTreeMap::new()),
                 wheel_interactions: Mutex::new(BTreeMap::new()),
                 wheel_in_flight: Mutex::new(BTreeSet::new()),
+                disbursement_locks: Mutex::default(),
                 disburse_vote_pages: Mutex::new(BTreeMap::new()),
                 balance_views: Mutex::new(BTreeMap::new()),
             }),
@@ -1749,6 +1746,8 @@ struct BettingInteractionHandler {
     /// pending entry while SQLite is in flight allows a transient database
     /// failure to retry without permitting a concurrent double settlement.
     wheel_in_flight: Mutex<BTreeSet<String>>,
+    // A guild has one public Reserve ballot. Serialize its mutations through the Discord edit.
+    disbursement_locks: Mutex<BTreeMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     disburse_vote_pages: Mutex<BTreeMap<String, PendingDisburseVotes>>,
     balance_views: Mutex<BTreeMap<u64, PendingBalanceView>>,
 }
@@ -1763,7 +1762,6 @@ const WHEEL_MEMBER_LOOKUP_CONCURRENCY: usize = 8;
 async fn resolve_wheel_member_snapshot<F, Fut>(
     ids: Vec<i64>,
     cached_members: Option<BTreeSet<u64>>,
-    synthetic_members_enabled: bool,
     lookup: F,
 ) -> Result<BTreeSet<i64>, String>
 where
@@ -1773,13 +1771,10 @@ where
     let mut visible = BTreeSet::new();
     let mut lookups = tokio::task::JoinSet::new();
     for id in ids {
-        if is_enabled_synthetic_wheel_member(id, synthetic_members_enabled) {
-            visible.insert(id);
+        if id <= 0 {
             continue;
         }
-        let Ok(user_id) = u64::try_from(id) else {
-            continue;
-        };
+        let user_id = id as u64;
         if let Some(members) = &cached_members {
             if members.contains(&user_id) {
                 visible.insert(id);
@@ -2204,6 +2199,7 @@ impl BettingInteractionHandler {
                 )
                 .await;
             }
+            let _ballot = self.disbursement_lock(guild_id).lock_owned().await;
             let path = self.database_path.clone();
             let result = sqlite("disbursement vote", move || {
                 let players = PlayerRepository::new(&path);
@@ -4193,20 +4189,15 @@ impl BettingInteractionHandler {
         .await
         .ok()?;
         let cached_members = self.discord.cached_guild_member_ids(guild).ok().flatten();
-        let result = resolve_wheel_member_snapshot(
-            ids,
-            cached_members,
-            self.config.synthetic_members_enabled,
-            |user_id| {
-                let discord = Arc::clone(&self.discord);
-                async move {
-                    discord
-                        .guild_member(guild, user_id)
-                        .await
-                        .map(|member| member.is_some())
-                }
-            },
-        )
+        let result = resolve_wheel_member_snapshot(ids, cached_members, |user_id| {
+            let discord = Arc::clone(&self.discord);
+            async move {
+                discord
+                    .guild_member(guild, user_id)
+                    .await
+                    .map(|member| member.is_some())
+            }
+        })
         .await;
         match result {
             Ok(visible) => Some(visible),
@@ -5236,6 +5227,15 @@ impl BettingInteractionHandler {
         .await
     }
 
+    fn disbursement_lock(&self, guild_id: i64) -> Arc<tokio::sync::Mutex<()>> {
+        self.disbursement_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(guild_id)
+            .or_default()
+            .clone()
+    }
+
     async fn disburse(
         &self,
         user_id: i64,
@@ -5256,6 +5256,7 @@ impl BettingInteractionHandler {
         }
         match action.as_str() {
             "propose" => {
+                let _ballot = self.disbursement_lock(guild_id).lock_owned().await;
                 if self.reserve_voting_restricted(guild_id).await? {
                     return respond_ephemeral(
                         responder,
@@ -5332,14 +5333,25 @@ impl BettingInteractionHandler {
                     .map_err(|error| error.to_string())
             }
             "reset" => {
+                let _ballot = self.disbursement_lock(guild_id).lock_owned().await;
                 let path = self.database_path.clone();
                 let reset = sqlite("disbursement reset", move || {
-                    DisbursementRepository::new(path)
+                    let repository = DisbursementRepository::new(path);
+                    let proposal = repository
+                        .get_active_proposal(Some(guild_id))
+                        .map_err(|error| error.to_string())?;
+                    let reset = repository
                         .reset_and_return_fund_atomic(Some(guild_id), "reset")
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| error.to_string())?;
+                    Ok(proposal.filter(|_| reset))
                 })
                 .await?;
-                if reset {
+                if let Some(proposal) = reset {
+                    self.update_persistent_disbursement_message(
+                        &proposal,
+                        disbursement_proposal_response_with_disabled_buttons(&proposal),
+                    )
+                    .await;
                     responder
                         .respond(InteractionResponse::message(
                             "Disbursement proposal has been reset.",
@@ -5402,6 +5414,7 @@ impl BettingInteractionHandler {
                     .map_err(|error| error.to_string())
             }
             "execute" => {
+                let _ballot = self.disbursement_lock(guild_id).lock_owned().await;
                 if self.reserve_voting_restricted(guild_id).await? {
                     return respond_ephemeral(
                         responder,
@@ -5528,7 +5541,23 @@ impl BettingInteractionHandler {
         Ok(())
     }
 
-    async fn reconcile_disbursement(&self, proposal: &DisbursementProposal) -> Result<(), String> {
+    async fn reconcile_disbursement(&self, queued: &DisbursementProposal) -> Result<(), String> {
+        let guild_id = queued.guild_id;
+        let _ballot = self.disbursement_lock(guild_id).lock_owned().await;
+        // Votes or a replacement petition may have landed since the worker's guild scan.
+        let repository = DisbursementRepository::new(&self.database_path);
+        let current = sqlite("refresh disbursement ballot", move || {
+            repository
+                .get_active_proposal(Some(guild_id))
+                .map_err(|error| error.to_string())
+        })
+        .await?;
+        let Some(proposal) = current
+            .as_ref()
+            .filter(|proposal| proposal.proposal_id == queued.proposal_id)
+        else {
+            return Ok(());
+        };
         if proposal.quorum_reached() {
             if self.reserve_voting_restricted(proposal.guild_id).await? {
                 return Ok(());
@@ -7187,10 +7216,6 @@ fn wheel_animation_result(attachment: Option<InteractionAttachment>) -> SpinResu
     let mut result = spin_result_with_attachment("", attachment);
     result.completion_message = Some(String::new());
     result
-}
-
-fn is_enabled_synthetic_wheel_member(discord_id: i64, enabled: bool) -> bool {
-    enabled && discord_id < 0
 }
 
 /// `leaderboard` holds the visible top balances as `(discord_id, balance)`.

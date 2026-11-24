@@ -341,6 +341,21 @@ fn test_levy_fine_rejects_non_positive_amounts_without_mutation() {
 }
 
 #[test]
+fn guild_wallet_totals_exclude_retired_players() {
+    let fixture = Fixture::migrated();
+    fixture.player(1, 50);
+    fixture.player(2, -10);
+    fixture.player(-1, 700);
+    fixture.player(-2, -30);
+    let snapshot = fixture.repository.guild_snapshot(GUILD, NOW).unwrap();
+    assert_eq!(snapshot.players, 2);
+    assert_eq!(snapshot.total_balance, 40);
+    assert_eq!(snapshot.positive_balance, 50);
+    assert_eq!(snapshot.visible_debt, 10);
+    assert_eq!(snapshot.broke_players, 1);
+}
+
+#[test]
 fn test_prediction_market_exposure_includes_cost_basis_ev_and_liability() {
     let fixture = Fixture::migrated();
     fixture.player(1, 10);

@@ -1275,12 +1275,6 @@ fn test_durable_writes_never_hold_the_reader_lock() {
     );
     assert_eq!(
         service
-            .try_set_player_join_times(scope(LobbyKind::Open), &BTreeMap::from([(UserId(10), 5.0)]))
-            .expect("set join times"),
-        1
-    );
-    assert_eq!(
-        service
             .try_remove_players_from_lobby(&users(&[11]), scope(LobbyKind::Open))
             .expect("remove players"),
         users(&[11])

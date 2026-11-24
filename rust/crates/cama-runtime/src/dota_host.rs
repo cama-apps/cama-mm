@@ -262,10 +262,6 @@ struct SessionState {
     last_configuration: Option<configuration::LobbyConfigurationRequest>,
     #[serde(default)]
     test_mode: DotaHostTestMode,
-    /// Negative Discord IDs created by /admin addfake, with their frozen side.
-    /// These are placeholders only and never receive Steam invitations.
-    #[serde(default)]
-    fake_roster: Vec<(i64, bool)>,
     #[serde(default)]
     simulated_winner: Option<String>,
     #[serde(default)]
@@ -345,15 +341,19 @@ impl SessionState {
     }
 
     fn expected(&self) -> Vec<ExpectedPlayer> {
-        self.roster
-            .iter()
-            .map(|p| ExpectedPlayer {
-                discord_id: p.discord_id,
-                account_id: p.steam_account_id,
-                side: if p.radiant { Side::Radiant } else { Side::Dire },
-            })
-            .collect()
+        expected_players(&self.roster)
     }
+}
+
+fn expected_players(roster: &[HostedMatchRosterEntry]) -> Vec<ExpectedPlayer> {
+    roster
+        .iter()
+        .map(|p| ExpectedPlayer {
+            discord_id: p.discord_id,
+            account_id: p.steam_account_id,
+            side: if p.radiant { Side::Radiant } else { Side::Dire },
+        })
+        .collect()
 }
 
 pub struct DotaHostWorker {
@@ -434,7 +434,7 @@ impl DotaHostWorker {
                 .tick_test_session(port, &mut record, &mut state, now)
                 .await;
         }
-        if self.config.test_mode != DotaHostTestMode::Off || !state.fake_roster.is_empty() {
+        if self.config.test_mode != DotaHostTestMode::Off {
             return self
                 .review(
                     &mut record,
@@ -1766,16 +1766,9 @@ impl DotaHostWorker {
                     continue;
                 };
                 let mut roster = Vec::new();
-                let mut fake_roster = Vec::new();
                 for (radiant, players) in [(true,&pending.state.radiant_team_ids),(false,&pending.state.dire_team_ids)] {
                     for discord_id in players {
-                        if *discord_id < 0 && config.test_mode != DotaHostTestMode::Off {
-                            if cama_db::core_repositories::PlayerRepository::new(&path)
-                                .get_by_id(*discord_id, Some(pending.guild_id)).map_err(|e|e.to_string())?.is_some() {
-                                fake_roster.push((*discord_id, radiant));
-                            }
-                            continue;
-                        }
+                        if *discord_id <= 0 { continue; }
                         if let Some(account) = links.get_steam_id(*discord_id).map_err(|e| e.to_string())?.and_then(dota_lobby::account_id) {
                             roster.push(HostedMatchRosterEntry { discord_id:*discord_id, steam_account_id:account,radiant });
                         }
@@ -1784,7 +1777,7 @@ impl DotaHostWorker {
                 let state = SessionState {
                     manual_record_override: None,
                     configuration: None, last_configuration: None,
-                    test_mode: config.test_mode, fake_roster, simulated_winner: None,
+                    test_mode: config.test_mode, simulated_winner: None,
                     start_mode: options.start.unwrap_or_default(), manual_start_requested: false,
                     settings: LobbySettings { name:if config.test_mode == DotaHostTestMode::Off {format!("Cama #{}",pending.pending_match_id)} else {format!("Cama TEST #{}",pending.pending_match_id)},
                         password:String::new(), visibility:if config.test_mode == DotaHostTestMode::Off {options.visibility.map(|value| value as i32).unwrap_or(PUBLIC_LOBBY_VISIBILITY)} else {2}, league_id:league,
@@ -1795,12 +1788,8 @@ impl DotaHostWorker {
                     last_invite_at:0,create_requested_at:None,launch_requested_at:None,lobby_recreation:None,failed_launches:Vec::new(),lobby_cleanup:Default::default(),allocation_observed_at:None,last_allocation_log_at:None,betting_closed:false,cancel_requested:false,
                     resume_requested:false,recorded_match_id:None,server_id:None,replay:None,postgame_statistics:None,archive:None,replay_last_attempt:0,replay_error:None,last_result_poll:0,lobby_deadline:0,recording_failures:0,
                 };
-                let valid_roster = if config.test_mode == DotaHostTestMode::Off {
-                    dota_lobby::validate_roster(&state.expected(),config.account_id)
-                } else {
-                    test_mode::validate_test_roster(&state, config.account_id)
-                        .and_then(|()| if test_mode::pending_matches_test_roster(&pending, &state) { Ok(()) } else { Err("test hosting requires links for every real player and registered fake placeholders") })
-                };
+                let valid_roster = dota_lobby::validate_roster(&state.expected(),config.account_id);
+                if !pending_matches_roster(&pending, &state.roster) { continue; }
                 if let Err(reason) = valid_roster {
                     tracing::warn!(guild_id=pending.guild_id,pending_match_id=pending.pending_match_id,%reason,"Dota hosting waiting for valid primary account links");
                     continue;

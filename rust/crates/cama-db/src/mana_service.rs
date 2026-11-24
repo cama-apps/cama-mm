@@ -171,7 +171,7 @@ impl ManaRepository {
             "SELECT discord_id, current_land, assigned_date, consumed_today,
                     white_shield_remaining
              FROM player_mana
-             WHERE guild_id = ?1
+             WHERE guild_id = ?1 AND discord_id > 0
              ORDER BY discord_id",
         )?;
         let rows = statement.query_map([guild_id], |row| {

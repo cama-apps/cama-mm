@@ -588,6 +588,7 @@ dependencies = [
  "steam-vent-proto-deadlock",
  "steam-vent-proto-dota2",
  "steam-vent-proto-steam",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

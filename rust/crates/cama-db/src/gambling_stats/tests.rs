@@ -1528,3 +1528,49 @@ fn deadlock_bankruptcy_receipt_reduces_history_and_aggregate_pnl() {
     let metrics = repo.bulk_gambling_metrics(None, Some(&[1001])).unwrap();
     assert_eq!(metrics[&1001].net_pnl, 14);
 }
+
+#[test]
+fn bounded_spin_histories_filter_before_decoding_and_keep_equal_time_order() {
+    let fixture = Fixture::new();
+    let db = Connection::open(fixture.path()).unwrap();
+    for (id, guild, user, at, amount) in [
+        (1, 1, 7, 9, "old"),
+        (2, 1, 7, 10, "12"),
+        (3, 1, 7, 10, "11"),
+        (4, 1, 7, 20, "future"),
+        (5, 2, 7, 11, "other guild"),
+        (6, 1, 8, 12, "other user"),
+    ] {
+        let values = params![id, guild, user, at, amount];
+        db.execute(
+            "INSERT INTO wheel_spins(spin_id,guild_id,discord_id,spin_time,result)
+             VALUES(?1,?2,?3,?4,?5)",
+            values,
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO double_or_nothing_spins(
+                spin_id,guild_id,discord_id,spin_time,cost,balance_before,balance_after,won
+             ) VALUES(?1,?2,?3,?4,?5,0,1,1)",
+            values,
+        )
+        .unwrap();
+    }
+    let repo = fixture.stats_repository();
+    assert_eq!(
+        repo.wheel_history_between(7, Some(1), 10..=19)
+            .unwrap()
+            .iter()
+            .map(|s| s.result)
+            .collect::<Vec<_>>(),
+        [12, 11]
+    );
+    assert_eq!(
+        repo.double_or_nothing_history_between(7, Some(1), 10..=19)
+            .unwrap()
+            .iter()
+            .map(|s| s.cost)
+            .collect::<Vec<_>>(),
+        [12, 11]
+    );
+}

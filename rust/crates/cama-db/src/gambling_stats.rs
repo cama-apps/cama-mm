@@ -363,6 +363,70 @@ pub struct GamblingStatsRepository {
 }
 
 impl GamblingStatsRepository {
+    pub fn wheel_history_between(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        times: std::ops::RangeInclusive<i64>,
+    ) -> Result<Vec<WheelSpin>, GamblingStatsError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT result, spin_time FROM wheel_spins
+             WHERE discord_id = ?1 AND guild_id = ?2 AND spin_time BETWEEN ?3 AND ?4 ORDER BY spin_time, spin_id",
+        )?;
+        statement
+            .query_map(
+                params![
+                    discord_id,
+                    Self::normalize_guild_id(guild_id),
+                    times.start(),
+                    times.end()
+                ],
+                |row| {
+                    Ok(WheelSpin {
+                        result: row.get(0)?,
+                        spin_time: row.get(1)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn double_or_nothing_history_between(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        times: std::ops::RangeInclusive<i64>,
+    ) -> Result<Vec<DoubleOrNothingSpin>, GamblingStatsError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT cost, balance_before, balance_after, won, spin_time
+             FROM double_or_nothing_spins
+             WHERE discord_id = ?1 AND guild_id = ?2 AND spin_time BETWEEN ?3 AND ?4 ORDER BY spin_time, spin_id",
+        )?;
+        statement
+            .query_map(
+                params![
+                    discord_id,
+                    Self::normalize_guild_id(guild_id),
+                    times.start(),
+                    times.end()
+                ],
+                |row| {
+                    Ok(DoubleOrNothingSpin {
+                        cost: row.get(0)?,
+                        balance_before: row.get(1)?,
+                        balance_after: row.get(2)?,
+                        won: row.get(3)?,
+                        spin_time: row.get(4)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     #[must_use]
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
@@ -914,23 +978,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
         discord_id: i64,
         guild_id: Option<i64>,
     ) -> Result<Vec<WheelSpin>, GamblingStatsError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT result, spin_time FROM wheel_spins
-             WHERE discord_id = ?1 AND guild_id = ?2 ORDER BY spin_time",
-        )?;
-        statement
-            .query_map(
-                params![discord_id, Self::normalize_guild_id(guild_id)],
-                |row| {
-                    Ok(WheelSpin {
-                        result: row.get(0)?,
-                        spin_time: row.get(1)?,
-                    })
-                },
-            )?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        self.wheel_history_between(discord_id, guild_id, i64::MIN..=i64::MAX)
     }
 
     fn double_or_nothing_history(
@@ -938,27 +986,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
         discord_id: i64,
         guild_id: Option<i64>,
     ) -> Result<Vec<DoubleOrNothingSpin>, GamblingStatsError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT cost, balance_before, balance_after, won, spin_time
-             FROM double_or_nothing_spins
-             WHERE discord_id = ?1 AND guild_id = ?2 ORDER BY spin_time",
-        )?;
-        statement
-            .query_map(
-                params![discord_id, Self::normalize_guild_id(guild_id)],
-                |row| {
-                    Ok(DoubleOrNothingSpin {
-                        cost: row.get(0)?,
-                        balance_before: row.get(1)?,
-                        balance_after: row.get(2)?,
-                        won: row.get(3)?,
-                        spin_time: row.get(4)?,
-                    })
-                },
-            )?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        self.double_or_nothing_history_between(discord_id, guild_id, i64::MIN..=i64::MAX)
     }
 }
 

@@ -43,8 +43,8 @@ use cama_db::betting_service_repository::{
 };
 use cama_db::core_repositories::{
     CoreGlickoUpdate, CoreMatchRecord, CoreOpenSkillUpdate, MatchPredictionSnapshot, MatchRecord,
-    MatchRepository, NewCoreRatingHistory, NewPlayer, OrderedMap, ParticipantStatsUpdate,
-    PlayerRepository, ShuffleInputs, StreakInsertDefaults,
+    MatchRepository, NewCoreRatingHistory, OrderedMap, PlayerRepository, ShuffleInputs,
+    StreakInsertDefaults,
 };
 use cama_db::dig_blood_pact::{DigBloodPactRepository, DigBloodPactSettlementRequest};
 use cama_db::dota_bet_seed_repository::{
@@ -108,8 +108,8 @@ use tracing::{debug, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordMessage, DiscordTransport, GuildPlayerNameDirectory, GuildPlayerNameResolver,
-    resolve_guild_player_names,
+    DiscordDeliveryError, DiscordMessage, DiscordTransport, GuildPlayerNameDirectory,
+    GuildPlayerNameResolver, resolve_guild_player_names,
 };
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_ORANGE};
 use crate::gateway_events::{
@@ -128,9 +128,9 @@ use crate::registration::{
 use crate::reminder_provider::{ReminderDeliveryReport, ReminderHooks};
 use crate::runtime_ports::{
     AdminExtendBettingRequest, AdminExtendBettingResult, AdminMatchControl,
-    AdminRoleBackfillResult, AdminSeedHeroGridRequest, AdminSeedHeroGridResult,
-    CorrectionWinRewardControl, CorrectionWinRewardRequest, CorrectionWinRewardResult,
-    MatchLobbySnapshot, RecordedMatchDiscovery, RecordedMatchDiscoveryOutcome,
+    AdminRoleBackfillResult, CorrectionWinRewardControl, CorrectionWinRewardRequest,
+    CorrectionWinRewardResult, MatchLobbySnapshot, RecordedMatchDiscovery,
+    RecordedMatchDiscoveryOutcome,
 };
 pub use crate::runtime_ports::{
     MatchBetSettlementParticipant, MatchBetSettlementRequest, MatchEasterEggRequest,
@@ -417,7 +417,7 @@ impl MatchRegistrationProvider {
         })
     }
 
-    /// Handle consumed by `/admin extendbetting` and `/admin seedherogrid`.
+    /// Handle consumed by `/admin extendbetting`.
     #[must_use]
     pub fn admin_control(&self) -> Arc<dyn AdminMatchControl> {
         self.handler.clone()
@@ -2253,7 +2253,7 @@ impl MatchHandler {
     }
 
     async fn recover_pending_match(&self, pending: PendingMatchRecord) -> Result<(), String> {
-        if self.recover_shuffle_setup(&pending).await? {
+        if !pending.state.has_retired_participant() && self.recover_shuffle_setup(&pending).await? {
             return Ok(());
         }
         let Some(guard) =
@@ -2718,6 +2718,9 @@ impl MatchHandler {
             return self.finalize_abort(&pending, responder).await;
         }
 
+        if pending.state.has_retired_participant() {
+            return followup_ephemeral(&responder, RETIRED_MATCH_MESSAGE).await;
+        }
         let dotabuff_match_id =
             string_option(&context.options, "dotabuff_match_id").map(str::to_owned);
         if let Err(error) = self
@@ -3808,14 +3811,14 @@ impl MatchHandler {
             .state
             .thread_shuffle_thread_id
             .and_then(|id| u64::try_from(id).ok());
-        let destination = thread.or_else(|| {
-            pending
-                .state
-                .origin_channel_id
-                .or(pending.state.cmd_shuffle_channel_id)
-                .or(pending.state.shuffle_channel_id)
-                .and_then(|id| u64::try_from(id).ok())
-        });
+        let channels = [
+            pending.state.origin_channel_id,
+            pending.state.cmd_shuffle_channel_id,
+            pending.state.shuffle_channel_id,
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|id| u64::try_from(id).ok());
         let lobby = parse_persisted_lobby_kind(pending.state.lobby_kind.as_deref());
         let winner = if winning_result == "radiant" {
             "Radiant"
@@ -3838,32 +3841,70 @@ impl MatchHandler {
             recorded.match_id,
             render_jc_summary(&recorded.jc_lines, &names)
         );
-        if let Some(channel) = destination {
-            self.deliver_record_result(
-                &pending,
-                channel,
-                &body,
-                "record_result",
-                'm',
-                recorded.match_id,
-            )
-            .await?;
+        let mut attempted = BTreeSet::new();
+        let mut delivered_to = None;
+        for channel in thread.into_iter().chain(channels) {
+            if !attempted.insert(channel) {
+                continue;
+            }
+            // Keep the original progress keys for the first destination. A
+            // fallback must receive every chunk, including any that already
+            // reached a deleted thread.
+            let ordinal = attempted.len() - 1;
+            let prefix = if ordinal == 0 {
+                "record_result".to_owned()
+            } else {
+                format!("record_fallback_{channel}")
+            };
+            let unavailable_key = format!("{prefix}_undeliverable");
+            if pending.state.extra.get(&unavailable_key) == Some(&json!(true)) {
+                continue;
+            }
+            let delivery = self
+                .deliver_record_result(
+                    &pending,
+                    channel,
+                    &body,
+                    &prefix,
+                    ['m', 'f', 'g', 'h'][ordinal],
+                    recorded.match_id,
+                )
+                .await;
+            match delivery {
+                Ok(()) => {
+                    delivered_to = Some(channel);
+                    break;
+                }
+                Err(DiscordDeliveryError::Retryable(error)) => return Err(error),
+                Err(DiscordDeliveryError::Undeliverable(error)) => {
+                    // Freeze this choice before sending elsewhere so recovery
+                    // cannot publish another copy if permissions later change.
+                    self.persist_recording_effect(&pending, &unavailable_key, json!(true))
+                        .await?;
+                    warn!(%error, channel, match_id = recorded.match_id, "recorded match destination is no longer available");
+                }
+            }
         }
-        if let Some(thread) = thread {
-            self.discord
+        if let Some(thread) = thread
+            && delivered_to == Some(thread)
+            && let Err(error) = self
+                .discord
                 .edit_thread(
                     thread,
                     &format!("✅ {} Match Complete - {winner} Won", lobby.label()),
                     true,
                     true,
                 )
-                .await?;
+                .await
+        {
+            warn!(%error, thread, match_id = recorded.match_id, "could not archive completed match thread");
         }
         // Automatic hosting has no `/record` reply in the lobby channel, so the
         // summary would otherwise live only in the archived match thread. This
         // copy is supplementary: an undeliverable channel must not keep the
         // recorded match from finalizing.
         if let Some(thread) = thread
+            && delivered_to == Some(thread)
             && pending.state.extra.get(HOSTED_CHANNEL_RESULT_KEY) == Some(&json!(true))
             && let Some(channel) = pending
                 .state
@@ -4042,7 +4083,7 @@ impl MatchHandler {
         key_prefix: &str,
         nonce_prefix: char,
         match_id: i64,
-    ) -> Result<(), String> {
+    ) -> Result<(), DiscordDeliveryError> {
         let delivered_key = format!("{key_prefix}_delivered");
         if pending
             .state
@@ -4076,7 +4117,7 @@ impl MatchHandler {
             }
             let delivery_key = format!("{nonce_prefix}{match_id:019}{index:04}");
             self.discord
-                .send_message_with_delivery_key(
+                .send_classified_keyed_message(
                     channel,
                     &delivery_key,
                     DiscordMessage::silent(InteractionResponse::message(chunk)),
@@ -4257,6 +4298,9 @@ impl MatchHandler {
         let recorded_match_id = matches
             .match_id_for_pending_match(pending.guild_id, pending.pending_match_id)
             .map_err(|error| error.to_string())?;
+        if recorded_match_id.is_none() && pending.state.has_retired_participant() {
+            return Err(RETIRED_MATCH_MESSAGE.to_owned());
+        }
         if let Some(existing_match_id) = recorded_match_id {
             let existing = matches
                 .get_match(existing_match_id, Some(pending.guild_id))
@@ -5554,6 +5598,9 @@ impl MatchHandler {
 
     fn schedule_betting_reminders(&self, pending: &PendingMatchRecord, notify_subscribers: bool) {
         self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
+        if pending.state.has_retired_participant() {
+            return;
+        }
         let Some(lock_until) = pending.state.bet_lock_until else {
             return;
         };
@@ -5861,109 +5908,6 @@ impl MatchHandler {
             failures,
         })
     }
-
-    fn seed_hero_grid_blocking(&self, guild_id: i64) -> Result<AdminSeedHeroGridResult, String> {
-        const HERO_POOL: [i64; 20] = [
-            1, 2, 5, 7, 8, 11, 14, 18, 19, 22, 25, 29, 35, 39, 41, 44, 48, 49, 74, 86,
-        ];
-        const NUM_PLAYERS: usize = 20;
-        const NUM_MATCHES: usize = 30;
-        const BASE_ID: i64 = -1001;
-
-        let player_ids = (0..NUM_PLAYERS)
-            .map(|index| BASE_ID - i64::try_from(index).unwrap_or_default())
-            .collect::<Vec<_>>();
-        let mut player_hero_pools = Vec::with_capacity(NUM_PLAYERS);
-        for _ in 0..NUM_PLAYERS {
-            let mut pool = HERO_POOL.to_vec();
-            fastrand::shuffle(&mut pool);
-            pool.truncate(fastrand::usize(4..=6));
-            player_hero_pools.push(pool);
-        }
-
-        for (index, player_id) in player_ids.iter().copied().enumerate() {
-            if self
-                .players
-                .get_by_id(player_id, Some(guild_id))
-                .map_err(|error| error.to_string())?
-                .is_some()
-            {
-                continue;
-            }
-            let mut roles = ["1", "2", "3", "4", "5"];
-            fastrand::shuffle(&mut roles);
-            let role_count = fastrand::usize(1..=3);
-            let mut player =
-                NewPlayer::new(player_id, format!("GridTest{}", index + 1), Some(guild_id));
-            player.openskill_algorithm_fingerprint = self.openskill.algorithm_fingerprint();
-            player.glicko_rating = Some(fastrand::i64(1000..=2000) as f64);
-            player.glicko_rd = Some(fastrand::f64() * 150.0 + 50.0);
-            player.glicko_volatility = Some(0.06);
-            player.preferred_roles = Some(
-                roles[..role_count]
-                    .iter()
-                    .map(|role| (*role).to_owned())
-                    .collect(),
-            );
-            self.players
-                .add(&player)
-                .map_err(|error| error.to_string())?;
-        }
-
-        let matches = MatchRepository::new(&self.database_path);
-        for _ in 0..NUM_MATCHES {
-            let mut shuffled = player_ids.clone();
-            fastrand::shuffle(&mut shuffled);
-            shuffled.truncate(10);
-            let (radiant, dire) = shuffled.split_at(5);
-            let winning_team = if fastrand::bool() { 1 } else { 2 };
-            let match_id = matches
-                .record_match(&MatchRecord::new(
-                    radiant.to_vec(),
-                    dire.to_vec(),
-                    winning_team,
-                    Some(guild_id),
-                ))
-                .map_err(|error| error.to_string())?;
-            for player_id in shuffled {
-                let index = usize::try_from(BASE_ID - player_id)
-                    .map_err(|_| format!("invalid seeded player ID {player_id}"))?;
-                let hero_id = if fastrand::f64() < 0.7 {
-                    let pool = &player_hero_pools[index];
-                    pool[fastrand::usize(..pool.len())]
-                } else {
-                    HERO_POOL[fastrand::usize(..HERO_POOL.len())]
-                };
-                matches
-                    .update_participant_stats(
-                        match_id,
-                        player_id,
-                        &ParticipantStatsUpdate {
-                            hero_id,
-                            kills: fastrand::i64(0..=25),
-                            deaths: fastrand::i64(0..=15),
-                            assists: fastrand::i64(0..=30),
-                            gpm: fastrand::i64(200..=800),
-                            xpm: fastrand::i64(200..=700),
-                            hero_damage: fastrand::i64(5_000..=50_000),
-                            tower_damage: fastrand::i64(500..=15_000),
-                            last_hits: fastrand::i64(20..=400),
-                            denies: fastrand::i64(0..=40),
-                            net_worth: fastrand::i64(5_000..=40_000),
-                            hero_healing: 0,
-                            lane_role: None,
-                            lane_efficiency: None,
-                            gold_at_10: None,
-                        },
-                    )
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-        Ok(AdminSeedHeroGridResult {
-            players_seeded: NUM_PLAYERS,
-            matches_created: NUM_MATCHES,
-        })
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6060,16 +6004,6 @@ impl AdminMatchControl for MatchHandler {
             refreshed_routes,
             refresh_failures,
         })
-    }
-
-    async fn seed_hero_grid(
-        &self,
-        request: AdminSeedHeroGridRequest,
-    ) -> Result<AdminSeedHeroGridResult, String> {
-        let worker = self.clone();
-        tokio::task::spawn_blocking(move || worker.seed_hero_grid_blocking(request.guild_id))
-            .await
-            .map_err(|error| format!("hero-grid seed task failed: {error}"))?
     }
 
     async fn backfill_derived_roles(
@@ -6319,6 +6253,8 @@ async fn followup_ephemeral(
         .await
         .map_err(|error| error.to_string().into())
 }
+
+const RETIRED_MATCH_MESSAGE: &str = "This pending match contains retired test players. Use `/record` with the abort result to refund it.";
 
 fn parse_lobby_kind(value: &str) -> Result<LobbyKind, InteractionHandlerError> {
     match value {

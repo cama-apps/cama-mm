@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -106,6 +106,7 @@ impl PlayerTriviaRegistrationProvider {
                     discord,
                     config: PlayerTriviaRuntimeConfig::from_application_config(config),
                     command_cooldowns: Mutex::new(BTreeMap::new()),
+                    player_locks: Mutex::new(BTreeMap::new()),
                     timeouts: Mutex::new(BTreeMap::new()),
                 }),
             }),
@@ -173,6 +174,8 @@ struct PlayerTriviaInteractionHandler {
     state: Arc<PlayerTriviaRuntimeState>,
 }
 
+type PlayerLocks = BTreeMap<(i64, i64), Weak<tokio::sync::Mutex<()>>>;
+
 struct PlayerTriviaRuntimeState {
     player_names: Arc<dyn GuildPlayerNameResolver>,
     repository: RuntimePlayerTriviaRepository,
@@ -183,6 +186,7 @@ struct PlayerTriviaRuntimeState {
     discord: Arc<dyn PlayerTriviaDiscordPort>,
     config: PlayerTriviaRuntimeConfig,
     command_cooldowns: Mutex<BTreeMap<i64, Instant>>,
+    player_locks: Mutex<PlayerLocks>,
     timeouts: Mutex<BTreeMap<(i64, i64), JoinHandle<()>>>,
 }
 
@@ -210,6 +214,27 @@ impl InteractionHandler for PlayerTriviaInteractionHandler {
 }
 
 impl PlayerTriviaRuntimeState {
+    /// Keep a second command or click from expiring a question while Discord
+    /// is publishing it and its durable answer window is being recorded.
+    fn player_lock(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
+        let mut locks = self
+            .player_locks
+            .lock()
+            .map_err(|_| "player-trivia lock registry poisoned")?;
+        locks.retain(|_, lock| lock.strong_count() != 0);
+        let slot = locks.entry((user_id, guild_id)).or_default();
+        if let Some(lock) = slot.upgrade() {
+            return Ok(lock);
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        *slot = Arc::downgrade(&lock);
+        Ok(lock)
+    }
+
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
         self.player_names
             .resolve_names(guild_id, &[user_id])
@@ -275,6 +300,7 @@ impl PlayerTriviaRuntimeState {
             .await;
         }
 
+        let _guard = self.player_lock(user_id, guild_id)?.lock_owned().await;
         let now = unix_timestamp()?;
         let repository = self.repository.clone();
         let active = tokio::task::spawn_blocking(move || {
@@ -285,10 +311,8 @@ impl PlayerTriviaRuntimeState {
         .await
         .map_err(|error| format!("player-trivia active-session task failed: {error}"))??;
         if let Some(active) = active {
-            let deadline = active
-                .last_activity_at()
-                .saturating_add(duration_seconds(self.config.answer_timeout));
-            if now < deadline {
+            let deadline = active.answer_deadline_ms(duration_seconds(self.config.answer_timeout));
+            if unix_milliseconds()? < deadline {
                 return respond_ephemeral(
                     &responder,
                     "You already have an active player-trivia session!",
@@ -430,6 +454,7 @@ impl PlayerTriviaRuntimeState {
         let service = Arc::clone(&self.service);
         let frozen = questions.clone();
         let cooldown = self.config.cooldown_seconds;
+        let now = unix_timestamp()?;
         let session_id = match tokio::task::spawn_blocking(move || {
             service
                 .try_start_session(user_id, guild_id, &frozen, now, cooldown, is_admin)
@@ -508,6 +533,7 @@ impl PlayerTriviaRuntimeState {
             avatar,
             TimeoutTarget::Receipt(receipt),
         )
+        .await
     }
 
     async fn component(
@@ -531,6 +557,12 @@ impl PlayerTriviaRuntimeState {
             return respond_ephemeral(&responder, GUILD_ONLY_MESSAGE).await;
         };
         let guild_id = signed_id(guild_id, "guild")?;
+        let received_at_ms = unix_milliseconds()?;
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
+        let _guard = self.player_lock(user_id, guild_id)?.lock_owned().await;
         let repository = self.repository.clone();
         let session = tokio::task::spawn_blocking(move || {
             repository
@@ -540,42 +572,30 @@ impl PlayerTriviaRuntimeState {
         .await
         .map_err(|error| format!("player-trivia component session task failed: {error}"))??;
         let Some(session) = session else {
-            return respond_ephemeral(&responder, "That player-trivia session no longer exists.")
+            return followup_ephemeral(&responder, "That player-trivia session no longer exists.")
                 .await;
         };
         if session.guild_id != guild_id || session.discord_id != user_id {
-            return respond_ephemeral(&responder, "This isn't your player-trivia session!").await;
+            return followup_ephemeral(&responder, "This isn't your player-trivia session!").await;
         }
         let next = session.next_question();
         if session.status != "active"
             || next.is_none_or(|question| question.question_number != parsed.question_number)
         {
-            if responder.response_is_done() {
-                return Ok(());
-            }
-            return responder
-                .defer(false)
-                .await
-                .map_err(|error| error.to_string());
+            return Ok(());
         }
         let question = next.expect("checked player-trivia next question");
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
+        let now = received_at_ms / 1_000;
+        let deadline = session.answer_deadline_ms(duration_seconds(self.config.answer_timeout));
+        self.abort_timeout(session.session_id, question.question_number)?;
         let user_display_name = self.render_player_name(user_id, guild_id).await;
         let question_for_display = convert_stored_question(&question.question);
-        let now = unix_timestamp()?;
-        let deadline = session
-            .last_activity_at()
-            .saturating_add(duration_seconds(self.config.answer_timeout));
-        self.abort_timeout(session.session_id, question.question_number)?;
         let avatar = self
             .discord
             .player_trivia_user_avatar_url(user_id, guild_id)
             .await
             .unwrap_or(None);
-        if now >= deadline {
+        if received_at_ms >= deadline {
             let repository = self.repository.clone();
             let session_id = session.session_id;
             let changed = tokio::task::spawn_blocking(move || {
@@ -633,40 +653,8 @@ impl PlayerTriviaRuntimeState {
         .map_err(|error| format!("player-trivia settlement task failed: {error}"));
         let settlement = match settlement {
             Ok(Ok(Some(settlement))) => settlement,
-            Ok(Ok(None)) => {
-                // None also covers the benign duplicate-click race: two rapid
-                // clicks both pass the pre-check and the loser lands here while
-                // the winner's settlement stands. Killing a still-active
-                // session there would end a healthy run and burn the daily
-                // cooldown, so only a session that really is finished reports
-                // the interruption.
-                let repository = self.repository.clone();
-                let session_id = session.session_id;
-                let current = tokio::task::spawn_blocking(move || {
-                    repository
-                        .get_session(session_id)
-                        .map_err(|error| error.to_string())
-                })
-                .await
-                .map_err(|error| format!("player-trivia session reload failed: {error}"))??;
-                if current.is_some_and(|current| current.status == "active") {
-                    return Ok(());
-                }
-                self.finish_interrupted(session.session_id, now).await;
-                return responder
-                    .update(summary_response(
-                        "Player Trivia — Interrupted",
-                        &session,
-                        &user_display_name,
-                        avatar.as_deref(),
-                        Some(
-                            "That round was already settled or was no longer active. No duplicate reward was issued."
-                                .to_owned(),
-                        ),
-                    ))
-                    .await
-                    .map_err(|error| error.to_string());
-            }
+            // The winning answer or timeout owns the board edit.
+            Ok(Ok(None)) => return Ok(()),
             Ok(Err(error)) | Err(error) => {
                 warn!(session_id = session.session_id, %error, "failed to settle player-trivia answer");
                 self.finish_interrupted(session.session_id, now).await;
@@ -766,6 +754,7 @@ impl PlayerTriviaRuntimeState {
             avatar,
             TimeoutTarget::Responder(Arc::clone(&responder)),
         )
+        .await
     }
 
     async fn require_gamba(
@@ -834,7 +823,7 @@ impl PlayerTriviaRuntimeState {
         Ok(())
     }
 
-    fn arm_timeout(
+    async fn arm_timeout(
         self: &Arc<Self>,
         session_id: i64,
         question_number: i64,
@@ -842,10 +831,26 @@ impl PlayerTriviaRuntimeState {
         avatar: Option<String>,
         target: TimeoutTarget,
     ) -> Result<(), String> {
+        let deadline_ms = unix_milliseconds()?
+            .saturating_add(duration_seconds(self.config.answer_timeout).saturating_mul(1_000));
+        let repository = self.repository.inner.clone();
+        let persisted = tokio::task::spawn_blocking(move || {
+            repository.mark_question_published(session_id, question_number, deadline_ms)
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result.map_err(|error| error.to_string()));
+        if let Err(error) = persisted {
+            // The controls are already visible. Keep their timeout running.
+            warn!(session_id,question_number,%error,"could not persist player-trivia answer deadline");
+        }
         self.abort_timeout(session_id, question_number)?;
         let state = Arc::clone(self);
+        let delay =
+            Duration::from_millis(deadline_ms.saturating_sub(unix_milliseconds()?).max(0) as u64);
+        let expires = tokio::time::sleep(delay);
         let timeout = tokio::spawn(async move {
-            tokio::time::sleep(state.config.answer_timeout).await;
+            expires.await;
             if let Err(error) = state
                 .timeout_session(
                     session_id,
@@ -889,6 +894,12 @@ impl PlayerTriviaRuntimeState {
         let Some(session) = session else {
             return Ok(());
         };
+        // A click received before its deadline may still be loading the
+        // question. Let that handler settle it before the timeout can commit.
+        let _guard = self
+            .player_lock(session.discord_id, session.guild_id)?
+            .lock_owned()
+            .await;
         let Some(question) = session.next_question() else {
             return Ok(());
         };
@@ -1561,9 +1572,13 @@ fn convert_snapshot(value: db::PlayerTriviaSnapshot) -> app::PlayerTriviaSnapsho
 }
 
 fn unix_timestamp() -> Result<i64, String> {
+    Ok(unix_milliseconds()? / 1_000)
+}
+
+fn unix_milliseconds() -> Result<i64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
         .map_err(|_| "system clock is before the Unix epoch".to_owned())
 }
 

@@ -75,89 +75,6 @@ impl PushPublisher for RecordingPushPublisher {
     }
 }
 
-#[tokio::test]
-async fn test_addfake_adds_users_to_lobby() {
-    let database = database_with_players(&[]);
-    let provider = provider_for(&database, Arc::new(RecordingTransport::default()));
-
-    let result = provider
-        .admin_control()
-        .add_fake_users(fake_request(5, 1))
-        .await
-        .expect("add fake users");
-
-    assert_eq!(result.users_added, 5);
-    assert_eq!(
-        lobby_snapshot(&provider, LobbyKind::Open).players,
-        (-5..=-1).map(AppUserId).collect()
-    );
-}
-
-#[tokio::test]
-async fn test_addfake_continues_numbering() {
-    let database = database_with_players(&[]);
-    let provider = provider_for(&database, Arc::new(RecordingTransport::default()));
-    let control = provider.admin_control();
-
-    let first = control
-        .add_fake_users(fake_request(3, 1))
-        .await
-        .expect("first fake batch");
-    let second = control
-        .add_fake_users(fake_request(3, 2))
-        .await
-        .expect("second fake batch");
-
-    assert_eq!(first.user_names, ["FakeUser1", "FakeUser2", "FakeUser3"]);
-    assert_eq!(second.user_names, ["FakeUser4", "FakeUser5", "FakeUser6"]);
-    assert_eq!(
-        lobby_snapshot(&provider, LobbyKind::Open).players,
-        (-6..=-1).map(AppUserId).collect()
-    );
-}
-
-#[tokio::test]
-async fn test_addfake_refreshes_partial_lobby_message_without_fetch() {
-    let database = database_with_players(&[(10, "Creator")]);
-    let transport = Arc::new(RecordingTransport::default());
-    let provider = provider_for(&database, transport.clone());
-    dispatch_command(&provider, "lobby", 10, "Creator", Vec::new()).await;
-    let fetches_before = transport.fetch_count();
-    let edits_before = transport.edit_count();
-
-    provider
-        .admin_control()
-        .add_fake_users(fake_request(1, 2))
-        .await
-        .expect("add fake user and refresh");
-
-    assert_eq!(transport.fetch_count(), fetches_before);
-    assert_eq!(transport.edit_count(), edits_before + 2);
-}
-
-#[tokio::test]
-async fn test_filllobby_refreshes_partial_lobby_message_without_fetch() {
-    let database = database_with_players(&[(10, "Creator")]);
-    let transport = Arc::new(RecordingTransport::default());
-    let provider = provider_for(&database, transport.clone());
-    dispatch_command(&provider, "lobby", 10, "Creator", Vec::new()).await;
-    let fetches_before = transport.fetch_count();
-    let edits_before = transport.edit_count();
-
-    provider
-        .admin_control()
-        .fill_lobby(fake_request(0, 2))
-        .await
-        .expect("fill lobby and refresh");
-
-    assert_eq!(
-        lobby_snapshot(&provider, LobbyKind::Open).players.len(),
-        runtime_config().ready_threshold
-    );
-    assert_eq!(transport.fetch_count(), fetches_before);
-    assert_eq!(transport.edit_count(), edits_before + 2);
-}
-
 #[derive(Default)]
 struct CapturingResponder {
     source_message_id: Option<u64>,
@@ -232,6 +149,7 @@ struct RecordingState {
     /// Bot-authored messages retrievable by delivery nonce, mirroring
     /// `find_message_by_delivery_key` history recovery.
     delivery_keys: BTreeMap<(u64, String), DiscordMessageReceipt>,
+    history_searches: Vec<(i64, Option<u64>)>,
 }
 
 impl Default for RecordingState {
@@ -256,6 +174,7 @@ impl Default for RecordingState {
             server_nicknames: BTreeMap::new(),
             users: BTreeMap::new(),
             delivery_keys: BTreeMap::new(),
+            history_searches: Vec::new(),
         }
     }
 }
@@ -266,6 +185,8 @@ struct RecordingTransport {
     /// When set, message edits fail, standing in for a deleted lobby message or
     /// a transient Discord error during a repaint.
     fail_edits: std::sync::atomic::AtomicBool,
+    fail_fetches: std::sync::atomic::AtomicBool,
+    long_history: std::sync::atomic::AtomicBool,
     fail_next_pruned_notice: std::sync::atomic::AtomicBool,
     cold_member_cache: std::sync::atomic::AtomicBool,
 }
@@ -311,10 +232,6 @@ impl RecordingTransport {
 
     fn edit_count(&self) -> usize {
         self.state.lock().expect("transport state").edits.len()
-    }
-
-    fn fetch_count(&self) -> usize {
-        self.state.lock().expect("transport state").fetches.len()
     }
 
     fn seed_reaction(&self, channel_id: u64, message_id: u64, emoji: DiscordEmoji) {
@@ -384,6 +301,9 @@ impl DiscordTransport for RecordingTransport {
     ) -> Result<Option<DiscordMessageSnapshot>, String> {
         let mut state = self.state.lock().expect("transport state");
         state.fetches.push((channel_id, message_id));
+        if self.fail_fetches.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("temporary Discord outage".into());
+        }
         Ok(state.messages.get(&(channel_id, message_id)).cloned())
     }
 
@@ -455,6 +375,38 @@ impl DiscordTransport for RecordingTransport {
             .delivery_keys
             .get(&(channel_id, delivery_key.to_owned()))
             .cloned())
+    }
+
+    async fn delivery_history_page(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        since: i64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<crate::discord_transport::DeliveryHistoryPage, String> {
+        use crate::discord_transport::DeliveryHistoryPage;
+        assert_eq!(limit, 500);
+        self.state
+            .lock()
+            .unwrap()
+            .history_searches
+            .push((since, before));
+        if self.long_history.load(std::sync::atomic::Ordering::SeqCst)
+            && since == 0
+            && before.is_none()
+        {
+            return Ok(DeliveryHistoryPage::ContinueBefore(100));
+        }
+        assert!(before.is_none() || before == Some(100));
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .delivery_keys
+            .get(&(channel_id, delivery_key.to_owned()))
+            .cloned()
+            .map_or(DeliveryHistoryPage::Exhausted, DeliveryHistoryPage::Found))
     }
 
     async fn edit_message(
@@ -827,8 +779,6 @@ fn registration_exposes_the_complete_lobby_command_surface() {
             max_players: 20,
             first_game_pool_daily_amount: 100,
             min_readycheck_players: 0,
-            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
-                .algorithm_fingerprint(),
         },
         Arc::new(DraftStateManager::default()),
         Arc::new(UnusedTransport),
@@ -859,8 +809,6 @@ fn runtime_config() -> LobbyRuntimeConfig {
         max_players: 20,
         first_game_pool_daily_amount: 100,
         min_readycheck_players: 0,
-        openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
-            .algorithm_fingerprint(),
     }
 }
 
@@ -1024,15 +972,6 @@ fn lobby_snapshot(provider: &LobbyRegistrationProvider, kind: LobbyKind) -> Lobb
         .service
         .get_lobby(LobbyScope::new(AppGuildId(42), kind))
         .expect("persisted lobby snapshot")
-}
-
-fn fake_request(count: usize, interaction_id: u64) -> AdminFakeLobbyRequest {
-    AdminFakeLobbyRequest {
-        interaction_id,
-        guild_id: 42,
-        channel_id: 9,
-        count,
-    }
 }
 
 /// A 📻 spectator reaction on a lobby (or shuffle) message.
@@ -3062,6 +3001,132 @@ async fn failed_sweep_notice_delivery_does_not_block_the_sweep_and_recovers_once
         "second recovery failed: {second_report:?}"
     );
     assert_eq!(notice_count(), 1, "acknowledged notice must not repeat");
+}
+
+#[tokio::test]
+async fn matchmaking_regression_existing_lobby_discards_only_synthetic_seats() {
+    let database = database_with_players(&[(10, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 10, "Creator", vec![]).await;
+    let repository = ReadycheckRepository::new(database.path());
+    let mut lobby = repository.load(1, Some(42)).unwrap().unwrap();
+    lobby.players.push(-10);
+    lobby.player_join_times.insert(-10, 99.);
+    repository.save(&lobby).unwrap();
+    let restored = provider_for(&database, transport);
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    assert!(
+        !restored
+            .handler
+            .state
+            .service
+            .join_lobby(AppUserId(-11), scope)
+            .success
+    );
+    let saved = repository.load(1, Some(42)).unwrap().unwrap();
+    assert_eq!(saved.players, vec![10]);
+    assert!(!saved.player_join_times.contains_key(&-10));
+    assert_eq!(saved.message_id, lobby.message_id);
+    assert_eq!(
+        lobby_snapshot(&restored, LobbyKind::Open).players,
+        BTreeSet::from([AppUserId(10)])
+    );
+}
+
+#[tokio::test]
+async fn matchmaking_regression_transient_fetch_preserves_current_lobby() {
+    let database = database_with_players(&[(10, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 10, "Creator", vec![]).await;
+    let before = transport.sent_messages().len();
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let ids = provider
+        .handler
+        .state
+        .service
+        .get_lobby(scope)
+        .unwrap()
+        .message_ids;
+    transport
+        .fail_fetches
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    dispatch_command_allowing_failure(&provider, "lobby", 10, "Creator", vec![]).await;
+    assert_eq!(transport.sent_messages().len(), before);
+    assert_eq!(
+        provider
+            .handler
+            .state
+            .service
+            .get_lobby(scope)
+            .unwrap()
+            .message_ids,
+        ids
+    );
+}
+
+#[tokio::test]
+async fn matchmaking_regression_notices_handle_long_threads_and_synthetic_ids() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Removed")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 10, "Creator", vec![]).await;
+    let repository = ReadycheckRepository::new(database.path());
+    let lobby = repository.load(1, Some(42)).unwrap().unwrap();
+    let channel = lobby.thread_id.unwrap();
+    transport
+        .long_history
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    repository
+        .save_with_pruned_notice(&lobby, channel, &BTreeSet::from([20]))
+        .unwrap();
+    // Previously persisted synthetic-only and mixed rows predate the recovery timestamp.
+    let db = rusqlite::Connection::open(database.path()).unwrap();
+    for (key, ids) in [("01", "[-2]"), ("02", "[-1,10]")] {
+        db.execute(
+            "INSERT INTO app_kv(guild_id,key,value) VALUES(42,?1,?2)",
+            rusqlite::params![
+                format!("readycheck:pruned_notice:1:{key:0>16}"),
+                format!(r#"{{"lobby_id":1,"channel_id":{channel},"player_ids":{ids}}}"#)
+            ],
+        )
+        .unwrap();
+    }
+    provider
+        .handler
+        .state
+        .publish_pending_readycheck_pruned_notices_for_scope(LobbyScope::new(
+            AppGuildId(42),
+            LobbyKind::Open,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .pending_pruned_notices()
+            .unwrap()
+            .notices
+            .is_empty()
+    );
+    let messages = transport.sent_messages();
+    let notices: Vec<_> = messages
+        .iter()
+        .map(|message| &message.message.response.content)
+        .filter(|content| content.starts_with("🧹 Removed"))
+        .collect();
+    assert_eq!(notices.len(), 2);
+    assert!(notices.iter().any(|content| content.contains("<@20>")));
+    assert!(notices.iter().any(|content| content.contains("<@10>")));
+    let state = transport.state.lock().unwrap();
+    assert_eq!(state.history_searches.len(), 3);
+    assert!(
+        state
+            .history_searches
+            .iter()
+            .any(|(since, before)| *since > 0 && before.is_none())
+    );
+    assert!(state.history_searches.contains(&(0, Some(100))));
 }
 
 #[tokio::test]
@@ -5769,16 +5834,9 @@ async fn invalid_cached_lobby_name_is_replaced_by_live_member_lookup() {
     let names = provider
         .handler
         .state
-        .player_name_overrides(
-            AppGuildId(42),
-            &BTreeSet::from([AppUserId(10), AppUserId(-1)]),
-        )
+        .player_name_overrides(AppGuildId(42), &BTreeSet::from([AppUserId(10)]))
         .await;
     assert_eq!(names[&10], "Fresh Server Name");
-    assert!(
-        !names.contains_key(&-1),
-        "synthetic player names remain available to the renderer"
-    );
 }
 
 #[test]
