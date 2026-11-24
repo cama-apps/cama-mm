@@ -87,8 +87,8 @@ impl WrappedActivityRepository {
                         COALESCE(SUM(MAX(depth_after - depth_before, 0)), 0),
                         COALESCE(MAX(depth_after), 0),
                         COALESCE(SUM(jc_delta), 0),
-                        COALESCE(SUM(json_valid(detail) AND json_extract(detail, '$.cave_in') = 1), 0),
-                        COALESCE(SUM(json_valid(detail) AND json_type(detail, '$.event') = 'text'), 0),
+                        COALESCE(SUM(CASE WHEN json_valid(detail) THEN json_extract(detail, '$.cave_in') = 1 END), 0),
+                        COALESCE(SUM(CASE WHEN json_valid(detail) THEN json_type(detail, '$.event') = 'text' END), 0),
                         COUNT(DISTINCT date(created_at, 'unixepoch'))
                    FROM dig_actions
                   WHERE guild_id = ?1 AND actor_id = ?2
@@ -126,14 +126,17 @@ impl WrappedActivityRepository {
             .optional()?;
         year.bosses = connection
             .prepare(
-                "SELECT json_extract(detail, '$.boss_id') AS boss,
-                        SUM(json_extract(detail, '$.won') = 1),
+                "SELECT CASE WHEN action_type = 'pinnacle_fight' AND json_type(detail, '$.pinnacle_id') = 'text'
+                             THEN json_extract(detail, '$.pinnacle_id')
+                             WHEN json_type(detail, '$.boss_id') = 'text'
+                             THEN json_extract(detail, '$.boss_id') END AS boss,
+                        SUM(COALESCE(json_extract(detail, '$.won'), 0) = 1),
                         SUM(COALESCE(json_extract(detail, '$.won'), 0) != 1)
                    FROM dig_actions
                   WHERE guild_id = ?1 AND actor_id = ?2
                     AND created_at >= ?3 AND created_at < ?4
                     AND action_type IN ('boss_fight', 'pinnacle_fight')
-                    AND json_valid(detail) AND json_type(detail, '$.boss_id') = 'text'
+                    AND json_valid(detail) AND boss IS NOT NULL
                GROUP BY boss ORDER BY COUNT(*) DESC, boss ASC",
             )?
             .query_map(arguments, |row| {

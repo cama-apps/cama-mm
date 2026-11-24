@@ -16,7 +16,7 @@ use crate::economy_event_service::{
     BalanceSheet, Clock, DeterministicEventRng, Direction, EVENT_CATALOG, EconomyEventConfig,
     EconomyEventEffects, EconomyEventError, EconomyEventService, EventRng, FixedClock, GuildId,
     MemoryEconomy, MemoryEventStore, SECOND_ANNOUNCEMENT_DELAY_SECONDS, SurfaceVolumes,
-    SystemClock,
+    SystemClock, apply_reward_multiplier,
 };
 
 type PlanningService =
@@ -233,7 +233,7 @@ where
             return Ok(amount);
         }
         let multiplier = self.effects_at(guild_id, now)?.reward_multiplier;
-        Ok((((amount as f64 * multiplier) + 0.5) as i64).max(0))
+        Ok(apply_reward_multiplier(amount, multiplier))
     }
 
     /// Read the active Pacific-day effects without creating an event or

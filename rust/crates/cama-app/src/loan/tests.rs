@@ -90,6 +90,7 @@ impl LoanPort for FakeLoanPort {
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
+        _match_id: Option<i64>,
     ) -> Result<RepaymentResult, LoanPortError> {
         self.repayment_calls
             .borrow_mut()
@@ -202,14 +203,14 @@ fn test_match_repayment_bulk_checks_once_and_attempts_each_borrower_once() {
     let port = FakeLoanPort::default();
     port.outstanding.borrow_mut().extend([2, 4, 5]);
     port.repayments.borrow_mut().extend([
-        Err(LoanPortError::Backend("Loan was already repaid".to_owned())),
+        Err(LoanPortError::NoOutstandingLoan),
         Ok(repayment(40, 8, 100, 52, 8)),
         Ok(repayment(25, 5, 50, 20, 13)),
     ]);
     let service = service(port);
     let participant_ids = [1, 2, 2, 3, 4, 5, 99];
     let repayments = service
-        .repay_outstanding_match_loans(&participant_ids, Some(77))
+        .repay_outstanding_match_loans(&participant_ids, Some(77), 100)
         .unwrap();
     assert_eq!(
         service.port().bulk_calls.borrow().as_slice(),
@@ -307,7 +308,7 @@ fn signed_participant_ids_preserve_input_order_in_match_hook() {
         .extend([Ok(repayment(1, 0, 0, -1, 0)), Ok(repayment(1, 0, 0, -1, 0))]);
     let service = service(port);
     let repayments = service
-        .repay_outstanding_match_loans(&[-5, -2, -5], None)
+        .repay_outstanding_match_loans(&[-5, -2, -5], None, 100)
         .unwrap();
     assert_eq!(
         repayments

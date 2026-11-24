@@ -180,6 +180,36 @@ pub struct DigEventRuntimeService {
     config: DigRuntimeConfig,
 }
 
+#[derive(Deserialize, Serialize)]
+struct EventEffectPlan {
+    resolution: CanonicalEventResolution,
+    money: EventEconomicTerms,
+    recipients: Vec<i64>,
+    chain_event_id: Option<String>,
+    now: i64,
+    chained: bool,
+    delivery: Option<DigEventDeliveryContext>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+struct EventEconomicTerms {
+    minigame_scale: f64,
+    reward_multiplier: f64,
+}
+
+impl EventEconomicTerms {
+    fn final_jc(self, authored: i64) -> i64 {
+        if authored < 0 {
+            return scale_deflationary_minigame_jc_delta(authored as f64, self.minigame_scale);
+        }
+        let gross = scale_minigame_jc_delta(authored as f64, self.minigame_scale);
+        scale_positive_dig_jc(crate::economy_event_service::apply_reward_multiplier(
+            gross,
+            self.reward_multiplier,
+        ))
+    }
+}
+
 /// Public event-view projection for a unique gear reward. The Discord
 /// provider can render this as the `Gear Drop` field without reconstructing
 /// event-specific copy or trusting an untyped JSON payload.
@@ -553,6 +583,71 @@ impl DigEventRuntimeService {
             .collect()
     }
 
+    /// Finish choices accepted before interruption, even after the Discord
+    /// prompt expires. The normal event outbox delivers their results.
+    pub fn recover_pending_event_effects(
+        &self,
+        guild_id: i64,
+        discord_id: Option<i64>,
+        limit: usize,
+    ) -> Result<(), DigEventRuntimeError> {
+        #[derive(Deserialize)]
+        struct Claim {
+            event_key: String,
+            event_id: String,
+            requested_choice: String,
+            effect_plan: EventEffectPlan,
+        }
+        let repository = DigEventRuntimeRepository::new(&self.path);
+        let recover = |raw: &str| -> Result<(), DigEventRuntimeError> {
+            let claim: Claim =
+                serde_json::from_str(raw).map_err(DigEventRuntimeRepositoryError::Json)?;
+            let context = claim
+                .effect_plan
+                .delivery
+                .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+            let request = DigRuntimeEventRequest {
+                discord_id: context.discord_id,
+                guild_id,
+                event_key: &claim.event_key,
+                event_id: &claim.event_id,
+                choice: &claim.requested_choice,
+                now: claim.effect_plan.now,
+                chained: claim.effect_plan.chained,
+            };
+            let outcome = self.resolve_event_with_delivery(request, context)?;
+            if let Some(error) = outcome.error
+                && !repository.retire_event_effects_if_actor_missing(
+                    DigEventActorKey {
+                        discord_id: request.discord_id,
+                        guild_id: Some(guild_id),
+                    },
+                    request.event_key,
+                )?
+            {
+                return Err(DigEventRuntimeError::Policy(error));
+            }
+            Ok(())
+        };
+        let mut first_error = None;
+        let mut after_key = String::new();
+        loop {
+            let claims =
+                repository.pending_event_effects(guild_id, discord_id, &after_key, limit)?;
+            let count = claims.len();
+            for (key, raw) in claims {
+                after_key = key;
+                if let Err(error) = recover(&raw) {
+                    first_error.get_or_insert(error);
+                }
+            }
+            if count == 0 || count < limit {
+                break;
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     /// List actor-committed event results that stopped between the SQLite
     /// settlement and the application-owned quest/finale follow-up. These
     /// rows are deliberately not returned by [`Self::pending_event_deliveries`]
@@ -581,15 +676,7 @@ impl DigEventRuntimeService {
         action_id: i64,
     ) -> Result<Option<DigEventRuntimeOutcome>, DigEventRuntimeError> {
         let repository = DigEventRuntimeRepository::new(&self.path);
-        let recoveries = repository.pending_event_delivery_recoveries(DigEventDeliveryQuery {
-            guild_id: None,
-            discord_id: None,
-            limit: usize::MAX,
-        })?;
-        let Some(delivery) = recoveries
-            .into_iter()
-            .find(|delivery| delivery.action_id == action_id)
-        else {
+        let Some(delivery) = repository.pending_event_delivery_for_action(action_id)? else {
             return Ok(None);
         };
         self.resume_event_delivery(delivery).map(Some)
@@ -626,8 +713,14 @@ impl DigEventRuntimeService {
         };
         let resolution = outcome
             .resolution
-            .as_ref()
+            .as_mut()
             .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+        // A first delivery may be attached to an older actor settlement.
+        // Its wallet receipt remains authoritative after the balance changes.
+        resolution.jc = identity.jc_delta;
+        if let Some(balance_after) = identity.balance_after {
+            outcome.balance_after = balance_after;
+        }
         let quest_snapshot = repository.quest_snapshot(
             DigEventActorKey {
                 discord_id: identity.actor_id,
@@ -727,8 +820,13 @@ impl DigEventRuntimeService {
         request: DigRuntimeEventRequest<'_>,
         delivery_context: Option<DigEventDeliveryContext>,
     ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
-        if canonical_event(request.event_id).is_none() {
+        let Some(authored) = canonical_event(request.event_id) else {
             return Ok(DigEventRuntimeOutcome::blocked("Unknown event."));
+        };
+        if delivery_context.as_ref().is_some_and(|context| {
+            context.discord_id != request.discord_id || context.guild_id != request.guild_id
+        }) {
+            return Err(DigEventRuntimeRepositoryError::IdempotencyConflict.into());
         }
         if request.event_key.trim().is_empty() {
             return Ok(DigEventRuntimeOutcome::blocked(
@@ -814,6 +912,93 @@ impl DigEventRuntimeService {
             resolution.advance = -loss.min(snapshot.depth.max(0));
         }
 
+        let recipients = match &resolution.splash {
+            Some(splash) => self.splash_recipients(request, splash, &mut entropy)?,
+            None => Vec::new(),
+        };
+        let chain_event_id = resolve_chain(
+            &resolution,
+            snapshot.depth.saturating_add(resolution.advance).max(0),
+            snapshot.prestige_level,
+            request.chained,
+            &mut entropy,
+        )
+        .map(|event| event.id.clone());
+        let has_reward = resolution.economy_gross_jc > 0
+            || resolution
+                .splash
+                .as_ref()
+                .is_some_and(|splash| splash.mode == "grant");
+        let reward_multiplier = if has_reward && self.config.economy_event.enabled {
+            SqliteEconomyEventService::new(&self.path, self.config.economy_event.clone())
+                .effects_at(request.guild_id, request.now)
+                .map_or(1.0, |effects| effects.reward_multiplier)
+        } else {
+            1.0
+        };
+        let mut proposed = EventEffectPlan {
+            resolution,
+            money: EventEconomicTerms {
+                minigame_scale: self.config.minigame_jc_delta_scale,
+                reward_multiplier,
+            },
+            recipients,
+            chain_event_id,
+            now: request.now,
+            chained: request.chained,
+            delivery: delivery_context,
+        };
+        // Even a harmless answer competes with answers that affect other wallets.
+        let (selected, effect_plan) =
+            if authored.splash.is_some() || authored.guild_modifier_on_success.is_some() {
+                let stored = repository.claim_event_effects(
+                    key,
+                    request.event_key,
+                    request.event_id,
+                    request.choice,
+                    json!(proposed),
+                )?;
+                if let Some(stored) = stored {
+                    let mut selected: EventEffectPlan = serde_json::from_value(stored.clone())
+                        .map_err(DigEventRuntimeRepositoryError::Json)?;
+                    selected.delivery = selected.delivery.or(proposed.delivery);
+                    (selected, Some(stored))
+                } else if let Some(delivery) = repository.event_delivery_by_key(
+                    key,
+                    request.event_key,
+                    request.event_id,
+                    request.choice,
+                )? {
+                    return self.resume_event_delivery(delivery);
+                } else {
+                    // A pre-outbox actor already settled. Only replay targets
+                    // with receipts, including the original empty set.
+                    proposed.recipients =
+                        repository.committed_splash_victims(key.guild_id, request.event_key)?;
+                    if proposed.resolution.guild_modifier_on_success.is_some()
+                        && !repository.has_event_modifier_receipt(key, request.event_key)?
+                    {
+                        proposed.resolution.guild_modifier_on_success = None;
+                    }
+                    (proposed, None)
+                }
+            } else {
+                (proposed, None)
+            };
+        let EventEffectPlan {
+            mut resolution,
+            money,
+            recipients,
+            chain_event_id,
+            now,
+            chained,
+            delivery: delivery_context,
+        } = selected;
+        let request = DigRuntimeEventRequest {
+            now,
+            chained,
+            ..request
+        };
         // Python sets the guild-wide window before touching splash victims or
         // the actor transaction, and failure is intentionally fail-soft.
         let guild_modifier = resolution
@@ -835,10 +1020,15 @@ impl DigEventRuntimeService {
                     .map(|receipt| modifier.with_receipt(receipt))
             });
 
-        let splash_execution = resolution.splash.as_ref().map_or_else(
-            || Ok(SplashExecution::default()),
-            |splash| self.resolve_splash(request, &resolution, splash, &mut entropy),
-        )?;
+        let splash_execution = match resolution.splash.as_ref() {
+            Some(splash) if splash.mode == "grant" => {
+                self.resolve_grant_splash(request, &resolution, splash, recipients, money)?
+            }
+            Some(splash) => {
+                self.resolve_hostile_splash(request, &resolution, splash, recipients, money)?
+            }
+            None => SplashExecution::default(),
+        };
         if let Some(splash) = resolution.splash.as_ref()
             && splash.mode == "burn"
             && resolution.economy_gross_jc > 0
@@ -850,13 +1040,12 @@ impl DigEventRuntimeService {
                     .outcome
                     .as_ref()
                     .map_or(0, |outcome| outcome.total_moved),
-                self.config.minigame_jc_delta_scale,
+                money.minigame_scale,
             );
             resolution.economy_gross_jc = scaled.jc_after;
             resolution.splash_payout_ratio = Some(scaled.payout_ratio);
         }
-        resolution.jc =
-            self.final_event_jc(request.guild_id, resolution.economy_gross_jc, request.now);
+        resolution.jc = money.final_jc(resolution.economy_gross_jc);
 
         let mut expected = snapshot.clone();
         expected.inventory_count = reward_snapshot.inventory_count;
@@ -880,16 +1069,11 @@ impl DigEventRuntimeService {
         // Chain selection is part of the immutable event result, so consume
         // it before the actor transaction and include it in the same outbox
         // snapshot as the actor settlement.
-        let chain_event = resolve_chain(
-            &resolution,
-            depth_after,
-            expected.prestige_level,
-            request.chained,
-            &mut entropy,
-        )
-        .map(|event| canonical_event_presentation(&event.id))
-        .transpose()
-        .map_err(DigEventRuntimeError::Policy)?;
+        let chain_event = chain_event_id
+            .as_deref()
+            .map(canonical_event_presentation)
+            .transpose()
+            .map_err(DigEventRuntimeError::Policy)?;
         if let Some(chain) = &chain_event {
             resolution.chained_event_id = Some(chain.event_id.clone());
         }
@@ -904,12 +1088,15 @@ impl DigEventRuntimeService {
                 )
             })
             .transpose()?;
-        let detail = event_detail(
+        let mut detail = event_detail(
             &resolution,
             splash_execution.outcome.as_ref(),
             request.chained,
             request.choice,
         );
+        if let Some(plan) = effect_plan.as_ref() {
+            detail["effect_plan"] = plan.clone();
+        }
         let delivery_source_key = format!("dig-event:{}", request.event_key);
         let delivery_outcome_json = delivery_context
             .as_ref()
@@ -964,13 +1151,18 @@ impl DigEventRuntimeService {
             balance_delta: resolution.jc,
             reward: reward.as_ref().map(|reward| reward.as_db(&reward_source)),
             inventory_capacity: EVENT_INVENTORY_CAPACITY,
-            detail_json: &detail,
+            detail_json: &detail.to_string(),
             created_at: request.now,
             delivery: delivery_draft,
         })?;
         let receipt = match settlement {
             DigEventSettlementOutcome::Applied(receipt) => receipt,
             DigEventSettlementOutcome::Conflict => {
+                if effect_plan.is_some() && delivery_context.is_some() {
+                    return Ok(DigEventRuntimeOutcome::blocked(
+                        "Your choice is saved. Use /dig go to finish resolving it.",
+                    ));
+                }
                 return Ok(DigEventRuntimeOutcome::retryable(
                     "Your tunnel changed while this event was resolving. Try the choice again.",
                 ));
@@ -997,6 +1189,7 @@ impl DigEventRuntimeService {
         {
             return self.resume_event_delivery(delivery);
         }
+        resolution.jc = receipt.jc_delta;
         if !receipt.applied_now && resolution.cave_in {
             resolution.advance = receipt.depth_after.saturating_sub(receipt.depth_before);
         }
@@ -1060,42 +1253,21 @@ impl DigEventRuntimeService {
         Ok(outcome)
     }
 
-    fn final_event_jc(&self, guild_id: i64, authored: i64, now: i64) -> i64 {
-        if authored < 0 {
-            return scale_deflationary_minigame_jc_delta(
-                authored as f64,
-                self.config.minigame_jc_delta_scale,
-            );
-        }
-        if authored == 0 {
-            return 0;
-        }
-        let structural =
-            scale_minigame_jc_delta(authored as f64, self.config.minigame_jc_delta_scale);
-        let economy = SqliteEconomyEventService::new(&self.path, self.config.economy_event.clone());
-        let adjusted = economy
-            .adjust_reward_at(guild_id, structural, now)
-            .unwrap_or(structural);
-        scale_positive_dig_jc(adjusted)
-    }
-
-    fn resolve_splash(
+    fn splash_recipients(
         &self,
         request: DigRuntimeEventRequest<'_>,
-        resolution: &CanonicalEventResolution,
         splash: &CanonicalSplash,
         entropy: &mut impl LootEntropy,
-    ) -> Result<SplashExecution, DigEventRuntimeError> {
+    ) -> Result<Vec<i64>, DigEventRuntimeError> {
         if splash.victim_count == 0 || splash.penalty_jc <= 0 {
-            return Ok(SplashExecution::empty(splash, &resolution.event_name));
+            return Ok(Vec::new());
         }
         let Some(strategy) = victim_strategy(&splash.strategy) else {
-            return Ok(SplashExecution::empty(splash, &resolution.event_name));
+            return Ok(Vec::new());
         };
-        // A replay must target the victims the first execution picked. Live
-        // selection would choose different ones -- the first burns change the
-        // balance ranking that `richest_n` orders by -- and those fresh victims
-        // have no exact-once key, so they would be debited a second time.
+        // Pre-claim partial events recorded only affected recipients. Their
+        // missing identities cannot be reconstructed safely from today's roster.
+        // For new events the durable plan supersedes this proposal on replay.
         let frozen = DigEventRuntimeRepository::new(&self.path)
             .committed_splash_victims(Some(request.guild_id), request.event_key)
             .map_err(|error| DigEventRuntimeError::Splash(error.to_string()))?;
@@ -1116,10 +1288,7 @@ impl DigEventRuntimeService {
         } else {
             frozen
         };
-        if splash.mode == "grant" {
-            return self.resolve_grant_splash(request, resolution, splash, victim_ids);
-        }
-        self.resolve_hostile_splash(request, resolution, splash, victim_ids)
+        Ok(victim_ids)
     }
 
     fn resolve_grant_splash(
@@ -1128,16 +1297,10 @@ impl DigEventRuntimeService {
         resolution: &CanonicalEventResolution,
         splash: &CanonicalSplash,
         victim_ids: Vec<i64>,
+        money: EventEconomicTerms,
     ) -> Result<SplashExecution, DigEventRuntimeError> {
-        let gross = scale_minigame_jc_delta(
-            splash.penalty_jc as f64,
-            self.config.minigame_jc_delta_scale,
-        );
-        let economy = SqliteEconomyEventService::new(&self.path, self.config.economy_event.clone());
-        let adjusted = economy
-            .adjust_reward_at(request.guild_id, gross, request.now)
-            .unwrap_or(gross);
-        let amount = scale_positive_dig_jc(adjusted);
+        let gross = scale_minigame_jc_delta(splash.penalty_jc as f64, money.minigame_scale);
+        let amount = money.final_jc(splash.penalty_jc);
         if amount <= 0 {
             return Ok(SplashExecution::empty(splash, &resolution.event_name));
         }
@@ -1158,7 +1321,7 @@ impl DigEventRuntimeService {
                 detail_json: &detail,
                 created_at: request.now,
             }) {
-                Ok(_) => victims.push((victim_id, amount)),
+                Ok(receipt) => victims.push((victim_id, receipt.amount)),
                 Err(DigEventRuntimeRepositoryError::MissingSplashVictim) => {}
                 Err(error) => return Err(error.into()),
             }
@@ -1178,20 +1341,18 @@ impl DigEventRuntimeService {
         resolution: &CanonicalEventResolution,
         splash: &CanonicalSplash,
         victim_ids: Vec<i64>,
+        money: EventEconomicTerms,
     ) -> Result<SplashExecution, DigEventRuntimeError> {
         // Steal transfers the authored amount to the digger; only burn mode
         // applies the deflationary event penalty multiplier.  Python keeps
         // these two hostile modes distinct (`steal` deliberately bypasses
         // `strengthen_dig_event_penalty`).
         let amount = if splash.mode == "steal" {
-            scale_minigame_jc_delta(
-                splash.penalty_jc as f64,
-                self.config.minigame_jc_delta_scale,
-            )
+            scale_minigame_jc_delta(splash.penalty_jc as f64, money.minigame_scale)
         } else {
             scale_deflationary_minigame_jc_delta(
                 strengthen_dig_event_penalty(splash.penalty_jc) as f64,
-                self.config.minigame_jc_delta_scale,
+                money.minigame_scale,
             )
         };
         if amount <= 0 {
@@ -1230,7 +1391,7 @@ impl DigEventRuntimeService {
             })
             .collect::<Vec<_>>();
         let settlements = ShopRuntimeRepository::new(&self.path)
-            .apply_hostile_losses(&losses)
+            .apply_hostile_losses_once(&losses)
             .map_err(|error| DigEventRuntimeError::Splash(error.to_string()))?;
         let audit = DigEventRuntimeRepository::new(&self.path);
         let mut victims = Vec::new();
@@ -2006,7 +2167,7 @@ fn event_detail(
     splash: Option<&DigEventSplashOutcome>,
     chained: bool,
     requested_choice: &str,
-) -> String {
+) -> Value {
     json!({
         "requested_choice": requested_choice,
         "chained": chained,
@@ -2026,7 +2187,6 @@ fn event_detail(
         "black_wax_seal_spent": resolution.black_wax_seal_spent,
         "splash_payout_ratio": resolution.splash_payout_ratio,
     })
-    .to_string()
 }
 
 #[derive(Clone, Copy)]

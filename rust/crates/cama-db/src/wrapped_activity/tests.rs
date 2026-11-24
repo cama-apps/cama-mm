@@ -140,6 +140,26 @@ fn empty_year_is_all_zero_for_every_activity() {
 }
 
 #[test]
+fn dig_year_preserves_counts_when_a_dig_has_malformed_detail() {
+    let f = fixture();
+    f.dig(GUILD, ME, None, "paid_dig", (0, 2), 4, "not json", MARCH);
+    f.dig(
+        GUILD,
+        ME,
+        None,
+        "dig",
+        (2, 1),
+        0,
+        r#"{"cave_in":true,"event":"abandoned_forge"}"#,
+        MARCH,
+    );
+
+    let year = f.repository.dig_year(GUILD, ME, YEAR).unwrap();
+    assert_eq!((year.digs, year.paid_digs, year.jc_from_digs), (2, 1, 4));
+    assert_eq!((year.cave_ins, year.events), (1, 1));
+}
+
+#[test]
 fn dig_year_counts_only_this_guild_this_year() {
     let f = fixture();
     let cave = r#"{"cave_in":true,"jc":0}"#;
@@ -172,6 +192,26 @@ fn dig_year_counts_only_this_guild_this_year() {
         (9, 9),
         0,
         r#"{"boss_id":"lina","won":true}"#,
+        MARCH,
+    );
+    f.dig(
+        GUILD,
+        ME,
+        None,
+        "pinnacle_fight",
+        (9, 9),
+        0,
+        r#"{"pinnacle_id":"lina","won":false}"#,
+        MARCH,
+    );
+    f.dig(
+        GUILD,
+        ME,
+        None,
+        "boss_fight",
+        (9, 9),
+        0,
+        r#"{"boss_id":"forgotten"}"#,
         MARCH,
     );
     f.dig(
@@ -225,7 +265,12 @@ fn dig_year_counts_only_this_guild_this_year() {
             BossRecord {
                 boss_id: "lina".into(),
                 wins: 1,
-                losses: 0
+                losses: 1
+            },
+            BossRecord {
+                boss_id: "forgotten".into(),
+                wins: 0,
+                losses: 1
             },
         ]
     );

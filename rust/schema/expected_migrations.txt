@@ -263,3 +263,5 @@ add_wrapped_item_facts
 backfill_full_wrapped_item_counts
 add_player_trivia_question_publication
 index_double_or_nothing_player_history
+add_loan_match_watermark
+include_deadlock_in_economy_stock

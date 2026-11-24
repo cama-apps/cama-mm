@@ -64,10 +64,12 @@ impl Fixture {
                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                      PRIMARY KEY (discord_id, guild_id)
                  );
+                 CREATE TABLE matches (match_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL);
                  CREATE TABLE loan_state (
                      discord_id INTEGER NOT NULL,
                      guild_id INTEGER NOT NULL DEFAULT 0,
                      last_loan_at INTEGER,
+                     last_loan_match_id INTEGER NOT NULL DEFAULT 0,
                      total_loans_taken INTEGER DEFAULT 0,
                      total_fees_paid INTEGER DEFAULT 0,
                      negative_loans_taken INTEGER DEFAULT 0,

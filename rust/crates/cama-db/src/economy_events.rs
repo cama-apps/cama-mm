@@ -463,13 +463,20 @@ impl EconomyEventRepository {
                    ON pm.pending_match_id=b.pending_match_id
                   AND pm.guild_id=b.guild_id
                  WHERE b.guild_id=:gid
+             ), deadlock_escrow AS (
+                 SELECT COALESCE(SUM(m.seed + COALESCE((
+                     SELECT SUM(w.effective_stake) FROM deadlock_wagers w
+                     WHERE w.guild_id=m.guild_id AND w.market_id=m.market_id
+                 ),0)),0) AS escrow
+                 FROM deadlock_betting_markets m
+                 WHERE m.guild_id=:gid AND m.status IN ('open','closed')
              )
              SELECT p.player_count, p.player_wallets, p.positive_wallets,
                     p.visible_debt, COALESCE(r.reserve_available,0),
                     l.reserve_locked+COALESCE(r.reserve_first_game_pools,0)
-                      +fc.active_claims,
+                      +fc.active_claims+COALESCE(df.balance,0),
                     COALESCE(r.reserve_next_match_pot,0), pr.prediction_open_cash,
-                    d.duel_escrow+m.mafia_escrow+b.bet_escrow
+                    d.duel_escrow+m.mafia_escrow+b.bet_escrow+de.escrow
              FROM player_totals p
              CROSS JOIN locked_totals l
              CROSS JOIN first_game_claim_totals fc
@@ -477,6 +484,8 @@ impl EconomyEventRepository {
              CROSS JOIN duel_totals d
              CROSS JOIN mafia_totals m
              CROSS JOIN bet_totals b
+             CROSS JOIN deadlock_escrow de
+             LEFT JOIN deadlock_betting_funds df ON df.guild_id=:gid
              LEFT JOIN reserve_totals r ON 1=1",
             rusqlite::named_params! {":gid": guild_id},
             |row| {
@@ -547,6 +556,7 @@ impl EconomyEventRepository {
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
              ON CONFLICT(guild_id,snapshot_date) DO UPDATE SET
                  captured_at=excluded.captured_at,
+                 includes_deadlock_stock=excluded.includes_deadlock_stock,
                  player_wallets=excluded.player_wallets,
                  positive_wallets=excluded.positive_wallets,
                  visible_debt=excluded.visible_debt,
@@ -602,7 +612,7 @@ impl EconomyEventRepository {
                         prediction_open_cash, wager_escrow, monetary_stock,
                         annualized_30d, annualized_90d
                  FROM economy_daily_snapshots
-                 WHERE guild_id=?1 ORDER BY snapshot_date DESC LIMIT 1",
+                 WHERE guild_id=?1 AND includes_deadlock_stock=1 ORDER BY snapshot_date DESC LIMIT 1",
                 [Self::normalize_guild_id(guild_id)],
                 row_to_snapshot,
             )
@@ -637,7 +647,7 @@ impl EconomyEventRepository {
                 .query_row(
                     "SELECT snapshot_date, captured_at, monetary_stock
                      FROM economy_daily_snapshots
-                     WHERE guild_id=?1 AND captured_at BETWEEN ?2 AND ?3
+                     WHERE guild_id=?1 AND includes_deadlock_stock=1 AND captured_at BETWEEN ?2 AND ?3
                      ORDER BY ABS(captured_at-?4), captured_at DESC LIMIT 1",
                     params![
                         guild_id,
@@ -1072,7 +1082,7 @@ impl EconomyEventRepository {
                  SELECT event_id FROM economy_daily_events
                  WHERE guild_id=?2 AND event_date<?3
                  ORDER BY event_date DESC LIMIT 1
-             ) AND actual_stock_change_jc IS NULL",
+             ) AND includes_deadlock_stock=1 AND actual_stock_change_jc IS NULL",
             params![
                 current_stock,
                 Self::normalize_guild_id(guild_id),
@@ -1093,7 +1103,7 @@ fn annualized_change(
         .query_row(
             "SELECT monetary_stock, julianday(?1)-julianday(snapshot_date)
              FROM economy_daily_snapshots
-             WHERE guild_id=?2 AND snapshot_date<=date(?1,?3)
+             WHERE guild_id=?2 AND includes_deadlock_stock=1 AND snapshot_date<=date(?1,?3)
              ORDER BY snapshot_date DESC LIMIT 1",
             params![snapshot_date, guild_id, format!("-{days} days")],
             |row| {
@@ -1571,6 +1581,171 @@ mod tests {
         assert_eq!(balance.prediction_open_cash, 30);
         assert_eq!(balance.wager_escrow, 130);
         assert_eq!(balance.monetary_stock, 2_810);
+    }
+
+    #[test]
+    fn deadlock_funding_betting_and_refunds_preserve_monetary_stock() {
+        let file = fixture();
+        seed_economy(file.path());
+        let connection = Connection::open(file.path()).unwrap();
+        let repository = EconomyEventRepository::new(file.path());
+        let sheet = || repository.capture_balance_sheet(Some(GUILD)).unwrap();
+        let starting = sheet();
+        connection
+            .execute_batch(&format!(
+                "UPDATE players SET jopacoin_balance=jopacoin_balance-100
+               WHERE guild_id={GUILD} AND discord_id=1;
+             INSERT INTO deadlock_betting_funds VALUES ({GUILD},100), (2,500);
+             INSERT INTO deadlock_betting_markets VALUES
+                (2,'foreign','open',70), ({GUILD},'old','settled',90);
+             INSERT INTO deadlock_wagers VALUES (2,'foreign',30), ({GUILD},'old',10);"
+            ))
+            .unwrap();
+        let funded = sheet();
+        assert_eq!(funded.reserve_locked, starting.reserve_locked + 100);
+        assert_eq!(funded.monetary_stock, starting.monetary_stock);
+
+        connection
+            .execute_batch(&format!(
+                "UPDATE deadlock_betting_funds SET balance=40 WHERE guild_id={GUILD};
+             INSERT INTO deadlock_betting_markets VALUES ({GUILD},'current','open',60);
+             UPDATE players SET jopacoin_balance=jopacoin_balance-30 WHERE guild_id={GUILD};
+             INSERT INTO deadlock_wagers VALUES ({GUILD},'current',30), ({GUILD},'current',30);"
+            ))
+            .unwrap();
+        let open = sheet();
+        assert_eq!(open.reserve_locked, starting.reserve_locked + 40);
+        assert_eq!(open.wager_escrow, starting.wager_escrow + 120);
+        assert_eq!(open.monetary_stock, starting.monetary_stock);
+        connection
+            .execute(
+                "UPDATE deadlock_betting_markets SET status='closed' WHERE market_id='current'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(sheet(), open);
+
+        connection
+            .execute_batch(&format!(
+                "UPDATE deadlock_betting_markets SET status='refunded' WHERE market_id='current';
+             UPDATE deadlock_betting_funds SET balance=100 WHERE guild_id={GUILD};
+             UPDATE players SET jopacoin_balance=jopacoin_balance+30 WHERE guild_id={GUILD};"
+            ))
+            .unwrap();
+        assert_eq!(sheet(), funded);
+    }
+
+    #[test]
+    fn deadlock_stock_upgrade_keeps_history_and_uses_comparable_baselines() {
+        let file = NamedTempFile::new().unwrap();
+        let migrate = || crate::schema_manager::initialize_or_migrate(file.path()).unwrap();
+        migrate();
+        let connection = Connection::open(file.path()).unwrap();
+        let repository = EconomyEventRepository::new(file.path());
+        let day = SECONDS_PER_DAY;
+        let old_event = EventDraft {
+            effects: EventEffects::default(),
+            ..draft("2026-04-01")
+        };
+        for guild in [GUILD, 2, 3, 4] {
+            for (date, at) in [("2026-01-01", 0), ("2026-04-01", 90 * day)] {
+                repository
+                    .save_snapshot(Some(guild), date, &sheet(9_000), at)
+                    .unwrap();
+            }
+            repository
+                .activate_event_atomic(Some(guild), &old_event)
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO deadlock_betting_funds(guild_id,balance) VALUES (?1,1000),(2,0)",
+                [GUILD],
+            )
+            .unwrap();
+        connection.execute_batch(
+            "INSERT INTO deadlock_betting_markets(market_id,guild_id,match_id,format,roster_json,
+                 terms_json,deadline,status,seed,created_at) VALUES
+                 ('empty',2,2,'street_brawl','{}','{}',0,'closed',0,0),
+                 ('seeded',3,3,'street_brawl','{}','{}',0,'settled',5,0),
+                 ('wagered',4,4,'street_brawl','{}','{}',0,'open',0,0);
+             INSERT INTO deadlock_wagers(market_id,guild_id,discord_id,side,amount,leverage,
+                 effective_stake,request_key,kind,created_at)
+                 VALUES('wagered',4,1,1,5,1,5,'test','manual',0);
+             ALTER TABLE economy_daily_snapshots DROP COLUMN includes_deadlock_stock;
+             ALTER TABLE economy_daily_events DROP COLUMN includes_deadlock_stock;"
+        ).unwrap();
+        connection
+            .execute(
+                "DELETE FROM schema_migrations WHERE name='include_deadlock_in_economy_stock'",
+                [],
+            )
+            .unwrap();
+        migrate();
+        assert!(
+            repository
+                .get_latest_snapshot(Some(GUILD))
+                .unwrap()
+                .is_none()
+        );
+        assert!(repository.get_latest_snapshot(Some(3)).unwrap().is_none());
+        assert!(repository.get_latest_snapshot(Some(4)).unwrap().is_none());
+        assert!(repository.get_latest_snapshot(Some(2)).unwrap().is_some());
+        let trends = |guild| {
+            repository
+                .get_monetary_trends(Some(guild), 10_000, 97 * day)
+                .unwrap()
+        };
+        assert!(trends(GUILD)[&7].is_none());
+        assert!(trends(2)[&7].is_some());
+        assert!(
+            !repository
+                .reconcile_prior_event(Some(GUILD), "2026-04-02", 10_000)
+                .unwrap()
+        );
+        assert!(
+            repository
+                .reconcile_prior_event(Some(2), "2026-04-02", 10_000)
+                .unwrap()
+        );
+        let old_stock: i64 = connection.query_row(
+            "SELECT monetary_stock FROM economy_daily_snapshots WHERE guild_id=?1 AND snapshot_date='2026-01-01'",
+            [GUILD], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(old_stock, 9_000);
+        assert!(
+            repository
+                .get_event_for_date(Some(GUILD), "2026-04-01")
+                .unwrap()
+                .unwrap()
+                .actual_stock_change_jc
+                .is_none()
+        );
+
+        // A same-day recapture is a usable anchor even at the same timestamp.
+        let new = repository
+            .save_snapshot(Some(GUILD), "2026-04-01", &sheet(10_000), 90 * day)
+            .unwrap();
+        assert_eq!((new.annualized_30d, new.annualized_90d), (None, None));
+        assert_eq!(
+            repository.get_latest_snapshot(Some(GUILD)).unwrap(),
+            Some(new)
+        );
+        assert_eq!(trends(GUILD)[&7].as_ref().unwrap().change_jc, 0);
+        let new_event = EventDraft {
+            effects: EventEffects::default(),
+            ..draft("2026-04-02")
+        };
+        repository
+            .activate_event_atomic(Some(GUILD), &new_event)
+            .unwrap();
+        assert!(
+            repository
+                .reconcile_prior_event(Some(GUILD), "2026-04-03", 2_500)
+                .unwrap()
+        );
+        assert!(migrate().newly_applied.is_empty());
+        assert_eq!(trends(GUILD)[&7].as_ref().unwrap().change_jc, 0);
     }
 
     #[test]
@@ -2211,6 +2386,9 @@ mod tests {
         CREATE TABLE bets (
             guild_id INTEGER,pending_match_id INTEGER,amount INTEGER,leverage INTEGER
         );
+        CREATE TABLE deadlock_betting_funds (guild_id INTEGER PRIMARY KEY,balance INTEGER);
+        CREATE TABLE deadlock_betting_markets (guild_id INTEGER,market_id TEXT PRIMARY KEY,status TEXT,seed INTEGER);
+        CREATE TABLE deadlock_wagers (guild_id INTEGER,market_id TEXT,effective_stake INTEGER);
         CREATE TABLE economy_policy_state (
             guild_id INTEGER PRIMARY KEY,
             mode TEXT NOT NULL DEFAULT 'normal'
@@ -2238,6 +2416,7 @@ mod tests {
             monetary_stock INTEGER NOT NULL,
             annualized_30d REAL,
             annualized_90d REAL,
+            includes_deadlock_stock INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(guild_id,snapshot_date)
         );
         CREATE TABLE economy_daily_events (
@@ -2261,6 +2440,7 @@ mod tests {
             created_at INTEGER NOT NULL,
             announced_at INTEGER,
             reminder_announced_at INTEGER,
+            includes_deadlock_stock INTEGER NOT NULL DEFAULT 1,
             UNIQUE(guild_id,event_date)
         );
         CREATE TABLE economy_ledger_entries (

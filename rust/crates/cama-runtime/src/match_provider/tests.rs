@@ -43,6 +43,18 @@ const MATCH_ID: i64 = 91_001;
 const WINNER: i64 = 71_001;
 const SKIMMER: i64 = 71_002;
 
+impl MatchHandler {
+    fn record_match_blocking(
+        &self,
+        pending: &PendingMatchRecord,
+        winning_result: &str,
+        dotabuff_match_id: Option<&str>,
+    ) -> Result<RecordedMatch, String> {
+        self.record_match_blocking_with_valve(pending, winning_result, dotabuff_match_id, None)
+            .map(|(recorded, _)| recorded)
+    }
+}
+
 struct NoVanityTax;
 
 impl MatchVanityTaxSource for NoVanityTax {
@@ -5039,6 +5051,158 @@ fn test_recovery_retry_counts_the_recorded_win_streak_once() {
 }
 
 #[test]
+fn recording_recovery_preserves_a_loan_taken_after_the_match() {
+    let fixture = MatchRuntimeFixture::new_durable();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let handler = &fixture.provider.handler;
+    handler
+        .record_match_blocking(&pending, "radiant", None)
+        .unwrap();
+    let borrower = pending.state.radiant_team_ids[0];
+    let loans = LoanRepository::new(fixture.database.path());
+    loans
+        .execute_loan_atomic_at(borrower, Some(GUILD), 100, 20, 0, 100, unix_seconds())
+        .unwrap();
+    loans.reset_cooldown(borrower, Some(GUILD)).unwrap();
+
+    handler
+        .record_match_blocking(&pending, "radiant", None)
+        .unwrap();
+    let balance = || loans.get_state(borrower, Some(GUILD)).unwrap().unwrap();
+    assert_eq!(balance().outstanding_principal, 100);
+    let next = handler
+        .pending
+        .create_pending_match(GUILD, &pending.state)
+        .unwrap();
+    handler.record_match_blocking(&next, "dire", None).unwrap();
+    assert_eq!(balance().outstanding_principal, 0);
+    assert_eq!(balance().total_fees_paid, 20);
+}
+
+#[test]
+fn recording_recovery_retries_failed_loan_debits_without_charging_replacement_loans() {
+    let fixture = MatchRuntimeFixture::new_durable();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let first = pending.state.radiant_team_ids[0];
+    let second = pending.state.radiant_team_ids[1];
+    let loans = LoanRepository::new(fixture.database.path());
+    let borrow = |id| {
+        loans
+            .execute_loan_atomic_at(id, Some(GUILD), 50, 10, 0, 100, unix_seconds())
+            .unwrap()
+    };
+    borrow(first);
+    borrow(second);
+    let db = Connection::open(fixture.database.path()).unwrap();
+    db.execute_batch(&format!(
+        "CREATE TRIGGER fail_repayment BEFORE UPDATE OF outstanding_principal ON loan_state
+         WHEN NEW.discord_id={second} AND NEW.outstanding_principal=0
+         BEGIN SELECT RAISE(ABORT,'unavailable loan store'); END;"
+    ))
+    .unwrap();
+
+    let record = || {
+        fixture
+            .provider
+            .handler
+            .record_match_blocking(&pending, "radiant", None)
+    };
+    let error = record().expect_err("storage failure must keep the match retryable");
+    assert!(error.contains("unavailable loan store"), "{error}");
+    let state = |id| loans.get_state(id, Some(GUILD)).unwrap().unwrap();
+    assert_eq!(state(first).outstanding_principal, 0);
+    assert_eq!(state(second).outstanding_principal, 50);
+    borrow(first);
+    db.execute_batch("DROP TRIGGER fail_repayment").unwrap();
+    record().unwrap();
+    assert_eq!(state(first).outstanding_principal, 50);
+    assert_eq!(state(second).outstanding_principal, 0);
+    assert_eq!(state(second).total_fees_paid, 10);
+}
+
+#[tokio::test]
+async fn recording_recovery_and_first_attempt_apply_the_same_streaming_tax() {
+    for recover in [false, true] {
+        let mut config = production_test_config();
+        config.values.streaming_bonus = 20;
+        let fixture = MatchRuntimeFixture::new_with_config_and_discord(
+            config,
+            Arc::new(PublicationDiscord::default()),
+        );
+        let (pending, target, _) = fixture.final_low_priority_pending();
+        let handler = &fixture.provider.handler;
+        let snapshot = handler
+            .persist_recording_effect(&pending, "record_streaming_ids", json!([target]))
+            .await
+            .unwrap();
+        if recover {
+            handler
+                .record_match_blocking(&snapshot, "radiant", None)
+                .unwrap();
+            handler
+                .recover_pending_match(reload_pending(&fixture, &pending))
+                .await
+                .unwrap();
+        } else {
+            fixture.dispatch_record_command(target, "radiant").await;
+        }
+        let tax: i64 = Connection::open(fixture.database.path())
+            .unwrap()
+            .query_row(
+                "SELECT json_extract(metadata,'$.low_priority_tax') FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND source='match_streaming_bonus' AND delta>0",
+                params![GUILD, target],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tax, 2, "recovery={recover}");
+    }
+}
+
+#[tokio::test]
+async fn recording_recovery_dispatches_discovery_once() {
+    struct Discovery(tokio::sync::mpsc::UnboundedSender<i64>);
+    #[async_trait]
+    impl RecordedMatchDiscovery for Discovery {
+        async fn discover_recorded_match(
+            &self,
+            _guild: i64,
+            match_id: i64,
+        ) -> Result<RecordedMatchDiscoveryOutcome, String> {
+            self.0.send(match_id).unwrap();
+            Ok(RecordedMatchDiscoveryOutcome::Disabled)
+        }
+    }
+    let fixture = MatchRuntimeFixture::new_durable();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let mut handler = fixture.provider.handler.as_ref().clone();
+    let (sender, mut calls) = tokio::sync::mpsc::unbounded_channel();
+    handler.recorded_match_discovery = Arc::new(Discovery(sender));
+    let recorded = handler
+        .record_match_blocking(&pending, "radiant", None)
+        .unwrap();
+    let db = Connection::open(fixture.database.path()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_cleanup BEFORE DELETE ON pending_matches
+         BEGIN SELECT RAISE(ABORT,'pending cleanup unavailable'); END;",
+    )
+    .unwrap();
+    let error = handler
+        .recover_pending_match(reload_pending(&fixture, &pending))
+        .await
+        .unwrap_err();
+    assert!(error.contains("pending cleanup unavailable"), "{error}");
+    db.execute_batch("DROP TRIGGER fail_cleanup").unwrap();
+    handler
+        .recover_pending_match(reload_pending(&fixture, &pending))
+        .await
+        .unwrap();
+    drop(handler);
+    assert_eq!(calls.recv().await, Some(recorded.match_id));
+    assert_eq!(calls.recv().await, None);
+}
+
+#[test]
 fn test_final_low_priority_win_is_still_taxed_by_the_match_that_releases_it() {
     // Recording the match drains the low-priority win counters, so reading
     // taxability afterwards would see an already-released player and skip the
@@ -9402,7 +9566,7 @@ async fn manual_record_with_aborted_snapshot_cannot_commit_ratings() {
 async fn manual_retry_with_opposite_winner_is_rejected_without_rewards() {
     let fixture = MatchRuntimeFixture::new();
     let pending = fixture.pending(unix_seconds() + 120);
-    let first = fixture
+    let (first, _) = fixture
         .provider
         .handler
         .record_match_blocking_with_valve(&pending, "radiant", None, Some(9_000_123))

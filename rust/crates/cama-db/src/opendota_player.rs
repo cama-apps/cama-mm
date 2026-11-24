@@ -5,10 +5,10 @@
 //! [`crate::open_runtime_connection`]. Every multi-statement write uses
 //! `BEGIN IMMEDIATE`; DDL exists solely in the child test fixture.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
@@ -489,12 +489,6 @@ impl OpenDotaPlayerRepository {
     }
 }
 
-#[derive(Debug)]
-struct AffectedWrappedMatch {
-    enrichment_data: String,
-    participants: BTreeMap<i64, Option<i64>>,
-}
-
 /// Rebuild only the compact historical facts whose Steam membership changed.
 ///
 /// The caller owns the surrounding immediate transaction, so deleting stale
@@ -506,7 +500,6 @@ fn refresh_wrapped_enrichment_facts(
     transaction: &rusqlite::Transaction<'_>,
     discord_ids: &[i64],
 ) -> Result<usize, rusqlite::Error> {
-    let discord_ids = deduplicate(discord_ids);
     if discord_ids.is_empty() {
         return Ok(0);
     }
@@ -516,74 +509,54 @@ fn refresh_wrapped_enrichment_facts(
         .copied()
         .map(|discord_id| (discord_id, BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
-    let mut affected_matches = BTreeMap::<(i64, i64), AffectedWrappedMatch>::new();
-
-    for chunk in discord_ids.chunks(900) {
-        let placeholders = repeat_placeholders(chunk.len());
-        transaction.execute(
-            &format!(
-                "DELETE FROM wrapped_enrichment_facts
-                  WHERE discord_id IN ({placeholders})"
-            ),
-            params_from_iter(chunk.iter()),
-        )?;
-
-        let mut statement = transaction.prepare(&format!(
-            "SELECT discord_id,steam_id FROM player_steam_ids
-              WHERE discord_id IN ({placeholders})"
-        ))?;
-        let memberships = statement.query_map(params_from_iter(chunk.iter()), |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        for membership in memberships {
-            let (discord_id, steam_id) = membership?;
-            steam_ids_by_discord
-                .get_mut(&discord_id)
-                .expect("affected Discord ID was initialized")
-                .insert(steam_id);
-        }
-        drop(statement);
-
-        let mut statement = transaction.prepare(&format!(
-            "SELECT m.guild_id,m.match_id,m.enrichment_data,
-                    mp.discord_id,p.steam_id
-               FROM match_participants AS mp
-               JOIN matches AS m
-                 ON m.match_id=mp.match_id AND m.guild_id=mp.guild_id
-               LEFT JOIN players AS p
-                 ON p.discord_id=mp.discord_id AND p.guild_id=mp.guild_id
-              WHERE mp.discord_id IN ({placeholders})
-                AND m.enrichment_data IS NOT NULL
-              ORDER BY m.match_id,mp.discord_id"
-        ))?;
-        let rows = statement.query_map(params_from_iter(chunk.iter()), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-            ))
-        })?;
-        for row in rows {
-            let (guild_id, match_id, enrichment_data, discord_id, legacy_steam_id) = row?;
-            affected_matches
-                .entry((guild_id, match_id))
-                .or_insert_with(|| AffectedWrappedMatch {
-                    enrichment_data,
-                    participants: BTreeMap::new(),
-                })
-                .participants
-                .insert(discord_id, legacy_steam_id);
-        }
+    let ids_json = serde_json::to_string(discord_ids)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    transaction.execute(
+        "DELETE FROM wrapped_enrichment_facts
+          WHERE discord_id IN (SELECT value FROM json_each(?1))",
+        [&ids_json],
+    )?;
+    let mut memberships = transaction.prepare(
+        "SELECT discord_id,steam_id FROM player_steam_ids
+          WHERE discord_id IN (SELECT value FROM json_each(?1))",
+    )?;
+    let mut rows = memberships.query([&ids_json])?;
+    while let Some(row) = rows.next()? {
+        steam_ids_by_discord
+            .get_mut(&row.get::<_, i64>(0)?)
+            .expect("affected Discord ID was initialized")
+            .insert(row.get::<_, i64>(1)?);
     }
 
+    // Sort only participant keys. A shared match's full payload is read and
+    // parsed once, then released as soon as the cursor moves to the next match.
+    let mut participants = transaction.prepare(
+        "SELECT mp.match_id,mp.guild_id,mp.discord_id,p.steam_id
+           FROM match_participants AS mp
+           JOIN matches AS m ON m.match_id=mp.match_id AND m.guild_id=mp.guild_id
+           LEFT JOIN players AS p ON p.discord_id=mp.discord_id AND p.guild_id=mp.guild_id
+          WHERE mp.discord_id IN (SELECT value FROM json_each(?1))
+            AND m.enrichment_data IS NOT NULL
+          ORDER BY mp.match_id",
+    )?;
+    let mut payloads =
+        transaction.prepare("SELECT enrichment_data FROM matches WHERE match_id=?1")?;
+    let mut rows = participants.query([&ids_json])?;
+    let mut last_match = None;
+    let mut payload = JsonValue::Null;
     let mut parsed_matches = 0;
-    for ((guild_id, match_id), affected) in affected_matches {
-        parsed_matches += 1;
-        let Ok(JsonValue::Object(match_data)) =
-            serde_json::from_str::<JsonValue>(&affected.enrichment_data)
-        else {
+    while let Some(row) = rows.next()? {
+        let match_id: i64 = row.get(0)?;
+        let guild_id: i64 = row.get(1)?;
+        let discord_id: i64 = row.get(2)?;
+        let legacy_steam_id: Option<i64> = row.get(3)?;
+        if last_match != Some(match_id) {
+            let raw: String = payloads.query_row([match_id], |row| row.get(0))?;
+            payload = serde_json::from_str(&raw).unwrap_or(JsonValue::Null);
+            last_match = Some(match_id);
+            parsed_matches += 1;
+        }
+        let Some(match_data) = payload.as_object() else {
             continue;
         };
         let players = match_data
@@ -591,56 +564,53 @@ fn refresh_wrapped_enrichment_facts(
             .and_then(JsonValue::as_array)
             .map(Vec::as_slice)
             .unwrap_or_default();
-
-        for (discord_id, legacy_steam_id) in affected.participants {
-            let linked = steam_ids_by_discord
-                .get(&discord_id)
-                .expect("affected Discord ID was initialized");
-            let player = players.iter().find(|candidate| {
-                candidate
-                    .as_object()
-                    .and_then(|fields| fields.get("account_id"))
-                    .and_then(coerce_integral_i64)
-                    .is_some_and(|account_id| {
-                        linked.contains(&account_id)
-                            || (linked.is_empty() && legacy_steam_id == Some(account_id))
-                    })
-            });
-            let player = player.and_then(JsonValue::as_object);
-            let purchases = crate::json_numeric::wrapped_purchase_facts(player)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            transaction.execute(
-                "INSERT INTO wrapped_enrichment_facts (
-                     guild_id,match_id,discord_id,actions_per_min,
-                     courier_kills,pings,rapier_count,lane_role,comeback,throw,
-                     buybacks,item_counts
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                params![
-                    guild_id,
-                    match_id,
-                    discord_id,
-                    player
-                        .and_then(|fields| fields.get("actions_per_min"))
-                        .and_then(JsonValue::as_i64),
-                    player
-                        .and_then(|fields| fields.get("courier_kills"))
-                        .and_then(JsonValue::as_i64),
-                    player
-                        .and_then(|fields| fields.get("pings"))
-                        .and_then(JsonValue::as_i64),
-                    purchases.rapier_count,
-                    player
-                        .and_then(|fields| fields.get("lane_role"))
-                        .and_then(JsonValue::as_i64),
-                    number_f64(match_data.get("comeback")),
-                    number_f64(match_data.get("throw")),
-                    player
-                        .and_then(|fields| fields.get("buyback_count"))
-                        .and_then(coerce_integral_i64),
-                    purchases.item_counts,
-                ],
-            )?;
-        }
+        let linked = steam_ids_by_discord
+            .get(&discord_id)
+            .expect("affected Discord ID was initialized");
+        let player = players.iter().find(|candidate| {
+            candidate
+                .as_object()
+                .and_then(|fields| fields.get("account_id"))
+                .and_then(coerce_integral_i64)
+                .is_some_and(|account_id| {
+                    linked.contains(&account_id)
+                        || (linked.is_empty() && legacy_steam_id == Some(account_id))
+                })
+        });
+        let player = player.and_then(JsonValue::as_object);
+        let purchases = crate::json_numeric::wrapped_purchase_facts(player)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        transaction.execute(
+            "INSERT INTO wrapped_enrichment_facts (
+                 guild_id,match_id,discord_id,actions_per_min,
+                 courier_kills,pings,rapier_count,lane_role,comeback,throw,
+                 buybacks,item_counts
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                guild_id,
+                match_id,
+                discord_id,
+                player
+                    .and_then(|fields| fields.get("actions_per_min"))
+                    .and_then(JsonValue::as_i64),
+                player
+                    .and_then(|fields| fields.get("courier_kills"))
+                    .and_then(JsonValue::as_i64),
+                player
+                    .and_then(|fields| fields.get("pings"))
+                    .and_then(JsonValue::as_i64),
+                purchases.rapier_count,
+                player
+                    .and_then(|fields| fields.get("lane_role"))
+                    .and_then(JsonValue::as_i64),
+                number_f64(match_data.get("comeback")),
+                number_f64(match_data.get("throw")),
+                player
+                    .and_then(|fields| fields.get("buyback_count"))
+                    .and_then(coerce_integral_i64),
+                purchases.item_counts,
+            ],
+        )?;
     }
     Ok(parsed_matches)
 }
@@ -750,21 +720,6 @@ fn has_effective_steam_id(
         )
         .optional()
         .map(|row| row.is_some())
-}
-
-fn deduplicate(values: &[i64]) -> Vec<i64> {
-    let mut seen = HashSet::new();
-    values
-        .iter()
-        .copied()
-        .filter(|value| seen.insert(*value))
-        .collect()
-}
-
-fn repeat_placeholders(count: usize) -> String {
-    std::iter::repeat_n("?", count)
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn player_from_row(row: &rusqlite::Row<'_>) -> Result<SteamLinkedPlayer, rusqlite::Error> {

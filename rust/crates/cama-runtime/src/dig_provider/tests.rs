@@ -4103,7 +4103,7 @@ async fn recovery_continues_past_a_retained_row() {
 }
 
 #[tokio::test]
-async fn recovery_retires_an_event_row_older_than_the_window() {
+async fn recovery_retires_multiple_pages_of_event_rows_older_than_the_window() {
     let (database, provider, discord) = fixture();
     let connection = Connection::open(database.path()).expect("open event outbox database");
     connection
@@ -4152,6 +4152,19 @@ async fn recovery_retires_an_event_row_older_than_the_window() {
             ),
         )
         .expect("settle event and attach outbox");
+    let cloned = Connection::open(database.path()).unwrap().execute(
+        "WITH RECURSIVE copies(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM copies WHERE n<?1)
+         INSERT INTO dig_actions(guild_id,actor_id,action_type,depth_before,depth_after,jc_delta,detail,created_at)
+         SELECT guild_id,actor_id,action_type,depth_before,depth_after,jc_delta,
+                json_set(detail, '$.event_key','older:' || n,'$.event_delivery.source_key','dig-event:older:' || n),
+                created_at FROM dig_actions CROSS JOIN copies WHERE action_type='event'",
+        [super::PENDING_RECOVERY_PAGE as i64],
+    ).unwrap();
+    assert_eq!(cloned, super::PENDING_RECOVERY_PAGE);
+    Connection::open(database.path()).unwrap().execute(
+        "UPDATE dig_actions SET detail=json_set(detail,'$.event_delivery.state','pending') WHERE action_type='event'",
+        [],
+    ).unwrap();
     backdate_outbox(&database, super::PENDING_RECOVERY_WINDOW_SECONDS + 3_600);
 
     let report = provider.recover_pending_deliveries(&[GUILD]).await;
@@ -4161,18 +4174,18 @@ async fn recovery_retires_an_event_row_older_than_the_window() {
         discord.public.lock().expect("public responses").is_empty(),
         "a stale event result is not posted"
     );
-    assert!(
-        provider
-            .handler
-            .pending_event_deliveries(DigEventPendingDeliveryQuery {
-                guild_id: Some(GUILD as i64),
-                discord_id: None,
-                limit: 10,
-            })
-            .await
-            .expect("event outbox")
-            .is_empty(),
-        "the stale event row left the queue"
+    let remaining: i64 = Connection::open(database.path())
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM dig_actions WHERE action_type='event'
+         AND json_extract(detail,'$.event_delivery.delivered_at') IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "all pending projections were recovered and retired"
     );
 }
 

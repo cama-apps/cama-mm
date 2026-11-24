@@ -327,6 +327,14 @@ pub struct EconomyEventEffects {
     pub reserve_voting_disabled: bool,
 }
 
+#[must_use]
+pub fn apply_reward_multiplier(amount: i64, multiplier: f64) -> i64 {
+    if amount <= 0 {
+        return amount;
+    }
+    (((amount as f64 * multiplier) + 0.5) as i64).max(0)
+}
+
 impl Default for EconomyEventEffects {
     fn default() -> Self {
         Self {
@@ -1544,7 +1552,7 @@ where
             return Ok(amount);
         }
         let multiplier = self.get_effects(guild_id)?.reward_multiplier;
-        Ok((((amount as f64 * multiplier) + 0.5) as i64).max(0))
+        Ok(apply_reward_multiplier(amount, multiplier))
     }
 
     #[must_use]

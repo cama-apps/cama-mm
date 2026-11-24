@@ -1342,6 +1342,21 @@ fn run_consolidated_backfills(
     {
         backfill_economy_ledger(transaction)?;
     }
+    if pending(pending_migrations, "add_loan_match_watermark") {
+        // Legacy loan and match times have second precision. On a tie or
+        // unknown issuance time, leave the debt for a later recorded match.
+        // Resetting a loan cooldown erased last_loan_at but retained its ledger credit.
+        transaction.execute_batch(
+            "UPDATE loan_state AS loan SET last_loan_match_id=(
+                SELECT COALESCE(MAX(m.match_id),0) FROM matches m
+                WHERE m.guild_id=loan.guild_id AND COALESCE(
+                    unixepoch(m.match_date,'auto') <= COALESCE(NULLIF(loan.last_loan_at,0),
+                        (SELECT MAX(created_at) FROM economy_ledger_entries
+                         WHERE guild_id=loan.guild_id AND account_type='player'
+                           AND account_id=loan.discord_id AND source='loan')), 1)
+             ) WHERE outstanding_principal>0;",
+        )?;
+    }
     if pending(pending_migrations, "schedule_unresolved_duel_reminders") {
         transaction.execute_batch(
             "UPDATE duel_challenges
@@ -1371,6 +1386,20 @@ fn run_consolidated_backfills(
             "UPDATE economy_daily_events SET announced_at=created_at
              WHERE announced_at IS NULL;",
         )?;
+    }
+    if pending(pending_migrations, "include_deadlock_in_economy_stock") {
+        // Prior measurements omitted Deadlock funds and escrow. Keep those rows
+        // for history, but do not use them as baselines for the new measure.
+        for table in ["economy_daily_snapshots", "economy_daily_events"] {
+            transaction.execute_batch(&format!(
+                "UPDATE {table} SET includes_deadlock_stock=0
+                 WHERE guild_id IN (
+                     SELECT guild_id FROM deadlock_betting_funds WHERE balance>0
+                     UNION SELECT guild_id FROM deadlock_betting_markets WHERE seed>0
+                     UNION SELECT guild_id FROM deadlock_wagers
+                 )"
+            ))?;
+        }
     }
     if pending(pending_migrations, "add_consumed_today_to_player_mana") {
         transaction.execute_batch(
@@ -2040,22 +2069,14 @@ fn json_number_i64(value: Option<&JsonValue>) -> Option<i64> {
 
 fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     transaction.execute("DELETE FROM wrapped_enrichment_facts", [])?;
-    let matches = {
-        let mut statement = transaction.prepare(
-            "SELECT match_id,guild_id,enrichment_data
-             FROM matches WHERE enrichment_data IS NOT NULL ORDER BY match_id",
-        )?;
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for (match_id, guild_id, raw) in matches {
+    let mut statement = transaction.prepare(
+        "SELECT match_id,guild_id,enrichment_data FROM matches WHERE enrichment_data IS NOT NULL",
+    )?;
+    let mut matches = statement.query([])?;
+    while let Some(row) = matches.next()? {
+        let match_id = row.get(0)?;
+        let guild_id = row.get(1)?;
+        let raw: String = row.get(2)?;
         let Ok(JsonValue::Object(payload)) = serde_json::from_str::<JsonValue>(&raw) else {
             continue;
         };

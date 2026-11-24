@@ -765,11 +765,11 @@ impl PlayerTriviaRuntimeState {
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<bool, String> {
         let valid = match channel_id {
-            Some(channel_id) => self
-                .discord
-                .player_trivia_channel_is_gamba(guild_id, channel_id)
-                .await
-                .unwrap_or(false),
+            Some(channel_id) => {
+                self.discord
+                    .player_trivia_channel_is_gamba(guild_id, channel_id)
+                    .await?
+            }
             None => false,
         };
         if valid {

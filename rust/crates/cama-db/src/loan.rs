@@ -726,7 +726,7 @@ impl LoanRepository {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let state = loan_state_in_transaction(&transaction, discord_id, guild_id)?;
+        let state = loan_state_in_transaction(&transaction, discord_id, guild_id, None)?;
         if let Some(state) = state {
             if state.outstanding_principal > 0 {
                 let total_owed = state
@@ -801,10 +801,13 @@ impl LoanRepository {
             "INSERT INTO loan_state (
                  discord_id, guild_id, last_loan_at, total_loans_taken,
                  total_fees_paid, negative_loans_taken,
-                 outstanding_principal, outstanding_fee, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)
+                 outstanding_principal, outstanding_fee, last_loan_match_id, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                       (SELECT COALESCE(MAX(match_id),0) FROM matches WHERE guild_id=?2),
+                       CURRENT_TIMESTAMP)
              ON CONFLICT(discord_id, guild_id) DO UPDATE SET
                  last_loan_at = excluded.last_loan_at,
+                 last_loan_match_id = excluded.last_loan_match_id,
                  total_loans_taken = excluded.total_loans_taken,
                  negative_loans_taken = excluded.negative_loans_taken,
                  outstanding_principal = excluded.outstanding_principal,
@@ -838,10 +841,21 @@ impl LoanRepository {
         discord_id: i64,
         guild_id: Option<i64>,
     ) -> Result<LoanRepayment, LoanRepositoryError> {
+        self.execute_repayment_for_match_atomic(discord_id, guild_id, None)
+    }
+
+    /// A recorded match may repay only loans issued before its core committed.
+    /// Check eligibility under the same writer lock as the balance debit.
+    pub fn execute_repayment_for_match_atomic(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        match_id: Option<i64>,
+    ) -> Result<LoanRepayment, LoanRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let state = loan_state_in_transaction(&transaction, discord_id, guild_id)?
+        let state = loan_state_in_transaction(&transaction, discord_id, guild_id, match_id)?
             .ok_or(LoanRepositoryError::NoOutstandingLoan)?;
         let total_owed = state
             .outstanding_principal
@@ -927,6 +941,7 @@ fn loan_state_in_transaction(
     transaction: &Transaction<'_>,
     discord_id: i64,
     guild_id: i64,
+    match_id: Option<i64>,
 ) -> Result<Option<LoanStateRecord>, rusqlite::Error> {
     transaction
         .query_row(
@@ -936,8 +951,9 @@ fn loan_state_in_transaction(
                     COALESCE(negative_loans_taken, 0),
                     COALESCE(outstanding_principal, 0),
                     COALESCE(outstanding_fee, 0)
-             FROM loan_state WHERE discord_id = ?1 AND guild_id = ?2",
-            params![discord_id, guild_id],
+             FROM loan_state WHERE discord_id = ?1 AND guild_id = ?2
+               AND (?3 IS NULL OR last_loan_match_id < ?3)",
+            params![discord_id, guild_id, match_id],
             |row| {
                 Ok(LoanStateRecord {
                     discord_id: row.get(0)?,

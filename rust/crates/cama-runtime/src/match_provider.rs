@@ -2197,7 +2197,7 @@ impl MatchHandler {
         let task_guard = guard.clone();
         let recorded = tokio::task::spawn_blocking(move || {
             let _guard = task_guard;
-            let recorded = worker.record_match_blocking_with_valve(
+            let (recorded, pending) = worker.record_match_blocking_with_valve(
                 &pending_for_task,
                 &winning_for_task,
                 None,
@@ -2210,13 +2210,13 @@ impl MatchHandler {
                 recorded.match_id,
                 &statistics_for_task,
             )?;
-            Ok::<_, String>(recorded)
+            Ok::<_, String>((recorded, pending))
         })
         .await;
 
         // Keep the finalization key through pending cleanup so an abort cannot
         // observe the committed core row and independently refund its bets.
-        let recorded = match recorded {
+        let (recorded, pending) = match recorded {
             Ok(Ok(recorded)) => recorded,
             Ok(Err(error)) => {
                 self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
@@ -2241,8 +2241,8 @@ impl MatchHandler {
 
         self.finish_recorded_match(&pending, &result.winning_team, &recorded)
             .await?;
-        self.complete_recording_pending(&pending).await?;
-        drop(guard);
+        self.complete_recording_pending(&pending, recorded.match_id, guard)
+            .await?;
         debug!(
             match_id = recorded.match_id,
             pending_match_id = pending.pending_match_id,
@@ -2296,7 +2296,7 @@ impl MatchHandler {
             let winner = winner.to_owned();
             let winner_for_effects = winner.clone();
             let task_guard = guard.clone();
-            let recorded = tokio::task::spawn_blocking(move || {
+            let (recorded, pending) = tokio::task::spawn_blocking(move || {
                 let _guard = task_guard;
                 worker.record_match_blocking_with_valve(
                     &pending_for_task,
@@ -2310,16 +2310,8 @@ impl MatchHandler {
             self.finish_recorded_match(&pending, &winner_for_effects, &recorded)
                 .await?;
             self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
-            let repository = self.pending.clone();
-            let cleanup_guard = guard.clone();
-            tokio::task::spawn_blocking(move || {
-                let _guard = cleanup_guard;
-                repository.delete_pending_match(pending.guild_id, pending.pending_match_id)
-            })
-            .await
-            .map_err(|error| format!("record recovery cleanup task failed: {error}"))?
-            .map_err(|error| error.to_string())?;
-            self.spawn_recorded_match_discovery(pending.guild_id, match_id, &pending);
+            self.complete_recording_pending(&pending, match_id, guard)
+                .await?;
             return Ok(());
         }
 
@@ -3130,17 +3122,18 @@ impl MatchHandler {
         let task_guard = guard.clone();
         let recorded = tokio::task::spawn_blocking(move || {
             let _guard = task_guard;
-            worker.record_match_blocking(
+            worker.record_match_blocking_with_valve(
                 &pending_for_task,
                 &winning_for_task,
                 dotabuff_match_id.as_deref(),
+                None,
             )
         })
         .await;
         // Keep the durable pending work and process guard through final result
         // delivery. The committed match row blocks abort and conflicting retries;
         // recovery finishes interrupted money/presentation before cleanup.
-        let recorded = match recorded {
+        let (recorded, pending) = match recorded {
             Ok(Ok(recorded)) => recorded,
             Ok(Err(error)) => {
                 self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
@@ -3162,8 +3155,8 @@ impl MatchHandler {
         let streaming = self
             .finish_recorded_match(&pending, winning_result, &recorded)
             .await?;
-        self.complete_recording_pending(&pending).await?;
-        drop(guard);
+        self.complete_recording_pending(&pending, recorded.match_id, guard)
+            .await?;
 
         let admin_override = self.is_admin(&context) && non_admin_count < 3;
         let winner = if winning_result == "radiant" {
@@ -3675,14 +3668,25 @@ impl MatchHandler {
             .map_err(|error| error.to_string())
     }
 
-    async fn complete_recording_pending(&self, pending: &PendingMatchRecord) -> Result<(), String> {
+    async fn complete_recording_pending(
+        &self,
+        pending: &PendingMatchRecord,
+        match_id: i64,
+        guard: HostedMatchFinalizationGuard,
+    ) -> Result<(), String> {
         let repository = self.pending.clone();
         let guild = pending.guild_id;
         let id = pending.pending_match_id;
-        tokio::task::spawn_blocking(move || repository.delete_pending_match(guild, id))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
+        let deleted = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            repository.delete_pending_match(guild, id)
+        })
+        .await
+        .map_err(|error| format!("record cleanup task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        if deleted {
+            self.spawn_recorded_match_discovery(guild, match_id, pending);
+        }
         Ok(())
     }
 
@@ -3932,7 +3936,6 @@ impl MatchHandler {
             );
         }
         self.spawn_moderation_completion_notifications(pending.guild_id, recorded.match_id);
-        self.spawn_recorded_match_discovery(pending.guild_id, recorded.match_id, &pending);
         self.spawn_queue_hype(&pending, winning_result, recorded)
             .await;
         Ok(streaming)
@@ -4181,22 +4184,15 @@ impl MatchHandler {
         }
     }
 
-    fn record_match_blocking(
-        &self,
-        pending: &PendingMatchRecord,
-        winning_result: &str,
-        dotabuff_match_id: Option<&str>,
-    ) -> Result<RecordedMatch, String> {
-        self.record_match_blocking_with_valve(pending, winning_result, dotabuff_match_id, None)
-    }
-
+    /// Return the committed pending state with the result so streaming awards
+    /// use the policy that was saved by the core transaction.
     fn record_match_blocking_with_valve(
         &self,
         pending: &PendingMatchRecord,
         winning_result: &str,
         dotabuff_match_id: Option<&str>,
         valve_match_id: Option<i64>,
-    ) -> Result<RecordedMatch, String> {
+    ) -> Result<(RecordedMatch, PendingMatchRecord), String> {
         // A command may have waited behind abort or a previous recorder. Always
         // reload authority before calculations; the core transaction checks again.
         let fresh = self
@@ -4288,7 +4284,7 @@ impl MatchHandler {
         winning_result: &str,
         dotabuff_match_id: Option<&str>,
         valve_match_id: Option<i64>,
-    ) -> Result<RecordedMatch, String> {
+    ) -> Result<(RecordedMatch, PendingMatchRecord), String> {
         let winning_team = match winning_result {
             "radiant" => 1,
             "dire" => 2,
@@ -4872,7 +4868,7 @@ impl MatchHandler {
                 max_debt: self.config.max_debt,
             },
         )
-        .repay_outstanding_match_loans(&participant_ids, Some(pending.guild_id))
+        .repay_outstanding_match_loans(&participant_ids, Some(pending.guild_id), match_id)
         .map_err(|error| error.to_string())?;
         let easter_eggs = self.collect_match_easter_eggs(
             &participant_ids,
@@ -4886,7 +4882,8 @@ impl MatchHandler {
             debrief_channel_id,
         )?;
         let streak_records = easter_eggs.win_streak_records.clone();
-        self.pending
+        let (committed, ()) = self
+            .pending
             .mutate_pending_match(pending.guild_id, pending.pending_match_id, |state| {
                 persist_easter_streaks_in_state(state, &streak_records)
             })
@@ -4898,13 +4895,16 @@ impl MatchHandler {
                 )
             })?;
         self.apply_easter_streak_records(pending.guild_id, &streak_records)?;
-        Ok(RecordedMatch {
-            match_id,
-            jc_lines,
-            bet_settlement: (!bet_settlement.participants.is_empty()).then_some(bet_settlement),
-            easter_eggs,
-            debrief,
-        })
+        Ok((
+            RecordedMatch {
+                match_id,
+                jc_lines,
+                bet_settlement: (!bet_settlement.participants.is_empty()).then_some(bet_settlement),
+                easter_eggs,
+                debrief,
+            },
+            committed,
+        ))
     }
 
     /// The configured bankruptcy penalty policy for generated profit.
