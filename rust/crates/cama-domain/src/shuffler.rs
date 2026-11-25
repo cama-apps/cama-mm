@@ -2986,6 +2986,54 @@ mod tests {
     }
 
     #[test]
+    fn test_one_role_climber_is_balanced_at_their_rating() {
+        // Regression: a top-rated mid who climbed there on a 70% win rate was
+        // valued 4% above their rating in every game, so the other team was
+        // always handed more rating to offset wins the rating already held.
+        // Their record in the only role they play must leave the search
+        // exactly where a role-neutral record leaves it.
+        use crate::role_performance::RoleRecord;
+        let climber = || {
+            let mut climber = player("Climber", 3_075, &["2"]);
+            climber.role_records = [("2".to_owned(), RoleRecord::new(57, 24))].into();
+            climber
+        };
+        let shuffler = BalancedShuffler {
+            use_glicko: false,
+            ..BalancedShuffler::default()
+        };
+
+        let assignment = ["2", "1", "3", "4", "5"].map(str::to_owned);
+        let metrics = shuffler.role_assignment_metrics(&[&climber()], &assignment, &[3_075.0]);
+        assert_eq!(metrics.team_value, 3_075.0);
+        assert_eq!(metrics.role_values, [0.0, 3_075.0, 0.0, 0.0, 0.0]);
+
+        let matchup = |mid: Player| {
+            let team1 = vec![
+                player("Carry1", 1_400, &["1"]),
+                mid,
+                player("Off1", 1_500, &["3"]),
+                player("Soft1", 1_300, &["4"]),
+                player("Hard1", 1_200, &["5"]),
+            ];
+            let team2 = vec![
+                player("Carry2", 1_900, &["1"]),
+                player("Mid2", 2_100, &["2"]),
+                player("Off2", 1_700, &["3"]),
+                player("Soft2", 1_400, &["4"]),
+                player("Hard2", 1_375, &["5"]),
+            ];
+            shuffler
+                .score_role_assignments_for_matchup(&team1, &team2, 20, no_rating_constraints())
+                .expect("five players per side")
+        };
+        assert_eq!(
+            matchup(climber()),
+            matchup(player("Climber", 3_075, &["2"]))
+        );
+    }
+
+    #[test]
     fn test_default_off_role_goodness_adds_890_per_player() {
         let team1_players = (0..5)
             .map(|index| {
