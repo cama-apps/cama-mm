@@ -5837,9 +5837,10 @@ async fn lobby_roster_shows_current_low_priority_only_in_the_assigning_guild() {
             .clone()
     };
     let active = roster();
-    assert!(active.contains("Creator 🍅 Low Priority"), "{active}");
+    assert!(active.contains("Creator 🍅"), "{active}");
+    assert!(!active.contains("Low Priority"), "{active}");
     assert!(active.contains("Joiner"), "{active}");
-    assert_eq!(active.matches("🍅 Low Priority").count(), 1);
+    assert_eq!(active.matches('🍅').count(), 1);
 
     assert!(
         low_priority
@@ -5855,7 +5856,7 @@ async fn lobby_roster_shows_current_low_priority_only_in_the_assigning_guild() {
         .unwrap();
     let cleared = roster();
     assert!(cleared.contains("Creator"), "{cleared}");
-    assert!(!cleared.contains("🍅 Low Priority"), "{cleared}");
+    assert!(!cleared.contains('🍅'), "{cleared}");
 }
 
 #[tokio::test]

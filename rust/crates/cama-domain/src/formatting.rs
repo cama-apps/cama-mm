@@ -28,7 +28,7 @@ pub const JOPACOIN_EMOJI_ID: u64 = 954_159_801_049_440_297;
 pub const TOMBSTONE_EMOJI: &str = "🪦";
 
 /// Public roster badge for players serving a low-priority penalty.
-pub const LOW_PRIORITY_BADGE: &str = "🍅 Low Priority";
+pub const LOW_PRIORITY_BADGE: &str = "🍅";
 
 /// Seed amounts supplied by the house to a pool bet.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

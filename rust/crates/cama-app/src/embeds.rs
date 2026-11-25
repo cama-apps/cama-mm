@@ -811,6 +811,7 @@ mod tests {
             .map(|&id| {
                 let mut player = LobbyPlayer::new(id, format!("Player with a long nickname {id}"));
                 player.glicko_rating = Some(1_000.0);
+                player.preferred_roles = (1..=5).collect();
                 player.low_priority = true;
                 player
             })
@@ -825,6 +826,7 @@ mod tests {
             None,
         );
         assert!(cama_domain::embed_safety::validate_embed(&embed).is_empty());
+        assert!(embed.fields[1].value.contains(LOW_PRIORITY_BADGE));
         let roster = embed
             .fields
             .iter()

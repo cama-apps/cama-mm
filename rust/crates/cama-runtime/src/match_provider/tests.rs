@@ -7513,8 +7513,9 @@ async fn shuffle_embed_marks_only_current_guild_low_priority_players_until_relea
     }
     let embed = handler.render_shuffle_embed(&pending).await.unwrap();
     let teams = &embed.fields[0].value;
-    assert_eq!(teams.matches("🍅 Low Priority").count(), 1);
-    assert!(teams.contains("Pepper** 🍅 Low Priority") || teams.contains("Pepper 🍅 Low Priority"));
+    assert_eq!(teams.matches('🍅').count(), 1);
+    assert!(teams.contains("Pepper** 🍅") || teams.contains("Pepper 🍅"));
+    assert!(!teams.contains("Low Priority"));
     assert!(teams.contains("Salt"));
 
     handler
@@ -7522,7 +7523,7 @@ async fn shuffle_embed_marks_only_current_guild_low_priority_players_until_relea
         .clear_low_priority(player_ids[0], Some(GUILD), 1, None)
         .unwrap();
     let refreshed = handler.render_shuffle_embed(&pending).await.unwrap();
-    assert!(!refreshed.fields[0].value.contains("🍅 Low Priority"));
+    assert!(!refreshed.fields[0].value.contains('🍅'));
 }
 
 #[tokio::test]
@@ -7553,7 +7554,7 @@ async fn shuffle_embed_keeps_all_ten_badges_with_long_escaped_names() {
     let badges: usize = embed
         .fields
         .iter()
-        .map(|field| field.value.matches("🍅 Low Priority").count())
+        .map(|field| field.value.matches('🍅').count())
         .sum();
     assert_eq!(badges, 10);
 }
