@@ -521,7 +521,7 @@ impl Default for BalancedShuffler {
 
 #[derive(Clone, Debug, PartialEq)]
 struct RoleAssignmentMetrics {
-    role_assignments: RoleAssignment,
+    role_assignments: Arc<RoleAssignment>,
     team_value: f64,
     off_role_count: usize,
     role_values: [f64; 5],
@@ -544,7 +544,11 @@ struct ScoringContext {
     player_values: HashMap<usize, f64>,
     team_metrics: HashMap<(TeamKey, usize), Arc<Vec<RoleAssignmentMetrics>>>,
     team_summaries: HashMap<(TeamKey, usize), TeamRoleMetricsSummary>,
-    assigned_metrics: HashMap<TeamKey, HashMap<RoleAssignment, RoleAssignmentMetrics>>,
+}
+
+struct ScoredRoles {
+    score: f64,
+    pair: Option<[RoleAssignmentMetrics; 2]>,
 }
 
 struct ScoredTeams {
@@ -893,7 +897,7 @@ impl BalancedShuffler {
             }
         }
         RoleAssignmentMetrics {
-            role_assignments: roles.clone(),
+            role_assignments: Arc::new(roles.clone()),
             team_value,
             off_role_count,
             role_values,
@@ -926,10 +930,6 @@ impl BalancedShuffler {
                 .collect::<Vec<_>>(),
         );
         if let Some(key) = key {
-            let by_roles = context.assigned_metrics.entry(key).or_default();
-            for metric in metrics.iter() {
-                by_roles.insert(metric.role_assignments.clone(), metric.clone());
-            }
             context
                 .team_metrics
                 .insert((key, max_assignments), Arc::clone(&metrics));
@@ -1013,48 +1013,11 @@ impl BalancedShuffler {
         roles: &RoleAssignment,
         context: &mut ScoringContext,
     ) -> RoleAssignmentMetrics {
-        let key = team_key(players);
-        if let Some(key) = key
-            && let Some(metrics) = context
-                .assigned_metrics
-                .get(&key)
-                .and_then(|by_roles| by_roles.get(roles))
-        {
-            return metrics.clone();
-        }
         let values: Vec<f64> = players
             .iter()
             .map(|player| self.player_value(player, context))
             .collect();
-        let metrics = self.role_assignment_metrics(players, roles, &values);
-        if let Some(key) = key {
-            context
-                .assigned_metrics
-                .entry(key)
-                .or_default()
-                .insert(roles.clone(), metrics.clone());
-        }
-        metrics
-    }
-
-    /// The team value and off-role count of one assignment, without cloning
-    /// the cached metrics on a hit.
-    fn assigned_value_and_off_roles(
-        &self,
-        players: &[&Player],
-        roles: &RoleAssignment,
-        context: &mut ScoringContext,
-    ) -> (f64, usize) {
-        if let Some(key) = team_key(players)
-            && let Some(metrics) = context
-                .assigned_metrics
-                .get(&key)
-                .and_then(|by_roles| by_roles.get(roles))
-        {
-            return (metrics.team_value, metrics.off_role_count);
-        }
-        let metrics = self.assigned_metrics(players, roles, context);
-        (metrics.team_value, metrics.off_role_count)
+        self.role_assignment_metrics(players, roles, &values)
     }
 
     fn score_unconstrained_metrics(
@@ -1063,12 +1026,28 @@ impl BalancedShuffler {
         team2_metrics: &[RoleAssignmentMetrics],
         rd_priority: f64,
         value_diff_weight: f64,
-    ) -> (Option<RoleAssignment>, Option<RoleAssignment>, f64) {
+    ) -> ScoredRoles {
         self.diagnostics
             .unconstrained_score_calls
             .fetch_add(1, AtomicOrdering::Relaxed);
-        let mut best_roles1 = None;
-        let mut best_roles2 = None;
+        self.best_role_pair(
+            team1_metrics,
+            team2_metrics,
+            rd_priority,
+            value_diff_weight,
+            |score| score,
+        )
+    }
+
+    fn best_role_pair(
+        &self,
+        team1_metrics: &[RoleAssignmentMetrics],
+        team2_metrics: &[RoleAssignmentMetrics],
+        rd_priority: f64,
+        value_diff_weight: f64,
+        adjust: impl Fn(f64) -> f64,
+    ) -> ScoredRoles {
+        let mut best_pair = None;
         let mut best_score = f64::INFINITY;
         for metric1 in team1_metrics {
             for metric2 in team2_metrics {
@@ -1077,18 +1056,22 @@ impl BalancedShuffler {
                     * self.off_role_flat_penalty;
                 let matchup =
                     role_matchup_delta_from_values(&metric1.role_values, &metric2.role_values);
-                let score = value_diff * value_diff_weight
-                    + off_role_penalty
-                    + matchup * self.role_matchup_delta_weight
-                    - rd_priority;
+                let score = adjust(
+                    value_diff * value_diff_weight
+                        + off_role_penalty
+                        + matchup * self.role_matchup_delta_weight
+                        - rd_priority,
+                );
                 if score < best_score {
                     best_score = score;
-                    best_roles1 = Some(metric1.role_assignments.clone());
-                    best_roles2 = Some(metric2.role_assignments.clone());
+                    best_pair = Some((metric1, metric2));
                 }
             }
         }
-        (best_roles1, best_roles2, best_score)
+        ScoredRoles {
+            score: best_score,
+            pair: best_pair.map(|(first, second)| [first.clone(), second.clone()]),
+        }
     }
 
     fn score_role_refs(
@@ -1099,7 +1082,7 @@ impl BalancedShuffler {
         constraints: ShuffleConstraints<'_>,
         context: &mut ScoringContext,
         policy: RoleScorePolicy,
-    ) -> (Option<RoleAssignment>, Option<RoleAssignment>, f64) {
+    ) -> ScoredRoles {
         let rd_priority = policy.rd_priority.unwrap_or_else(|| {
             let mut selected = team1_players.to_vec();
             selected.extend_from_slice(team2_players);
@@ -1109,21 +1092,29 @@ impl BalancedShuffler {
         let team2_metrics = self.team_role_metrics(team2_players, max_assignments, context);
         let constrained = constraints.avoids.is_some_and(|items| !items.is_empty())
             || constraints.deals.is_some_and(|items| !items.is_empty());
-        let team1_ids = discord_ids(team1_players);
-        let team2_ids = discord_ids(team2_players);
+        let (team1_ids, team2_ids) = if constrained
+            || constraints
+                .low_priority_ids
+                .is_some_and(|ids| !ids.is_empty())
+        {
+            (discord_ids(team1_players), discord_ids(team2_players))
+        } else {
+            (HashSet::new(), HashSet::new())
+        };
         let low_priority_team_adjustment = Self::calculate_low_priority_team_adjustment(
             &team1_ids,
             &team2_ids,
             constraints.low_priority_ids,
         );
         if !constrained {
-            let (roles1, roles2, score) = self.score_unconstrained_metrics(
+            let mut best = self.score_unconstrained_metrics(
                 &team1_metrics,
                 &team2_metrics,
                 rd_priority,
                 policy.value_diff_weight,
             );
-            return (roles1, roles2, score + low_priority_team_adjustment);
+            best.score += low_priority_team_adjustment;
+            return best;
         }
 
         self.diagnostics
@@ -1145,31 +1136,13 @@ impl BalancedShuffler {
             .constraint_penalty_calls
             .fetch_add(1, AtomicOrdering::Relaxed);
 
-        let mut best_roles1 = None;
-        let mut best_roles2 = None;
-        let mut best_score = f64::INFINITY;
-        for metric1 in team1_metrics.iter() {
-            for metric2 in team2_metrics.iter() {
-                let value_diff = (metric1.team_value - metric2.team_value).abs();
-                let off_role_penalty = (metric1.off_role_count + metric2.off_role_count) as f64
-                    * self.off_role_flat_penalty;
-                let matchup =
-                    role_matchup_delta_from_values(&metric1.role_values, &metric2.role_values);
-                let score = value_diff * policy.value_diff_weight
-                    + off_role_penalty
-                    + matchup * self.role_matchup_delta_weight
-                    - rd_priority
-                    + avoid_penalty
-                    + deal_penalty
-                    + low_priority_team_adjustment;
-                if score < best_score {
-                    best_score = score;
-                    best_roles1 = Some(metric1.role_assignments.clone());
-                    best_roles2 = Some(metric2.role_assignments.clone());
-                }
-            }
-        }
-        (best_roles1, best_roles2, best_score)
+        self.best_role_pair(
+            &team1_metrics,
+            &team2_metrics,
+            rd_priority,
+            policy.value_diff_weight,
+            |score| score + avoid_penalty + deal_penalty + low_priority_team_adjustment,
+        )
     }
 
     /// Score a fixed five-versus-five matchup without constructing teams.
@@ -1184,7 +1157,7 @@ impl BalancedShuffler {
         ensure_five(team2_players)?;
         let refs1: Vec<&Player> = team1_players.iter().collect();
         let refs2: Vec<&Player> = team2_players.iter().collect();
-        Ok(self.score_role_refs(
+        let best = self.score_role_refs(
             &refs1,
             &refs2,
             max_assignments,
@@ -1194,7 +1167,17 @@ impl BalancedShuffler {
                 rd_priority: None,
                 value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
             },
-        ))
+        );
+        let (first, second) = best
+            .pair
+            .map(|[first, second]| {
+                (
+                    (*first.role_assignments).clone(),
+                    (*second.role_assignments).clone(),
+                )
+            })
+            .unzip();
+        Ok((first, second, best.score))
     }
 
     fn optimize_refs(
@@ -1206,7 +1189,7 @@ impl BalancedShuffler {
         context: &mut ScoringContext,
         rd_priority: Option<f64>,
     ) -> Result<ScoredTeams, ShufflerError> {
-        let (roles1, roles2, score) = self.score_role_refs(
+        let best = self.score_role_refs(
             team1_players,
             team2_players,
             max_assignments,
@@ -1217,34 +1200,32 @@ impl BalancedShuffler {
                 value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
             },
         );
-        let mut team1 = Team::new(
-            team1_players
-                .iter()
-                .map(|player| (*player).clone())
-                .collect(),
-            roles1.as_ref().map(role_strings),
-        )?;
-        let mut team2 = Team::new(
-            team2_players
-                .iter()
-                .map(|player| (*player).clone())
-                .collect(),
-            roles2.as_ref().map(role_strings),
-        )?;
-        if roles1.is_none() {
-            team1.ensure_role_assignments();
-        }
-        if roles2.is_none() {
-            team2.ensure_role_assignments();
-        }
-        let assigned1 = team_role_array(&team1);
-        let assigned2 = team_role_array(&team2);
-        let team1_metrics = self.assigned_metrics(team1_players, &assigned1, context);
-        let team2_metrics = self.assigned_metrics(team2_players, &assigned2, context);
+        self.materialize_scored_roles(team1_players, team2_players, best, context)
+    }
+
+    fn materialize_scored_roles(
+        &self,
+        team1_players: &[&Player],
+        team2_players: &[&Player],
+        best: ScoredRoles,
+        context: &mut ScoringContext,
+    ) -> Result<ScoredTeams, ShufflerError> {
+        let mut materialize = |players: &[&Player], metric: Option<RoleAssignmentMetrics>| {
+            let roles = metric.as_ref().map(|m| role_strings(&m.role_assignments));
+            let mut team = Team::new(players.iter().map(|p| (*p).clone()).collect(), roles)?;
+            let metric = metric.unwrap_or_else(|| {
+                team.ensure_role_assignments();
+                self.assigned_metrics(players, &team_role_array(&team), context)
+            });
+            Ok::<_, TeamError>((team, metric))
+        };
+        let (first, second) = best.pair.map(|[a, b]| (a, b)).unzip();
+        let (team1, team1_metrics) = materialize(team1_players, first)?;
+        let (team2, team2_metrics) = materialize(team2_players, second)?;
         Ok(ScoredTeams {
             team1,
             team2,
-            score,
+            score: best.score,
             team1_metrics,
             team2_metrics,
         })
@@ -1307,7 +1288,7 @@ impl BalancedShuffler {
         // with `random.choice`, so equally-balanced pools do not produce the
         // same teams on every shuffle. Mirror that instead of keeping the
         // first minimal split.
-        let mut best_matchups: Vec<ScoredTeams> = Vec::new();
+        let mut best_matchups = Vec::new();
         let mut best_score = f64::INFINITY;
         for &(team1_indices, team2_indices) in splits {
             let team1_refs = pick_refs(&refs, &team1_indices);
@@ -1321,27 +1302,36 @@ impl BalancedShuffler {
                 .lock()
                 .expect("diagnostics mutex was poisoned")
                 .push(player_keys(&team1_refs));
-            let scored = self.optimize_refs(
+            let scored = self.score_role_refs(
                 &team1_refs,
                 &team2_refs,
                 20,
                 constraints,
                 &mut context,
-                Some(rd_priority),
-            )?;
+                RoleScorePolicy {
+                    rd_priority: Some(rd_priority),
+                    value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
+                },
+            );
             if scored.score < best_score {
                 best_score = scored.score;
                 best_matchups.clear();
-                best_matchups.push(scored);
-            } else if scored.score == best_score {
-                best_matchups.push(scored);
+            }
+            if scored.score == best_score {
+                best_matchups.push((team1_indices, team2_indices, scored));
             }
         }
         if best_matchups.is_empty() {
             return Err(ShufflerError::NoMatchupEvaluated);
         }
         let chosen = (self.tie_breaker)(best_matchups.len()).min(best_matchups.len() - 1);
-        Ok(best_matchups.swap_remove(chosen))
+        let (first, second, best) = best_matchups.swap_remove(chosen);
+        self.materialize_scored_roles(
+            &pick_refs(&refs, &first),
+            &pick_refs(&refs, &second),
+            best,
+            &mut context,
+        )
     }
 
     /// Score a Draft command's eight non-captain pool without materializing
@@ -1620,7 +1610,7 @@ impl BalancedShuffler {
             team_a.extend(team_a_indices.iter().map(|index| pool_refs[*index]));
             let mut team_b = vec![captain_b];
             team_b.extend(team_b_indices.iter().map(|index| pool_refs[*index]));
-            let (_, _, score) = self.score_role_refs(
+            let best = self.score_role_refs(
                 &team_a,
                 &team_b,
                 3,
@@ -1631,8 +1621,8 @@ impl BalancedShuffler {
                     value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
                 },
             );
-            if score < best_score {
-                best_score = score;
+            if best.score < best_score {
+                best_score = best.score;
             }
         }
         Ok(best_score)
@@ -2147,7 +2137,7 @@ impl BalancedShuffler {
         constraints: ShuffleConstraints<'_>,
         context: &mut ScoringContext,
     ) -> Option<(f64, f64, usize)> {
-        let (roles1, roles2, score) = self.score_role_refs(
+        let best = self.score_role_refs(
             team1_players,
             team2_players,
             max_assignments,
@@ -2158,15 +2148,11 @@ impl BalancedShuffler {
                 value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
             },
         );
-        let (roles1, roles2) = (roles1?, roles2?);
-        let (team1_value, team1_off_roles) =
-            self.assigned_value_and_off_roles(team1_players, &roles1, context);
-        let (team2_value, team2_off_roles) =
-            self.assigned_value_and_off_roles(team2_players, &roles2, context);
+        let [first, second] = best.pair?;
         Some((
-            score + combo_penalty + recent_penalty,
-            (team1_value - team2_value).abs(),
-            team1_off_roles + team2_off_roles,
+            best.score + combo_penalty + recent_penalty,
+            (first.team_value - second.team_value).abs(),
+            first.off_role_count + second.off_role_count,
         ))
     }
 
@@ -2393,7 +2379,7 @@ impl BalancedShuffler {
                     (team1_mask & low_priority_player_mask).count_ones() as usize,
                     (team2_mask & low_priority_player_mask).count_ones() as usize,
                 );
-                let (roles1, roles2, base_score) = if use_split_bound && constrained {
+                let best = if use_split_bound && constrained {
                     let summary1 = self.team_role_metrics_summary(&team1_refs, 3, &mut context);
                     let summary2 = self.team_role_metrics_summary(&team2_refs, 3, &mut context);
                     if summary1.team_values_are_finite && summary2.team_values_are_finite {
@@ -2473,13 +2459,14 @@ impl BalancedShuffler {
                             continue;
                         }
                     }
-                    let (roles1, roles2, base_score) = self.score_unconstrained_metrics(
+                    let mut best = self.score_unconstrained_metrics(
                         &summary1.metrics,
                         &summary2.metrics,
                         rd_priority,
                         ADJUSTED_VALUE_DIFF_WEIGHT,
                     );
-                    (roles1, roles2, base_score + low_priority_team_adjustment)
+                    best.score += low_priority_team_adjustment;
+                    best
                 } else {
                     self.score_role_refs(
                         &team1_refs,
@@ -2496,31 +2483,27 @@ impl BalancedShuffler {
                 self.diagnostics
                     .branch_matchups_evaluated
                     .fetch_add(1, AtomicOrdering::Relaxed);
-                let total_score = base_score + recent_penalty + combo_penalty;
+                let total_score = best.score + recent_penalty + combo_penalty;
                 if total_score >= best_score {
                     continue;
                 }
-                let (Some(roles1), Some(roles2)) = (roles1, roles2) else {
+                let Some([first, second]) = best.pair else {
                     continue;
                 };
                 best_score = total_score;
                 best_result = PoolResult {
                     team1: Team::new(
                         team1_refs.iter().map(|player| (*player).clone()).collect(),
-                        Some(role_strings(&roles1)),
+                        Some(role_strings(&first.role_assignments)),
                     )?,
                     team2: Team::new(
                         team2_refs.iter().map(|player| (*player).clone()).collect(),
-                        Some(role_strings(&roles2)),
+                        Some(role_strings(&second.role_assignments)),
                     )?,
                     excluded: excluded.iter().map(|player| (*player).clone()).collect(),
                     score: total_score,
-                    team1_value: self
-                        .assigned_metrics(&team1_refs, &roles1, &mut context)
-                        .team_value,
-                    team2_value: self
-                        .assigned_metrics(&team2_refs, &roles2, &mut context)
-                        .team_value,
+                    team1_value: first.team_value,
+                    team2_value: second.team_value,
                 };
             }
         }
@@ -2591,8 +2574,8 @@ fn team_role_array(team: &Team) -> RoleAssignment {
         .unwrap_or_else(default_role_assignment)
 }
 
-fn pick_refs<'a>(players: &[&'a Player], indices: &[usize; 5]) -> Vec<&'a Player> {
-    indices.iter().map(|index| players[*index]).collect()
+fn pick_refs<'a>(players: &[&'a Player], indices: &[usize; 5]) -> [&'a Player; 5] {
+    indices.map(|index| players[index])
 }
 
 fn pick_refs_vec<'a>(players: &[&'a Player], indices: &[usize]) -> Vec<&'a Player> {
@@ -3036,14 +3019,14 @@ mod tests {
             &assignment,
             &[1_000.0; 5],
         );
-        let (_, _, score) = shuffler.score_unconstrained_metrics(
+        let best = shuffler.score_unconstrained_metrics(
             &[team1_metrics],
             &[team2_metrics],
             0.0,
             super::ADJUSTED_VALUE_DIFF_WEIGHT,
         );
 
-        assert_eq!(score, 1_620.0);
+        assert_eq!(best.score, 1_620.0);
     }
 
     #[test]
@@ -7509,5 +7492,32 @@ mod tests {
             assert_eq!(*cache.get(key), direct_role_assignments(key));
             assert!(cache.len() <= 2);
         }
+    }
+
+    #[test]
+    fn fixed_ten_materializes_fallback_roles_only_for_the_chosen_tie() {
+        let roles = ["5", "4", "3", "2", "1"];
+        let players: Vec<_> = (0..10)
+            .map(|i| player(format!("P{i}"), 1_500, &[roles[i % roles.len()]]))
+            .collect();
+        let shuffler = BalancedShuffler::default()
+            .with_role_assignment_provider(Arc::new(RecordingProvider::default()))
+            .with_tie_breaker(Arc::new(|count| {
+                assert_eq!(count, 126);
+                count - 1
+            }));
+
+        let (first, second) = shuffler.shuffle(&players).expect("fixed-ten shuffle");
+        assert_eq!(team_names(&first), ["P0", "P6", "P7", "P8", "P9"]);
+        assert_eq!(team_names(&second), ["P1", "P2", "P3", "P4", "P5"]);
+        assert_eq!(
+            first.role_assignments,
+            role_list(&["5", "4", "3", "2", "1"])
+        );
+        assert_eq!(
+            second.role_assignments,
+            role_list(&["4", "3", "2", "1", "5"])
+        );
+        assert_eq!(shuffler.diagnostics().role_metrics_built, 2);
     }
 }
