@@ -1,4 +1,4 @@
-//! Prewritten lines posted when no model text is available.
+//! Prewritten lobby pleas, post-game bait, and roasts.
 //!
 //! Slots are written as `{slot}` and filled with [`fill`]. A line is only
 //! picked when every slot it uses can be filled.
@@ -107,6 +107,16 @@ pub const PLEA_LINES: &[&str] = &[
     "Join and nobody mentions the last game you threw. For now.",
     "The ancient will not defend itself. Historically it does not anyway.",
     "Last plea, we swear: {needed} more and the day finally begins.",
+];
+
+/// Rare first-game lobby pleas. Slot: `{needed}`.
+pub const RIGGED_PLEA_LINES: &[&str] = &[
+    "Queue up. Jeff changed his name to Chobo and now I have to rig this thing twice.",
+    "Toasty asked for a fair shuffle. Get in here, I need a witness.",
+    "Need {needed} more. I put five mids on Jeff's team and somebody has to buy a ward.",
+    "Queue up before Toasty notices both sides of the coin say Dire.",
+    "Chobo asked to see the shuffle code. Somebody join so I can close this tab.",
+    "Need {needed} more. The envelope marked 'Toasty gets last pick' isn't going to open itself.",
 ];
 
 /// Post-game bait blaming one loser. Slot: `{loser}`.
@@ -420,6 +430,7 @@ mod tests {
 
     const POOLS: &[(&str, &[&str], &[&str], usize)] = &[
         ("plea", PLEA_LINES, &["lobby", "in", "needed"], 100),
+        ("rigged plea", RIGGED_PLEA_LINES, &["needed"], 6),
         ("blame", BAIT_BLAME_LOSER, &["loser"], 20),
         ("crown", BAIT_CROWN_WINNER, &["winner"], 15),
         ("versus", BAIT_VERSUS, &["winner", "loser"], 15),
@@ -458,8 +469,8 @@ mod tests {
                 );
             }
         }
-        let bait = POOLS[1..8].iter().map(|pool| pool.1.len()).sum::<usize>();
-        let roasts = POOLS[8..].iter().map(|pool| pool.1.len()).sum::<usize>();
+        let bait = POOLS[2..9].iter().map(|pool| pool.1.len()).sum::<usize>();
+        let roasts = POOLS[9..].iter().map(|pool| pool.1.len()).sum::<usize>();
         assert!(bait >= 100 && roasts >= 100);
     }
 

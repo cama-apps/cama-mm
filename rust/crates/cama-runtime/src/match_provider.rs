@@ -76,15 +76,16 @@ use cama_db::rating_history_repository::RatingHistoryRepository;
 use cama_db::shop_runtime::ShopRuntimeRepository;
 use cama_db::soft_avoid_repository::SoftAvoidRepository;
 use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
-use cama_domain::discord_content::chunk_default_discord_content;
+use cama_domain::discord_content::{chunk_default_discord_content, chunk_discord_content};
 use cama_domain::dota_hosting::DotaHostingOptions;
 use cama_domain::dota_lobby::{STEAM_INDIVIDUAL_BASE, account_id as dota_account_id};
 use cama_domain::economy_scaling::{
     rate_basis_points, rate_percentage_points, scale_minigame_jc_delta,
 };
+use cama_domain::embed_safety::FIELD_VALUE_LIMIT;
 use cama_domain::formatting::{
-    BettingDisplayOptions, JOPACOIN_EMOTE, ROLE_EMOJIS, ROLE_NAMES, escape_discord_text,
-    format_betting_display,
+    BettingDisplayOptions, JOPACOIN_EMOTE, LOW_PRIORITY_BADGE, ROLE_EMOJIS, ROLE_NAMES,
+    escape_discord_text, format_betting_display,
 };
 use cama_domain::guild_config::GuildConfigStore;
 use cama_domain::openskill::{CamaOpenSkillSystem, OpenSkillError, Rating as OpenSkillRating};
@@ -5333,6 +5334,7 @@ impl MatchHandler {
             .copied()
             .collect::<Vec<_>>();
         let players_repository = self.players.clone();
+        let low_priority = self.low_priority.clone();
         let guild_id = pending.guild_id;
         let shuffled_by_id = pending
             .state
@@ -5345,8 +5347,15 @@ impl MatchHandler {
         player_ids.sort_unstable();
         player_ids.dedup();
         let player_ids_for_query = player_ids.clone();
-        let players = tokio::task::spawn_blocking(move || {
-            players_repository.get_by_ids(&player_ids_for_query, Some(guild_id))
+        let (players, low_priority_ids) = tokio::task::spawn_blocking(move || {
+            let players = players_repository.get_by_ids(&player_ids_for_query, Some(guild_id))?;
+            let badges = low_priority
+                .get_active_ids(&participant_ids, Some(guild_id))
+                .unwrap_or_else(|error| {
+                    warn!(%error, guild_id, "could not load low-priority badges for shuffle embed");
+                    Default::default()
+                });
+            Ok::<_, cama_db::core_repositories::CoreRepositoryError>((players, badges))
         })
         .await
         .map_err(|error| format!("shuffle embed player task failed: {error}"))?
@@ -5380,7 +5389,11 @@ impl MatchHandler {
                     )
                 },
             );
-            let name = if on_role { format!("**{name}**") } else { name };
+            let mut name = if on_role { format!("**{name}**") } else { name };
+            if low_priority_ids.contains(&player_id) {
+                name.push(' ');
+                name.push_str(LOW_PRIORITY_BADGE);
+            }
             let warning = if on_role { "" } else { " ⚠️" };
             if pending.state.balancing_rating_system == "jopacoin" {
                 let balance = player.map_or(0, |player| player.jopacoin_balance);
@@ -5464,17 +5477,17 @@ impl MatchHandler {
                 pending.pending_match_id
             )
         };
-        let mut embed = InteractionEmbed::titled(title)
-            .color(if pending.state.is_bomb_pot {
-                DISCORD_ORANGE
-            } else {
-                DISCORD_BLUE
-            })
-            .field(
-                format!("🟢 Radiant ({radiant_sum:.0})  |  🔴 Dire ({dire_sum:.0})"),
-                format!("{first_pick_emoji} **First Pick: {first_pick}**\n\n{head_to_head}"),
-                false,
-            );
+        let mut embed = InteractionEmbed::titled(title).color(if pending.state.is_bomb_pot {
+            DISCORD_ORANGE
+        } else {
+            DISCORD_BLUE
+        });
+        let team_title = format!("🟢 Radiant ({radiant_sum:.0})  |  🔴 Dire ({dire_sum:.0})");
+        let teams = format!("{first_pick_emoji} **First Pick: {first_pick}**\n\n{head_to_head}");
+        for value in chunk_discord_content(&teams, FIELD_VALUE_LIMIT).expect("positive field limit")
+        {
+            embed = embed.field(&team_title, value, false);
+        }
         if let Some(options) = pending
             .state
             .extra

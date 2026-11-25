@@ -4522,9 +4522,9 @@ fn production_goodness_weights_team_value_and_role_deltas() {
     let goodness =
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
-    // 100 value difference at 5.2 plus a 100 lane-matchup delta at 0.30;
-    // subtract 29% of the 15,100 total active rating.
-    assert!((goodness - (-3_829.0)).abs() < 1e-9, "{goodness}");
+    // 100 value difference at 5.7 plus a 100 lane-matchup delta at 0.36;
+    // subtract 32% of the 15,100 total active rating.
+    assert!((goodness - (-4_226.0)).abs() < 1e-9, "{goodness}");
 }
 
 #[test]
@@ -7488,6 +7488,74 @@ async fn shuffle_embed_names_the_player_who_shuffled() {
             .value
             .contains("**Shuffled by:** Shuffler Server Name")
     );
+}
+
+#[tokio::test]
+async fn shuffle_embed_marks_only_current_guild_low_priority_players_until_release() {
+    use cama_db::low_priority_repository::SetLowPriorityInput;
+
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    let pending = fixture
+        .prepare_shuffle(player_ids.clone(), "glicko", Vec::new())
+        .pending;
+    let handler = &fixture.provider.handler;
+    for (id, guild, name) in [
+        (player_ids[0], GUILD, "Pepper"),
+        (player_ids[1], GUILD + 1, "Salt"),
+    ] {
+        discord.set_member(GUILD as u64, id as u64, name);
+        handler
+            .low_priority
+            .set_low_priority(&SetLowPriorityInput::new(id, Some(guild), 1, None))
+            .unwrap();
+    }
+    let embed = handler.render_shuffle_embed(&pending).await.unwrap();
+    let teams = &embed.fields[0].value;
+    assert_eq!(teams.matches("🍅 Low Priority").count(), 1);
+    assert!(teams.contains("Pepper** 🍅 Low Priority") || teams.contains("Pepper 🍅 Low Priority"));
+    assert!(teams.contains("Salt"));
+
+    handler
+        .low_priority
+        .clear_low_priority(player_ids[0], Some(GUILD), 1, None)
+        .unwrap();
+    let refreshed = handler.render_shuffle_embed(&pending).await.unwrap();
+    assert!(!refreshed.fields[0].value.contains("🍅 Low Priority"));
+}
+
+#[tokio::test]
+async fn shuffle_embed_keeps_all_ten_badges_with_long_escaped_names() {
+    use cama_db::low_priority_repository::SetLowPriorityInput;
+
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    let pending = fixture
+        .prepare_shuffle(player_ids.clone(), "jopacoin", Vec::new())
+        .pending;
+    let handler = &fixture.provider.handler;
+    for id in player_ids {
+        discord.set_member(GUILD as u64, id as u64, &"*".repeat(32));
+        handler
+            .low_priority
+            .set_low_priority(&SetLowPriorityInput::new(id, Some(GUILD), 1, None))
+            .unwrap();
+    }
+    let embed = handler.render_shuffle_embed(&pending).await.unwrap();
+    assert!(
+        embed
+            .fields
+            .iter()
+            .all(|field| field.value.chars().count() <= 1024)
+    );
+    let badges: usize = embed
+        .fields
+        .iter()
+        .map(|field| field.value.matches("🍅 Low Priority").count())
+        .sum();
+    assert_eq!(badges, 10);
 }
 
 #[tokio::test]

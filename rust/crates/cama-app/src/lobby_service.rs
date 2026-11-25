@@ -10,7 +10,7 @@
 //! sections -- never across persistence or moderation I/O -- so the many
 //! readers that run on Tokio async workers never wait on the database.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -54,6 +54,10 @@ pub trait LobbyPlayerPort {
     fn glicko_rating(&self, player_id: UserId, guild_id: GuildId) -> Option<f64>;
 
     fn get_by_ids(&self, player_ids: &[UserId], guild_id: GuildId) -> Vec<LobbyPlayer>;
+
+    fn active_low_priority_ids(&self, _player_ids: &[i64], _guild_id: GuildId) -> HashSet<i64> {
+        HashSet::new()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -985,6 +989,13 @@ where
                 }
             }
         }
+        let discord_ids: Vec<_> = player_ids.iter().map(|player_id| player_id.0).collect();
+        let low_priority = self
+            .player_port
+            .active_low_priority_ids(&discord_ids, lobby.scope.guild_id);
+        for player in &mut players {
+            player.low_priority = low_priority.contains(&player.discord_id);
+        }
         let bonus_pool_preview = preview_port.map(|port| {
             port.first_game_pool_previews(lobby.scope.guild_id, DOTA_BET_SEED_AMOUNT)
                 .for_kind(lobby.scope.kind)
@@ -1000,10 +1011,7 @@ where
                 bonus_pool_preview,
             },
             &players,
-            &player_ids
-                .iter()
-                .map(|player_id| player_id.0)
-                .collect::<Vec<_>>(),
+            &discord_ids,
             None,
         )
     }

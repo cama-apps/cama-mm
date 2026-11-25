@@ -5,7 +5,7 @@
 //! transport-neutral Discord port. Construction hydrates durable `lobby_state`
 //! before any gateway connection.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -38,6 +38,7 @@ use cama_app::readycheck::{
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::curfew::CurfewRepository;
 use cama_db::dota_bet_seed_repository::DotaBetSeedRepository;
+use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::moderation::{
     LobbySuspension, ModerationRepository, ModerationSource, SuspensionCompletion, SuspensionScope,
 };
@@ -222,12 +223,14 @@ impl LobbyPersistencePort for SqliteLobbyPersistence {
 #[derive(Clone, Debug)]
 pub struct SqliteLobbyPlayers {
     repository: PlayerRepository,
+    low_priority: LowPriorityRepository,
 }
 
 impl SqliteLobbyPlayers {
     fn new(path: impl AsRef<Path>) -> Self {
         Self {
-            repository: PlayerRepository::new(path),
+            repository: PlayerRepository::new(path.as_ref()),
+            low_priority: LowPriorityRepository::new(path),
         }
     }
 
@@ -264,6 +267,7 @@ impl LobbyPlayerPort for SqliteLobbyPlayers {
                 Some(LobbyPlayer {
                     discord_id,
                     name: player.name,
+                    low_priority: false,
                     glicko_rating: player.glicko_rating,
                     mmr: player.mmr.and_then(|mmr| i32::try_from(mmr).ok()),
                     preferred_roles: player
@@ -276,6 +280,15 @@ impl LobbyPlayerPort for SqliteLobbyPlayers {
                 })
             })
             .collect()
+    }
+
+    fn active_low_priority_ids(&self, player_ids: &[i64], guild_id: AppGuildId) -> HashSet<i64> {
+        self.low_priority
+            .get_active_ids(player_ids, Some(guild_id.0))
+            .unwrap_or_else(|error| {
+                warn!(%error, guild_id = guild_id.0, "could not load low-priority lobby badges");
+                HashSet::new()
+            })
     }
 }
 
