@@ -696,16 +696,24 @@ mod tests {
 
     #[test]
     fn test_role_performance_scales_the_value_of_an_on_role_player() {
-        // A proven carry is scaled up; an unproven one keeps their rating. The
-        // multiplier now applies on-role too, which the old off-role-only
-        // multiplier never did.
+        // A carry who wins more there than in their other role is scaled up;
+        // an unproven one keeps their rating. The multiplier applies on-role
+        // too, which the old off-role-only multiplier never did.
+        use crate::role_performance::RoleRecord;
+        // 20-0 on carry against 0-20 on mid: 50 points above their overall
+        // form at half weight, a factor of 1.05.
         let mut proven = player("P1", 2_000, &["1"]);
-        proven.role_records.insert(
-            "1".to_owned(),
-            crate::role_performance::RoleRecord::new(10, 0),
-        );
+        proven.role_records = [
+            ("1".to_owned(), RoleRecord::new(20, 0)),
+            ("2".to_owned(), RoleRecord::new(0, 20)),
+        ]
+        .into();
         let mut unproven = player("P1", 2_000, &["1"]);
         unproven.role_records.clear();
+        // Unbeaten in the only role they have ever played: that record is how
+        // they earned the rating, so it must not be counted a second time.
+        let mut specialist = player("P1", 2_000, &["1"]);
+        specialist.role_records = [("1".to_owned(), RoleRecord::new(10, 0))].into();
 
         let build = |first: Player| {
             Team::new(
@@ -725,10 +733,16 @@ mod tests {
             build(proven)
                 .get_team_value(false, 1.0, false, false)
                 .expect("roles are assigned"),
-            2_200.0
+            2_100.0
         );
         assert_eq!(
             build(unproven)
+                .get_team_value(false, 1.0, false, false)
+                .expect("roles are assigned"),
+            2_000.0
+        );
+        assert_eq!(
+            build(specialist)
                 .get_team_value(false, 1.0, false, false)
                 .expect("roles are assigned"),
             2_000.0
@@ -739,14 +753,16 @@ mod tests {
     fn test_role_performance_uses_the_assigned_role_not_the_preferred_one() {
         // The record that matters is the one for the role being assigned, so
         // moving the same player to another position changes their value.
+        // 20-0 on carry and 0-20 on mid, beside even records elsewhere, leave
+        // the overall record at 50%: carry is worth 1.05 and mid 0.95.
         let mut versatile = player("P1", 1_000, &["1", "2"]);
         versatile.role_records.insert(
             "1".to_owned(),
-            crate::role_performance::RoleRecord::new(10, 0),
+            crate::role_performance::RoleRecord::new(20, 0),
         );
         versatile.role_records.insert(
             "2".to_owned(),
-            crate::role_performance::RoleRecord::new(0, 10),
+            crate::role_performance::RoleRecord::new(0, 20),
         );
         let team = Team::new(
             vec![
@@ -763,14 +779,14 @@ mod tests {
         let (_, as_carry) = team
             .get_player_by_role_with_off_role_value_penalty("1", false, 1.0, false, false, 0.0)
             .expect("roles are assigned");
-        assert_eq!(as_carry, 1_100.0);
+        assert_eq!(as_carry, 1_050.0);
 
         let mut swapped = team.clone();
         swapped.role_assignments = Some(["2", "1", "3", "4", "5"].map(str::to_owned).to_vec());
         let (_, as_mid) = swapped
             .get_player_by_role_with_off_role_value_penalty("2", false, 1.0, false, false, 0.0)
             .expect("roles are assigned");
-        assert_eq!(as_mid, 900.0);
+        assert_eq!(as_mid, 950.0);
     }
 
     #[test]

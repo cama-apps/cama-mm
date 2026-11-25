@@ -42,9 +42,9 @@ pub struct Player {
     pub first_leverage_used: bool,
     pub is_solo_grinder: bool,
     pub solo_grinder_checked_at: Option<String>,
-    /// Win/loss record per role this player has been assigned, keyed by role
-    /// ("1".."5"). Absent roles mean no recorded sample, which the role factor
-    /// treats as unproven. Empty for players loaded outside team balancing.
+    /// Win/loss record per role this player has actually played, keyed by
+    /// role ("1".."5"). Absent roles mean no recorded sample, which leaves the
+    /// role factor neutral. Empty for players loaded outside team balancing.
     pub role_records: BTreeMap<String, RoleRecord>,
     /// Matchmaking-only strength multiplier applied on top of the selected
     /// rating, where `None` is neutral.
@@ -115,14 +115,31 @@ impl Player {
         self.mmr.map_or(0.0, |mmr| mmr as f64)
     }
 
-    /// The rating multiplier for being assigned `role`, from this player's win
-    /// rate in that role.
+    /// This player's combined record across every role they have played: the
+    /// form each single role is measured against.
+    #[must_use]
+    pub fn overall_role_record(&self) -> RoleRecord {
+        RoleRecord::total(self.role_records.values())
+    }
+
+    /// The rating multiplier for being assigned `role`, from how this player's
+    /// win rate in that role compares with their win rate across all roles.
     ///
-    /// A player without the minimum sample in `role` keeps their rating, while
-    /// a proven record scales it up or down.
+    /// A player without the minimum sample in `role` keeps their rating, as
+    /// does one who wins there exactly as often as everywhere else - so a
+    /// one-role player is never scaled. Otherwise their better roles scale the
+    /// rating up and their worse ones scale it down.
     #[must_use]
     pub fn role_factor_for(&self, role: &str) -> f64 {
-        role_factor(self.role_records.get(role).copied().unwrap_or_default())
+        match self.role_records.get(role) {
+            // Checked before summing: this runs once per player per candidate
+            // role assignment, so a role under the minimum sample - neutral
+            // whatever the rest of the record says - skips the total.
+            Some(record) if record.has_minimum_sample() => {
+                role_factor(*record, self.overall_role_record())
+            }
+            _ => 1.0,
+        }
     }
 
     /// This player's effective value when assigned `role`, after the
@@ -184,6 +201,7 @@ impl Display for Player {
 #[cfg(test)]
 mod tests {
     use super::{OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU, Player};
+    use crate::role_performance::RoleRecord;
 
     #[test]
     fn test_player_value_rating_sources() {
@@ -355,6 +373,51 @@ mod tests {
             player.role_adjusted_value("1", true, false, false),
             expected
         );
+    }
+
+    #[test]
+    fn test_one_role_player_keeps_their_rating_whatever_their_record() {
+        // A climb played entirely on mid: the wins are already in the rating,
+        // so a lopsided record in the only role played must not add to it.
+        let specialist = Player {
+            glicko_rating: Some(3_075.0),
+            role_records: [("2".to_owned(), RoleRecord::new(57, 24))].into(),
+            ..Player::new("Specialist")
+        };
+
+        assert_eq!(specialist.overall_role_record(), RoleRecord::new(57, 24));
+        assert_eq!(specialist.role_factor_for("2"), 1.0);
+        assert_eq!(
+            specialist.role_adjusted_value("2", true, false, false),
+            3_075.0
+        );
+        // A role never played has no sample, so it is neutral too.
+        assert_eq!(specialist.role_factor_for("1"), 1.0);
+    }
+
+    #[test]
+    fn test_role_factor_measures_each_role_against_the_players_overall_record() {
+        // 15-5 on carry and 5-15 on mid: 50% overall, so carry is 25 points
+        // above their form and mid 25 below, each at half weight.
+        let flex = Player {
+            glicko_rating: Some(2_000.0),
+            role_records: [
+                ("1".to_owned(), RoleRecord::new(15, 5)),
+                ("2".to_owned(), RoleRecord::new(5, 15)),
+                // Under the minimum sample: counted in the overall record but
+                // never scaled itself.
+                ("3".to_owned(), RoleRecord::new(2, 2)),
+            ]
+            .into(),
+            ..Player::new("Flex")
+        };
+
+        assert_eq!(flex.overall_role_record(), RoleRecord::new(22, 22));
+        assert!((flex.role_factor_for("1") - 1.025).abs() < 1e-9);
+        assert!((flex.role_factor_for("2") - 0.975).abs() < 1e-9);
+        assert_eq!(flex.role_factor_for("3"), 1.0);
+        assert!((flex.role_adjusted_value("1", true, false, false) - 2_050.0).abs() < 1e-9);
+        assert!((flex.role_adjusted_value("2", true, false, false) - 1_950.0).abs() < 1e-9);
     }
 
     #[test]
