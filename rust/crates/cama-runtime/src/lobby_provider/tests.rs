@@ -5810,6 +5810,56 @@ async fn lobby_rosters_resolve_cold_cache_names_and_reject_historical_identifier
 }
 
 #[tokio::test]
+async fn lobby_roster_shows_current_low_priority_only_in_the_assigning_guild() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Joiner")]);
+    let transport = Arc::new(RecordingTransport::default());
+    for (user_id, name) in [(10, "Creator"), (20, "Joiner")] {
+        transport.set_user(DiscordUserSnapshot {
+            user_id,
+            display_name: name.to_owned(),
+            account_username: name.to_owned(),
+            is_bot: false,
+        });
+    }
+    let low_priority = LowPriorityRepository::new(database.path());
+    for (id, guild) in [(10, 42), (20, 43)] {
+        low_priority
+            .set_low_priority(&SetLowPriorityInput::new(id, Some(guild), 900, None))
+            .unwrap();
+    }
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 10, "Creator", Vec::new()).await;
+    join_via_button(&provider, LobbyKind::Open, 20, "Joiner").await;
+    let roster = || {
+        let state = transport.state.lock().unwrap();
+        state.edits.last().unwrap().2.response.embeds[0].fields[0]
+            .value
+            .clone()
+    };
+    let active = roster();
+    assert!(active.contains("Creator 🍅"), "{active}");
+    assert!(!active.contains("Low Priority"), "{active}");
+    assert!(active.contains("Joiner"), "{active}");
+    assert_eq!(active.matches('🍅').count(), 1);
+
+    assert!(
+        low_priority
+            .clear_low_priority(10, Some(42), 900, None)
+            .unwrap()
+    );
+    let scope = lobby_snapshot(&provider, LobbyKind::Open).scope;
+    provider
+        .handler
+        .state
+        .sync_lobby_display(scope)
+        .await
+        .unwrap();
+    let cleared = roster();
+    assert!(cleared.contains("Creator"), "{cleared}");
+    assert!(!cleared.contains('🍅'), "{cleared}");
+}
+
+#[tokio::test]
 async fn invalid_cached_lobby_name_is_replaced_by_live_member_lookup() {
     let database = database_with_players(&[(10, "Stored Name")]);
     let transport = Arc::new(RecordingTransport::default());

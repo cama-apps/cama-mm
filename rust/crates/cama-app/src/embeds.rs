@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::draft_analysis::draft_winner;
-use cama_domain::embed_safety::{EmbedModel, FIELD_VALUE_LIMIT, truncate_field};
-use cama_domain::formatting::{JOPACOIN_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI, escape_discord_text};
+use cama_domain::embed_safety::{EmbedModel, FIELD_VALUE_LIMIT, add_lines_field, truncate_field};
+use cama_domain::formatting::{
+    JOPACOIN_EMOTE, LOW_PRIORITY_BADGE, ROLE_EMOJIS, TOMBSTONE_EMOJI, escape_discord_text,
+};
 use cama_domain::hero_catalog::hero_name;
 use cama_domain::rating::CamaRatingSystem;
 
@@ -42,6 +44,7 @@ impl LobbyKind {
 pub struct LobbyPlayer {
     pub discord_id: i64,
     pub name: String,
+    pub low_priority: bool,
     pub glicko_rating: Option<f64>,
     pub mmr: Option<i32>,
     pub preferred_roles: Vec<u8>,
@@ -54,6 +57,7 @@ impl LobbyPlayer {
         Self {
             discord_id,
             name: name.into(),
+            low_priority: false,
             glicko_rating: None,
             mmr: None,
             preferred_roles: Vec::new(),
@@ -180,6 +184,10 @@ pub fn format_player_list(
                 escape_discord_text(readable_player_name(&player.name).unwrap_or(UNKNOWN_PLAYER));
             let display = format!("{tombstone}{name}");
             let mut line = format!("{}. {display}", index + 1);
+            if player.low_priority {
+                line.push(' ');
+                line.push_str(LOW_PRIORITY_BADGE);
+            }
             if player.glicko_rating.is_some() {
                 line.push_str(&format!(" [{}]", rating_system.rating_to_display(rating)));
             }
@@ -251,14 +259,19 @@ pub fn create_lobby_embed(
     };
     let (player_list, _) =
         format_player_list(players, player_ids, bankruptcy_source, request.guild_id);
-    embed.add_field(
-        format!("**Players ({})** ⚔️", request.regular_count),
-        if players.is_empty() {
-            "No players yet".to_owned()
-        } else {
-            truncate_field(&player_list, FIELD_VALUE_LIMIT)
-        },
+    // A full roster with badges can span multiple fields. Reserve room for
+    // the rest of the embed even when the lobby cap is configured unusually high.
+    let roster = if players.is_empty() {
+        "No players yet".to_owned()
+    } else {
+        truncate_field(&player_list, 4 * FIELD_VALUE_LIMIT)
+    };
+    add_lines_field(
+        &mut embed,
+        &format!("**Players ({})** ⚔️", request.regular_count),
+        &roster.lines().map(str::to_owned).collect::<Vec<_>>(),
         false,
+        FIELD_VALUE_LIMIT,
     );
     if let Some(bonus_pool) = request.bonus_pool_preview {
         embed.add_field(
@@ -788,6 +801,41 @@ mod tests {
                 .as_deref()
                 .is_some_and(|description| description.starts_with("Glicko below 1400\n"))
         );
+    }
+
+    #[test]
+    fn full_lobby_keeps_every_badge_and_player_when_the_roster_spans_fields() {
+        let ids: Vec<_> = (1..=20).collect();
+        let players: Vec<_> = ids
+            .iter()
+            .map(|&id| {
+                let mut player = LobbyPlayer::new(id, format!("Player with a long nickname {id}"));
+                player.glicko_rating = Some(1_000.0);
+                player.preferred_roles = (1..=5).collect();
+                player.low_priority = true;
+                player
+            })
+            .collect();
+        let embed = create_lobby_embed(
+            LobbyEmbedRequest {
+                regular_count: players.len(),
+                ..LobbyEmbedRequest::default()
+            },
+            &players,
+            &ids,
+            None,
+        );
+        assert!(cama_domain::embed_safety::validate_embed(&embed).is_empty());
+        assert!(embed.fields[1].value.contains(LOW_PRIORITY_BADGE));
+        let roster = embed
+            .fields
+            .iter()
+            .map(|field| field.value.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for player in players {
+            assert!(roster.contains(&format!("{} {LOW_PRIORITY_BADGE}", player.name)));
+        }
     }
 
     #[test]

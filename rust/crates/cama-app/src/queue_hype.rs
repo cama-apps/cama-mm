@@ -1,7 +1,7 @@
 //! Lobby pleas and post-game bait meant to get players queuing.
 //!
-//! Text is model-written when an AI service is available and otherwise
-//! comes from the prewritten pools, so a message is always produced.
+//! Prewritten lines cover the occasional first-game Easter egg and any
+//! plea or post-game bait for which model text is unavailable.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -12,14 +12,14 @@ use crate::ai_services::{AIService, FlavorPersona, betting_personas, contains_li
 use crate::duel_flavor::sanitize_detail;
 use crate::flavor_lines::{
     BAIT_BET_LOST, BAIT_BLAME_LOSER, BAIT_CROWN_WINNER, BAIT_GENERIC, BAIT_STREAK, BAIT_UPSET,
-    BAIT_VERSUS, PLEA_LINES, fill, mix, pick_line,
+    BAIT_VERSUS, PLEA_LINES, RIGGED_PLEA_LINES, fill, mix, pick_line,
 };
 
 const PLEA_FEATURE: &str = "queue_hype.plea";
 const HYPE_FEATURE: &str = "queue_hype.post_match";
 const PLEA_MAX_CHARS: usize = 240;
 const HYPE_MAX_CHARS: usize = 400;
-/// Prewritten pleas that must be used before one of them can come up again.
+/// Number of recent prewritten pleas considered when choosing a fresh line.
 const RECENT_PLEAS: usize = 40;
 const TEMPERATURE: f64 = 0.9;
 /// Recorded matches that get a post-game message, out of every ten.
@@ -76,23 +76,31 @@ impl QueueHype {
     /// A plea for the day's first lobby. Blocking; never empty.
     #[must_use]
     pub fn plea(&self, facts: &PleaFacts, seed: u64) -> String {
+        if mix(seed.wrapping_add(1)).is_multiple_of(20) {
+            return self.prewritten_plea(RIGGED_PLEA_LINES, facts, seed);
+        }
         let (system, prompt) = plea_prompt(facts, seed);
         self.model_line(&system, &prompt, PLEA_FEATURE, &facts.names, PLEA_MAX_CHARS)
-            .unwrap_or_else(|| self.plea_fallback(facts, seed))
+            .unwrap_or_else(|| self.prewritten_plea(PLEA_LINES, facts, seed))
     }
 
-    /// A prewritten plea that was not among the last [`RECENT_PLEAS`] posted.
-    fn plea_fallback(&self, facts: &PleaFacts, seed: u64) -> String {
-        let start = (mix(seed) % PLEA_LINES.len() as u64) as usize;
+    /// Prefer a fresh line, or the least recently posted if the pool is exhausted.
+    fn prewritten_plea(&self, pool: &[&'static str], facts: &PleaFacts, seed: u64) -> String {
+        let start = (mix(seed) % pool.len() as u64) as usize;
         let template = {
             let mut recent = self
                 .recent_pleas
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            let template = (0..PLEA_LINES.len())
-                .map(|offset| PLEA_LINES[(start + offset) % PLEA_LINES.len()])
+            let choices = pool[start..].iter().chain(&pool[..start]).copied();
+            let template = choices
+                .clone()
                 .find(|line| !recent.contains(line))
-                .unwrap_or(PLEA_LINES[start]);
+                .unwrap_or_else(|| {
+                    choices
+                        .min_by_key(|line| recent.iter().rposition(|past| past == line))
+                        .expect("prewritten plea pools are nonempty")
+                });
             if recent.len() >= RECENT_PLEAS {
                 recent.pop_front();
             }
@@ -480,6 +488,34 @@ mod tests {
         for line in &lines {
             assert!(!line.is_empty() && !line.contains('{'), "{line}");
         }
+    }
+
+    #[test]
+    fn rigging_pleas_are_rare_and_run_before_the_model() {
+        let (online, provider) = hype_with(Ok("Join already."));
+        let offline = QueueHype::new(None);
+        let facts = plea_facts();
+        let rigging_lines = RIGGED_PLEA_LINES
+            .iter()
+            .map(|line| fill(line, &[("needed", "2")]))
+            .collect::<std::collections::BTreeSet<_>>();
+        let first = online.plea(&facts, 28);
+        assert!(rigging_lines.contains(&first));
+        assert_eq!(first, offline.plea(&facts, 28));
+        assert!(provider.requests.lock().expect("requests").is_empty());
+        assert_eq!(online.plea(&facts, 1), "Join already.");
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut count = 0;
+        for seed in 0..4_000 {
+            let line = offline.plea(&facts, seed);
+            if rigging_lines.contains(&line) {
+                seen.insert(line);
+                count += 1;
+            }
+        }
+        assert_eq!(seen, rigging_lines);
+        assert!((180..=220).contains(&count), "{count} rigging pleas");
     }
 
     #[test]
